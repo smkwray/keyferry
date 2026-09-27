@@ -9,7 +9,7 @@ use crate::input_sequence::{parse_strict_json_value, validate_action_shape, MAX_
 use crate::text_stream::{replace_unsupported_text, UnsupportedTextPolicy};
 use crate::{
     canonicalize_input_sequence_keys, canonicalize_sequence_keys, compile_input_sequence,
-    compile_sequence, plan_text_us, InputAction, InputArmPolicy, InputError, InputKeyboardTiming,
+    compile_sequence, InputAction, InputArmPolicy, InputError, InputKeyboardTiming,
     InputLeafAction, InputSequenceV1, KeyboardSequenceV1, SequenceAction, SequenceArmPolicy,
     SequenceLeafAction, TypingTiming, INPUT_SEQUENCE_SCHEMA_V1, LEGACY_WIRE_MAPPING,
     SEQUENCE_SCHEMA_V1,
@@ -27,6 +27,12 @@ pub const MAX_PARAMETER_NAME_CHARS: usize = 32;
 pub const MAX_PARAMETER_CHARS: u64 = 4096;
 pub const DEFAULT_PARAMETER_CHARS: u64 = 256;
 pub const DEFAULT_START_WITHIN_MS: u64 = 5000;
+/// The expanded request body shares the hand-written request cap.
+const MAX_EXPANDED_BODY_BYTES: usize = MAX_INPUT_BYTES;
+/// Validation's parameter placeholder. Every supported parameter character costs one keystroke,
+/// and `"` has the largest JSON encoding among them (two bytes, as do backslash, TAB, LF, and
+/// CR), so it is the worst case for every command limit and for the body size at once.
+const WORST_CASE_CHARACTER: &str = "\"";
 /// Fixed UUIDv7 used only for no-contact validation; a run always supplies a fresh one.
 const VALIDATION_COMMAND_ID: &str = "00000000-0000-7000-8000-000000000000";
 
@@ -310,13 +316,13 @@ pub fn check_file_stem(recipe: &RecipeV1, stem: &str) -> Result<(), RecipeError>
     Ok(())
 }
 
-/// Worst-case compilation: every parameter at its `max_chars` of `a`, the costliest supported
-/// character. A passing recipe cannot exceed a command limit with any allowed parameter value.
+/// Worst-case compilation: every parameter at its `max_chars` of [`WORST_CASE_CHARACTER`]. A
+/// passing recipe cannot exceed a command limit or the body size with any allowed parameter value.
 pub fn validate(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
     let values: Vec<String> = recipe
         .parameters
         .iter()
-        .map(|parameter| "a".repeat(parameter.max_chars() as usize))
+        .map(|parameter| WORST_CASE_CHARACTER.repeat(parameter.max_chars() as usize))
         .collect();
     compile(recipe, &values, VALIDATION_COMMAND_ID, 0).map(|expanded| expanded.summary)
 }
@@ -336,8 +342,9 @@ pub fn parse_params(bytes: &[u8]) -> Result<Params, RecipeError> {
 }
 
 /// Validates the recipe, substitutes the caller's parameter values, and compiles one
-/// command-scoped request under [`LEGACY_WIRE_MAPPING`] with canonical key names. Unsupported
-/// parameter characters reject unless the caller explicitly selects replacement.
+/// command-scoped request under [`LEGACY_WIRE_MAPPING`] with canonical key names. A parameter
+/// character outside the text-stream rule (printable ASCII, TAB, LF, CR) is unsupported under
+/// both policies: it rejects unless the caller explicitly selects replacement.
 pub fn expand(
     recipe: &RecipeV1,
     params: &Params,
@@ -367,18 +374,13 @@ pub fn expand(
         if value.chars().count() as u64 > parameter.max_chars() {
             return Err(RecipeError::at("params.too_long", index));
         }
-        values.push(match unsupported {
-            UnsupportedTextPolicy::Reject => {
-                plan_text_us(value, TypingTiming::DESKTOP_SAFE)
-                    .map_err(|_| RecipeError::at("text.unsupported_character", index))?;
-                value.clone()
-            }
-            UnsupportedTextPolicy::Replace => {
-                let (value, count) = replace_unsupported_text(value);
-                replacements = replacements.saturating_add(count);
-                value
-            }
-        });
+        // One definition of unsupported for both policies: the text-stream replacement rule.
+        let (value, count) = replace_unsupported_text(value);
+        if count > 0 && unsupported == UnsupportedTextPolicy::Reject {
+            return Err(RecipeError::at("text.unsupported_character", index));
+        }
+        replacements = replacements.saturating_add(count);
+        values.push(value);
     }
     compile(recipe, &values, command_id, replacements)
 }
@@ -392,6 +394,12 @@ fn compile(
     let mut used = vec![false; recipe.parameters.len()];
     let actions = build_actions(recipe, values, &mut used)?;
     let start_within_ms = recipe.start_within_ms.unwrap_or(DEFAULT_START_WITHIN_MS);
+    // The default timing is bounded on every route, even where no keyboard action uses it.
+    if let Some(timing) = recipe.timing {
+        keyboard_timing(timing)
+            .validate()
+            .map_err(|_| RecipeError::new(InputError::Timing.code()))?;
+    }
     if let Some(actions) = actions
         .iter()
         .map(keyboard_action)
@@ -409,6 +417,7 @@ fn compile(
         canonicalize_sequence_keys(&mut request);
         let compiled =
             compile_sequence(&request).map_err(|error| RecipeError::new(error.code()))?;
+        check_body_size(&request)?;
         return Ok(Expanded {
             request: Request::Keyboard(request),
             summary: Summary {
@@ -441,12 +450,14 @@ fn compile(
         keyboard_profile: has_keyboard.then(|| LEGACY_WIRE_MAPPING.to_owned()),
         arm: InputArmPolicy::CommandScoped,
         start_within_ms,
-        keyboard_timing: recipe.timing,
+        // Input Sequence v1 forbids keyboard timing without a keyboard action; there it is inert.
+        keyboard_timing: recipe.timing.filter(|_| has_keyboard),
         actions,
     };
     canonicalize_input_sequence_keys(&mut request);
     let compiled =
         compile_input_sequence(&request).map_err(|error| RecipeError::new(error.code()))?;
+    check_body_size(&request)?;
     Ok(Expanded {
         request: Request::Input(request),
         summary: Summary {
@@ -456,6 +467,14 @@ fn compile(
             replacements,
         },
     })
+}
+
+/// The serialized request is exactly the body a run posts; it must fit the shared body cap.
+fn check_body_size(request: &impl Serialize) -> Result<(), RecipeError> {
+    match serde_json::to_vec(request) {
+        Ok(body) if body.len() <= MAX_EXPANDED_BODY_BYTES => Ok(()),
+        _ => Err(RecipeError::new("recipe.body_limit")),
+    }
 }
 
 /// Substitutes `param` references and deserializes the Input Sequence v1 action vocabulary, so
@@ -792,6 +811,32 @@ mod tests {
             validate(&pointer_only).unwrap().route,
             Route::InputSequences
         );
+
+        // A recipe-level default timing is inert without a keyboard action: it stays bounded but
+        // is left out, because Input Sequence v1 forbids keyboard timing on a pointer-only body.
+        let timed = |timing: Value| {
+            recipe(&json!({
+                "schema": "keyferry.recipe.v1", "name": "click", "timing": timing,
+                "actions": [{"type": "click", "button": "button_1"}]
+            }))
+            .unwrap()
+        };
+        let clicked = timed(json!({"key_down_ms": 12, "release_gap_ms": 40}));
+        assert_eq!(validate(&clicked).unwrap().route, Route::InputSequences);
+        let expanded = expand(
+            &clicked,
+            &Params::default(),
+            UnsupportedTextPolicy::Reject,
+            COMMAND_ID,
+        )
+        .unwrap();
+        let Request::Input(request) = &expanded.request else {
+            panic!("pointer route");
+        };
+        assert_eq!(request.keyboard_profile, None);
+        assert_eq!(request.keyboard_timing, None);
+        let unbounded = timed(json!({"key_down_ms": 101, "release_gap_ms": 40}));
+        assert_eq!(validate(&unbounded).unwrap_err().code(), "sequence.timing");
     }
 
     #[test]
@@ -830,6 +875,47 @@ mod tests {
                 },
             ]
         );
+
+        // ESC and backspace are keys, not parameter text: both policies call them unsupported,
+        // so a value cannot inject editing keys and replacement counts only what reject refuses.
+        let controls = params(&json!({"who": "x\u{8}\u{8}\u{1b}"}));
+        let error = expand(
+            &parsed,
+            &controls,
+            UnsupportedTextPolicy::Reject,
+            COMMAND_ID,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (error.code(), error.parameter_index()),
+            ("text.unsupported_character", Some(0))
+        );
+        let expanded = expand(
+            &parsed,
+            &controls,
+            UnsupportedTextPolicy::Replace,
+            COMMAND_ID,
+        )
+        .unwrap();
+        assert_eq!(expanded.summary.replacements, 3);
+        let Request::Keyboard(request) = &expanded.request else {
+            panic!("keyboard route");
+        };
+        assert_eq!(
+            request.actions[1],
+            SequenceAction::Text {
+                value: "x???".to_owned(),
+                timing: None,
+            }
+        );
+        let plain = params(&json!({"who": "\"a\\b\tc\r\nd~"}));
+        for policy in [
+            UnsupportedTextPolicy::Reject,
+            UnsupportedTextPolicy::Replace,
+        ] {
+            let expanded = expand(&parsed, &plain, policy, COMMAND_ID).unwrap();
+            assert_eq!(expanded.summary.replacements, 0);
+        }
     }
 
     #[test]
@@ -870,6 +956,67 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(validate(&twice).unwrap_err().code(), "text.character_limit");
+    }
+
+    #[test]
+    fn validation_bounds_the_expanded_body_at_every_parameter_maximum() {
+        // Aliases grow to canonical names and a parameter reference grows to its escaped value,
+        // so a recipe within its own size cap can expand past the shared body cap.
+        let wide = |max_chars: u64| {
+            let chord = json!({"type": "chord", "keys": [
+                "CTRL", "SHIFT", "ALT", "CMD", "RIGHT_CONTROL", "RIGHT_SHIFT", "RIGHT_OPT",
+                "RIGHT_CMD", "KEYPAD_DOUBLE_VERTICAL_BAR", "KEYPAD_RIGHT_PARENTHESIS",
+                "KEYPAD_LEFT_PARENTHESIS", "KEYPAD_DOUBLE_AMPERSAND", "KEYPAD_MEMORY_SUBTRACT",
+                "KEYPAD_MEMORY_MULTIPLY"
+            ]});
+            let mut actions = vec![chord; 220];
+            actions.push(json!({"type": "text", "param": "body"}));
+            let source = json!({
+                "schema": "keyferry.recipe.v1", "name": "wide",
+                "parameters": [{"name": "body", "type": "text", "max_chars": max_chars}],
+                "timing": {"key_down_ms": 5, "release_gap_ms": 5},
+                "actions": actions
+            })
+            .to_string();
+            assert!(source.len() < MAX_RECIPE_BYTES);
+            parse(source.as_bytes()).unwrap()
+        };
+        let body = |expanded: &Expanded| match &expanded.request {
+            Request::Keyboard(request) => serde_json::to_vec(request).unwrap(),
+            Request::Input(request) => serde_json::to_vec(request).unwrap(),
+        };
+
+        // At 1,000 characters every command limit passes and plain letters fit, but 1,000
+        // two-byte escapes do not: validation must use the escaped worst case.
+        let over = wide(1000);
+        let letters = compile(&over, &["a".repeat(1000)], VALIDATION_COMMAND_ID, 0).unwrap();
+        assert!(body(&letters).len() <= MAX_EXPANDED_BODY_BYTES);
+        assert_eq!(validate(&over).unwrap_err().code(), "recipe.body_limit");
+        assert_eq!(
+            expand(
+                &over,
+                &params(&json!({"body": "a"})),
+                UnsupportedTextPolicy::Reject,
+                COMMAND_ID
+            )
+            .unwrap_err()
+            .code(),
+            "recipe.body_limit"
+        );
+
+        // A recipe that validates fits with every allowed value, under either policy.
+        let fits = wide(500);
+        validate(&fits).unwrap();
+        for (value, policy) in [
+            ("\"\\\t\n\r".repeat(100), UnsupportedTextPolicy::Reject),
+            ("\u{1b}".repeat(500), UnsupportedTextPolicy::Replace),
+        ] {
+            let expanded =
+                expand(&fits, &params(&json!({"body": value})), policy, COMMAND_ID).unwrap();
+            assert!(body(&expanded).len() <= MAX_EXPANDED_BODY_BYTES);
+        }
+        let doc = include_str!("../../../protocol/recipe-v1.md");
+        assert!(doc.contains("`recipe.body_limit`"));
     }
 
     #[test]

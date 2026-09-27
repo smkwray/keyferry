@@ -18,7 +18,7 @@ keys, integers only, no `null`, nesting at most 8, and unknown fields rejected.
 | `revision` | Optional author counter, 0–4,294,967,295. Never a content hash. |
 | `description` | Optional, at most 200 characters. |
 | `parameters` | Optional, at most 16. Each is `{name, type, max_chars}` with name `^[a-z][a-z0-9_]{0,31}$`, unique; `type` is `text`; `max_chars` is 1–4,096 (default 256). |
-| `timing` | Optional default keyboard timing, as `keyboard_timing` in Input Sequence v1. |
+| `timing` | Optional default keyboard timing, as `keyboard_timing` in Input Sequence v1. It is always bounds-checked; a recipe without a keyboard action expands without it. |
 | `start_within_ms` | Optional, 1–5,000 (default 5,000). |
 | `actions` | The Input Sequence v1 action vocabulary: `text`, `tap`, `chord`, `ordered_chord`, `wait`, `repeat`, `move_relative`, `click`, `double_click`. Key aliases are accepted. |
 
@@ -28,9 +28,11 @@ command ID, device, unsupported-text policy, or wire profile; those are fixed or
 
 ## Validation
 
-Validation parses the document, then compiles it with every parameter at its `max_chars` of `a`,
-through the same compiler the run uses. A valid recipe therefore cannot exceed a command limit with
-any allowed parameter value. Import and run both require validation to pass.
+Validation parses the document, then compiles it with every parameter at its `max_chars` of `"`,
+through the same compiler the run uses, and requires the expanded request body to fit 65,536 bytes.
+Every supported parameter character costs one keystroke and `"` has the largest JSON encoding among
+them, so a valid recipe cannot exceed a command limit or the body limit with any allowed parameter
+value. Import and run both require validation to pass.
 
 ## Run
 
@@ -47,22 +49,25 @@ a `command-scoped` request with the legacy wire mapping `windows-us`:
 - otherwise: an input sequence posted once to `/v1/devices/{id}/input-sequences`, which requires
   `MOUSE_RELATIVE_V1` (USB keyboard output).
 
-Unsupported characters in a parameter value reject by default. The caller may select replacement
-for that run only; each character outside printable ASCII, TAB, LF, and CR then becomes `?`,
-following the text-stream rule, and the run reports the replacement count. Literal recipe text is
-never rewritten.
+A parameter value supports printable ASCII, TAB, LF, and CR, following the text-stream rule; any
+other character, including ESC and backspace, is unsupported. Unsupported characters reject by
+default. The caller may select replacement for that run only; each unsupported character then
+becomes `?`, and the run reports the replacement count. Literal recipe text is never rewritten.
 
-The result is the ordinary `keyferry.command-result.v2` object. A run is never retried after a
-possible start, resumes nothing, and saves nothing: no parameter values, expansion, compiled
-plan, or last-run state.
+The result is the ordinary `keyferry.command-result.v2` object on standard output. A run rejected
+for a parameter also writes one `keyferry.recipe-cli-error.v1` object with the code and parameter
+index to standard error. A run is never retried after a possible start, resumes nothing, and saves
+nothing: no parameter values, expansion, compiled plan, or last-run state.
 
 ## Library
 
 The library is `KEYFERRY_RECIPE_DIR` if set, otherwise `recipes` under the per-user Keyferry state
-directory. Import is its only writer: it validates the source, refuses to overwrite an existing
-name unless replacement is requested, and publishes `<name>.json` by writing a temporary file in
-the library and renaming it. Listing and inspection report metadata and validation results only,
-never an action body.
+directory. Import is its only writer: it validates the source and writes a temporary file in the
+library, then publishes `<name>.json` atomically. Without replacement it links the file into place,
+which fails if the name exists, so concurrent imports never overwrite each other; with replacement
+it renames over the entry. A recipe is explicitly saved user content and may hold literal text: on
+Unix the library directory is created owner-only (0700) and each entry is written owner-only
+(0600). Listing and inspection report metadata and validation results only, never an action body.
 
 ## Errors
 
@@ -83,6 +88,11 @@ contains a parameter value, key array, action body, or source JSON.
 | `params.unknown` | A supplied key is not a declared parameter. |
 | `params.missing`, `params.not_string`, `params.empty`, `params.too_long` | The indexed parameter value is absent, not a string, empty, or over `max_chars`. |
 | `text.unsupported_character` | With a parameter index: that value has an unsupported character under rejection. |
+| `recipe.body_limit` | The expanded request body would exceed 65,536 bytes. |
+| `recipe.not_found`, `recipe.unreadable` | The recipe file does not exist, or cannot be read. |
+| `recipe.library_unreadable` | The library directory cannot be listed. |
+| `recipe.exists` | Import without replacement found an entry with that name. |
+| `recipe.write_failed` | Import could not create the library or publish the entry. |
 
 Action shape and compilation failures use the Input Sequence v1 and keyboard-sequence codes, such
 as `input.action_type`, `key.unknown`, `chord.duplicate_key`, and `sequence.duration_limit`.

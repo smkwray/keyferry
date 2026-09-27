@@ -140,6 +140,7 @@ fn run_tests() {
     fs::remove_dir(directory).unwrap();
     recipe_library_is_local_and_import_is_the_only_writer();
     recipe_run_posts_once_to_the_expanded_route();
+    direct_sequences_post_canonical_key_names();
 }
 
 const SECRET: &str = "Hunter2-recipe-secret";
@@ -159,7 +160,7 @@ fn keyboard_recipe(revision: u32) -> String {
     .to_string()
 }
 
-fn keyctl_recipe(
+fn spawn_keyctl(
     library: &Path,
     token: &Path,
     url: &str,
@@ -169,7 +170,7 @@ fn keyctl_recipe(
     let mut child = Command::new(env!("CARGO_BIN_EXE_keyctl"))
         .arg("--token-file")
         .arg(token)
-        .args(["--url", url, "recipe"])
+        .args(["--url", url])
         .args(arguments)
         .env("KEYFERRY_RECIPE_DIR", library)
         .stdin(if stdin.is_some() {
@@ -211,11 +212,11 @@ fn recipe_library_is_local_and_import_is_the_only_writer() {
     let library = root.join("library");
     let missing_token = root.join("missing-token");
     let offline = |arguments: &[&str]| {
-        finish(keyctl_recipe(
+        finish(spawn_keyctl(
             &library,
             &missing_token,
             "http://127.0.0.1:9",
-            arguments,
+            &[&["recipe"][..], arguments].concat(),
             None,
         ))
     };
@@ -340,8 +341,9 @@ fn recipe_library_is_local_and_import_is_the_only_writer() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Accepts one request within a bounded wait and answers it as a terminal emission.
-fn serve_once(listener: &TcpListener) -> (String, Vec<u8>) {
+/// Accepts one request within a bounded wait and answers it as a terminal emission, or as a
+/// non-terminal queue acceptance that only a detached run may return on.
+fn serve_once(listener: &TcpListener, terminal: bool) -> (String, Vec<u8>) {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut stream = loop {
         match listener.accept() {
@@ -370,8 +372,9 @@ fn serve_once(listener: &TcpListener) -> (String, Vec<u8>) {
     stream.read_exact(&mut body).unwrap();
     let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let response = serde_json::json!({
-        "command_id": posted["command_id"], "device_id": "device-1", "outcome": "EMITTED",
-        "terminal": true, "possible_start": true, "terminal_zero_confirmed": true
+        "command_id": posted["command_id"], "device_id": "device-1",
+        "outcome": if terminal { "EMITTED" } else { "QUEUED" },
+        "terminal": terminal, "possible_start": terminal, "terminal_zero_confirmed": terminal
     })
     .to_string();
     write!(
@@ -381,6 +384,19 @@ fn serve_once(listener: &TcpListener) -> (String, Vec<u8>) {
     )
     .unwrap();
     (headers.lines().next().unwrap().to_owned(), body)
+}
+
+/// A regression that keeps polling fails here within a bounded wait instead of hanging.
+fn exits_promptly(child: &mut process::Child) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    false
 }
 
 fn assert_no_further_contact(listener: &TcpListener) {
@@ -414,36 +430,72 @@ fn recipe_run_posts_once_to_the_expanded_route() {
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
     let run = |arguments: &[&str], stdin: Option<&str>| {
-        keyctl_recipe(&library, &token, &url, arguments, stdin)
+        spawn_keyctl(
+            &library,
+            &token,
+            &url,
+            &[&["recipe"][..], arguments].concat(),
+            stdin,
+        )
     };
 
-    // Rejected before contact: parameters only from stdin, and strict by default.
-    for (arguments, stdin, expected) in [
+    // Rejected before contact: parameters only from stdin, and strict by default. A parameter
+    // failure's index is metadata on stderr; stdout keeps exactly the command-result line.
+    for (arguments, stdin, expected, parameter_index) in [
         (
             vec!["run", "device-1", "open-terminal", "--url-param", SECRET],
             Some("{}"),
             "input.argv_payload_refused",
+            None,
         ),
         (
             vec!["run", "device-1", "open-terminal"],
             Some(""),
             "params.json",
+            None,
         ),
         (
             vec!["run", "device-1", "open-terminal"],
             Some(r#"{"url":"café"}"#),
             "text.unsupported_character",
+            Some(0),
+        ),
+        (
+            vec!["run", "device-1", "open-terminal"],
+            Some(r#"{"url":"x\u001b"}"#),
+            "text.unsupported_character",
+            Some(0),
+        ),
+        (
+            vec!["run", "device-1", "open-terminal"],
+            Some(r#"{"url":""}"#),
+            "params.empty",
+            Some(0),
         ),
         (
             vec!["run", "device-1", "open-terminal", "--unsupported", "drop"],
             Some("{}"),
             "input.unsupported_policy",
+            None,
         ),
     ] {
-        let (code, rejected, _) = finish(run(&arguments, stdin));
+        let (code, rejected, stderr) = finish(run(&arguments, stdin));
         assert_eq!(code, Some(20), "{arguments:?}");
         assert_eq!(rejected["outcome"], "REJECTED");
         assert_eq!(rejected["error"]["code"], expected, "{arguments:?}");
+        match parameter_index {
+            Some(index) => {
+                let detail: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+                assert_eq!(
+                    detail,
+                    serde_json::json!({
+                        "schema": "keyferry.recipe-cli-error.v1",
+                        "error": {"code": expected, "parameter_index": index}
+                    })
+                );
+            }
+            None => assert_eq!(stderr, "", "{arguments:?}"),
+        }
         assert_no_further_contact(&listener);
     }
 
@@ -455,9 +507,9 @@ fn recipe_run_posts_once_to_the_expanded_route() {
             "--unsupported",
             "replace",
         ],
-        Some(r#"{"url":"example.test/café"}"#),
+        Some(r#"{"url":"example.test/café\u0008"}"#),
     );
-    let (line, body) = serve_once(&listener);
+    let (line, body) = serve_once(&listener, true);
     let (code, result, stderr) = finish(child);
     assert_no_further_contact(&listener);
     assert_eq!(line, "POST /v1/devices/device-1/sequences HTTP/1.1");
@@ -475,7 +527,7 @@ fn recipe_run_posts_once_to_the_expanded_route() {
         serde_json::json!([
             {"type": "chord", "keys": ["LEFT_GUI", "SPACE"]},
             {"type": "text", "value": SECRET},
-            {"type": "text", "value": "example.test/caf?"},
+            {"type": "text", "value": "example.test/caf??"},
             {"type": "tap", "key": "ENTER"}
         ])
     );
@@ -485,11 +537,16 @@ fn recipe_run_posts_once_to_the_expanded_route() {
     assert_eq!(result["outcome"], "EMITTED");
     assert_eq!(
         stderr.trim(),
-        r#"{"replacements":1,"schema":"keyferry.recipe-replacements.v1"}"#
+        r#"{"replacements":2,"schema":"keyferry.recipe-replacements.v1"}"#
     );
 
-    let child = run(&["run", "device-1", "open-file", "--detach"], None);
-    let (line, body) = serve_once(&listener);
+    // The daemon only queues it: a detached run returns on that acceptance without polling.
+    let mut child = run(&["run", "device-1", "open-file", "--detach"], None);
+    let (line, body) = serve_once(&listener, false);
+    assert!(
+        exits_promptly(&mut child),
+        "a detached run must not wait for a terminal outcome"
+    );
     let (code, result, _) = finish(child);
     assert_no_further_contact(&listener);
     assert_eq!(line, "POST /v1/devices/device-1/input-sequences HTTP/1.1");
@@ -505,6 +562,71 @@ fn recipe_run_posts_once_to_the_expanded_route() {
         .iter()
         .any(|gesture| matches!(gesture, keyferry_layouts::InputGesture::DoubleClick { .. })));
     assert_eq!(code, Some(0));
+    assert_eq!(result["outcome"], "QUEUED");
+    assert_eq!(result["terminal"], false);
     assert_eq!(result["command_id"], posted.command_id.as_str());
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `keyctl sequence` and `keyctl input-sequence` accept key aliases but post canonical names, so
+/// a forwarded body stays acceptable to holders that predate aliases.
+fn direct_sequences_post_canonical_key_names() {
+    let root = env::temp_dir().join(format!("keyctl-canonical-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    let token = root.join("token");
+    fs::write(&token, "test-token\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    for (command, route, input, expected) in [
+        (
+            "sequence",
+            "sequences",
+            serde_json::json!({
+                "schema": "keyferry.keyboard-sequence.v1", "profile": "windows-us",
+                "arm": "command-scoped", "start_within_ms": 5000,
+                "actions": [
+                    {"type": "chord", "keys": ["CMD", "L"]},
+                    {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "RETURN"}]}
+                ]
+            }),
+            serde_json::json!([
+                {"type": "chord", "keys": ["LEFT_GUI", "L"]},
+                {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "ENTER"}]}
+            ]),
+        ),
+        (
+            "input-sequence",
+            "input-sequences",
+            serde_json::json!({
+                "schema": "keyferry.input-sequence.v1", "keyboard_profile": "windows-us",
+                "arm": "command-scoped", "start_within_ms": 5000,
+                "actions": [
+                    {"type": "click", "button": "button_1"},
+                    {"type": "ordered_chord", "keys": ["OPT", "ESC"]}
+                ]
+            }),
+            serde_json::json!([
+                {"type": "click", "button": "button_1"},
+                {"type": "ordered_chord", "keys": ["LEFT_ALT", "ESCAPE"]}
+            ]),
+        ),
+    ] {
+        let child = spawn_keyctl(
+            &root,
+            &token,
+            &url,
+            &[command, "device-1"],
+            Some(&input.to_string()),
+        );
+        let (line, body) = serve_once(&listener, true);
+        let (code, result, _) = finish(child);
+        assert_no_further_contact(&listener);
+        assert_eq!(line, format!("POST /v1/devices/device-1/{route} HTTP/1.1"));
+        let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(posted["actions"], expected, "{command}");
+        assert_eq!(code, Some(0), "{command}");
+        assert_eq!(result["outcome"], "EMITTED");
+    }
     fs::remove_dir_all(root).unwrap();
 }

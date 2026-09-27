@@ -737,22 +737,6 @@ impl ApiClient {
         self.request_json("GET", &device_path(device_id, "files")?, None)
     }
 
-    pub fn submit_actions(
-        &self,
-        device_id: &str,
-        actions: &[ActionRequest],
-        profile: &str,
-    ) -> Result<CommandResponse, ApiError> {
-        self.request_device_mutation(
-            device_id,
-            "actions",
-            Some(&serde_json::json!({
-                "actions": actions,
-                "profile": profile,
-            })),
-        )
-    }
-
     pub fn submit_sequence(
         &self,
         device_id: &str,
@@ -1565,143 +1549,6 @@ pub struct EventRecord {
     pub duration_ms: Option<u64>,
     #[serde(alias = "state")]
     pub outcome: CommandOutcome,
-}
-
-#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
-#[serde(tag = "type")]
-pub enum ActionRequest {
-    #[serde(rename = "text")]
-    Text {
-        value: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        key_down_ms: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        release_gap_ms: Option<u16>,
-    },
-    #[serde(rename = "tap")]
-    Tap {
-        key: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        key_down_ms: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        release_gap_ms: Option<u16>,
-    },
-    #[serde(rename = "chord")]
-    Chord {
-        keys: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        key_down_ms: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        release_gap_ms: Option<u16>,
-    },
-}
-
-#[derive(Debug)]
-enum ValidatedKey {
-    Modifier(&'static str),
-    Key(String),
-}
-
-impl ActionRequest {
-    #[must_use]
-    pub fn text(value: impl Into<String>) -> Self {
-        Self::Text {
-            value: value.into(),
-            key_down_ms: None,
-            release_gap_ms: None,
-        }
-    }
-
-    pub fn tap(key: &str) -> Result<Self, ApiError> {
-        let ValidatedKey::Key(key) = validate_key_name(key)? else {
-            return Err(ApiError::new(
-                "tap key must be a non-modifier key; use a named key or printable US-ASCII character",
-            ));
-        };
-        Ok(Self::Tap {
-            key,
-            key_down_ms: None,
-            release_gap_ms: None,
-        })
-    }
-
-    pub fn chord(keys: Vec<String>) -> Result<Self, ApiError> {
-        let mut non_modifier_seen = false;
-        let mut modifier_names = Vec::new();
-        let mut non_modifier = None;
-        for key in keys {
-            match validate_key_name(&key)? {
-                ValidatedKey::Modifier(name) => {
-                    if modifier_names.contains(&name) {
-                        return Err(ApiError::new("chord modifier names must be unique"));
-                    }
-                    modifier_names.push(name);
-                }
-                ValidatedKey::Key(name) => {
-                    if non_modifier_seen {
-                        return Err(ApiError::new(
-                            "chord requires modifiers plus exactly one non-modifier key",
-                        ));
-                    }
-                    non_modifier_seen = true;
-                    non_modifier = Some(name);
-                }
-            }
-        }
-        let Some(non_modifier) = non_modifier else {
-            return Err(ApiError::new(
-                "chord requires modifiers plus exactly one non-modifier key",
-            ));
-        };
-        let mut normalized = modifier_names
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        normalized.push(non_modifier);
-        Ok(Self::Chord {
-            keys: normalized,
-            key_down_ms: None,
-            release_gap_ms: None,
-        })
-    }
-}
-
-fn validate_key_name(name: &str) -> Result<ValidatedKey, ApiError> {
-    if name.is_empty() {
-        return Err(ApiError::new("key name is empty"));
-    }
-    let uppercase = name.to_ascii_uppercase();
-    let value = match uppercase.as_str() {
-        "CTRL" | "CONTROL" => ValidatedKey::Modifier("CTRL"),
-        "SHIFT" => ValidatedKey::Modifier("SHIFT"),
-        "ALT" | "OPTION" => ValidatedKey::Modifier("ALT"),
-        "GUI" | "META" | "WIN" | "SUPER" | "CMD" => ValidatedKey::Modifier("GUI"),
-        "ENTER" | "RETURN" => ValidatedKey::Key("ENTER".to_owned()),
-        "ESC" | "ESCAPE" => ValidatedKey::Key("ESC".to_owned()),
-        "BACKSPACE" => ValidatedKey::Key("BACKSPACE".to_owned()),
-        "TAB" => ValidatedKey::Key("TAB".to_owned()),
-        "SPACE" => ValidatedKey::Key("SPACE".to_owned()),
-        _ => {
-            let mut characters = name.chars();
-            let Some(character) = characters.next() else {
-                return Err(ApiError::new("key name is empty"));
-            };
-            if characters.next().is_some() || !((' '..='~').contains(&character)) {
-                return Err(ApiError::new(
-                    "unsupported key name; use a supported modifier, named key, or printable US-ASCII character",
-                ));
-            }
-            let canonical = if character == ' ' {
-                "SPACE".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                character.to_ascii_uppercase().to_string()
-            } else {
-                character.to_string()
-            };
-            ValidatedKey::Key(canonical)
-        }
-    };
-    Ok(value)
 }
 
 pub struct EventStream {
@@ -2623,74 +2470,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_action_submission_refreshes_route_proof_and_maps_named_body() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let client = owner_remote_test_client(&listener);
-        let authority = match &client.endpoint {
-            ApiEndpoint::Remote(remote) => remote.owner_route.clone().unwrap(),
-            _ => unreachable!(),
-        };
-        let device_id = device_id_text(&authority.device_id);
-        let expected_device_id = device_id.clone();
-        let worker = thread::spawn(move || {
-            respond_to_owner_route_proof(&listener, &authority, &expected_device_id);
-            let (mut stream, headers) = accept_http_headers(&listener);
-            assert!(headers.starts_with(&format!(
-                "POST /v1/devices/{expected_device_id}/actions HTTP/1.1"
-            )));
-            assert!(headers
-                .to_ascii_lowercase()
-                .contains("authorization: bearer test-bearer-token\r\n"));
-            let content_length = http_content_length(&headers);
-            let mut body = vec![0; content_length];
-            stream.read_exact(&mut body).unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["profile"], "windows-us");
-            assert_eq!(
-                body["actions"][0],
-                serde_json::json!({"type":"tap","key":"ENTER"})
-            );
-            assert_eq!(
-                body["actions"][1],
-                serde_json::json!({"type":"chord","keys":["CTRL","L"]})
-            );
-            assert_eq!(
-                body["actions"][2],
-                serde_json::json!({"type":"text","value":"example"})
-            );
-            for action in body["actions"].as_array().unwrap() {
-                assert!(action.get("usage").is_none());
-                assert!(action.get("modifiers").is_none());
-                assert!(action.get("duration_ms").is_none());
-            }
-            let response = format!(
-                r#"{{"command_id":"c1","device_id":"{expected_device_id}","outcome":"QUEUED","message":null}}"#
-            );
-            write!(
-                stream,
-                "HTTP/1.1 202 Accepted\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response.len(),
-                response
-            )
-            .unwrap();
-        });
-        let response = client
-            .submit_actions(
-                &device_id,
-                &[
-                    ActionRequest::tap("enter").unwrap(),
-                    ActionRequest::chord(vec!["control".to_owned(), "l".to_owned()]).unwrap(),
-                    ActionRequest::text("example"),
-                ],
-                "windows-us",
-            )
-            .unwrap();
-        worker.join().unwrap();
-        assert_eq!(response.command_id, "c1");
-        assert_eq!(response.outcome, CommandOutcome::Queued);
-    }
-
-    #[test]
     fn sequence_submission_uses_the_canonical_daemon_route_and_body() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = test_client(&listener);
@@ -2782,23 +2561,6 @@ mod tests {
             error.to_string(),
             "command ID contains unsupported path characters"
         );
-    }
-
-    #[test]
-    fn rejects_unsupported_key_name_client_side_without_echoing_it() {
-        let error = ActionRequest::tap("F13").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "unsupported key name; use a supported modifier, named key, or printable US-ASCII character"
-        );
-        assert!(!error.to_string().contains("F13"));
-
-        let error = ActionRequest::chord(vec!["CTRL".to_owned(), "F13".to_owned()]).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "unsupported key name; use a supported modifier, named key, or printable US-ASCII character"
-        );
-        assert!(!error.to_string().contains("F13"));
     }
 
     #[test]

@@ -4256,6 +4256,12 @@ mod tests {
         assert!(build_script.contains("with_style(\"fluent-dark\".into())"));
         assert!(ui.contains("Palette.color-scheme = ColorScheme.dark"));
         assert!(ui.contains("app-background: #07090c"));
+        // One US-ASCII text layout, named for both hosts; no layout chooser or profile callback.
+        assert!(ui.contains("Text layout: US ASCII (Windows US or Mac ANSI with U.S. input)"));
+        assert!(ui.contains("label: \"Literal text (US ASCII)\""));
+        assert!(!ui.contains("Target keyboard layout"));
+        assert!(!ui.contains("Literal windows-us text"));
+        assert!(!ui.contains("profile-changed"));
         assert!(ui.contains("text-primary: #e6edf3"));
         assert!(ui.contains("preferred-width: 980px"));
         assert!(ui.contains("preferred-height: 660px"));

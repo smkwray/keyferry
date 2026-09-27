@@ -924,6 +924,18 @@ mod tests {
             Sha256::digest(LEGACY_WIRE_MAPPING.as_bytes()).as_slice(),
             expected.as_slice()
         );
+        // The device compares against this array, so read it rather than a copy of it.
+        let firmware = include_str!("../../../firmware/esp32s3/hil_endpoint/main/app_main.cpp");
+        let array = firmware
+            .split_once("kWindowsUsProfileHash{")
+            .and_then(|(_, rest)| rest.split_once("};"))
+            .map(|(array, _)| array)
+            .expect("firmware declares kWindowsUsProfileHash");
+        let firmware_hash: Vec<u8> = array
+            .split(',')
+            .map(|byte| u8::from_str_radix(byte.trim().trim_start_matches("0x"), 16).unwrap())
+            .collect();
+        assert_eq!(firmware_hash, expected);
         assert_eq!(LEGACY_WIRE_MAPPING, "windows-us");
         assert!(is_wire_mapping("windows-us"));
         for other in ["us-ascii", "WINDOWS-US", "macos-us", ""] {

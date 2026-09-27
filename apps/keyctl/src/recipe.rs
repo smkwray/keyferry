@@ -23,7 +23,7 @@ const INSPECTION_SCHEMA: &str = "keyferry.recipe-inspection.v1";
 const VALIDATION_SCHEMA: &str = "keyferry.recipe-validation.v1";
 const IMPORT_SCHEMA: &str = "keyferry.recipe-import.v1";
 const REPLACEMENTS_SCHEMA: &str = "keyferry.recipe-replacements.v1";
-const USAGE_SCHEMA: &str = "keyferry.recipe-cli-error.v1";
+const CLI_ERROR_SCHEMA: &str = "keyferry.recipe-cli-error.v1";
 
 /// A payload-free failure: a stable code, an optional parameter index, and an exit status.
 #[derive(Clone, Copy)]
@@ -74,7 +74,7 @@ pub(super) fn run(args: &[String], url: &str, token_file: &Path) -> u8 {
         (Some("import"), 3) if args[2] == "--replace" => import(Path::new(&args[1]), true),
         (Some("run"), _) => run_recipe(&args[1..], url, token_file),
         _ => {
-            emit_json_line(&json!({"schema": USAGE_SCHEMA, "error": {"code": "input.usage"}}));
+            emit_json_line(&json!({"schema": CLI_ERROR_SCHEMA, "error": {"code": "input.usage"}}));
             20
         }
     }
@@ -258,33 +258,48 @@ fn import(source: &Path, replace: bool) -> u8 {
     exit
 }
 
-/// Writes a temporary file in the library, then renames it onto `<name>.json`, so a reader never
-/// sees a partial recipe. An existing entry is kept unless `replace`. Returns whether one was
-/// replaced.
+/// Writes a complete temporary file in the library, then publishes it as `<name>.json`, so a
+/// reader never sees a partial recipe. Without `replace` the file is hard-linked into place, which
+/// fails atomically if the name exists, so a concurrent import cannot be overwritten; with
+/// `replace` it is renamed over the entry. Returns whether an entry was replaced.
 fn publish(library: &Path, name: &str, bytes: &[u8], replace: bool) -> Result<bool, Failure> {
     let write_failed = Failure::new("recipe.write_failed", 25);
-    fs::create_dir_all(library).map_err(|_| write_failed)?;
+    // Saved recipes may hold literal text: owner-only on Unix, like the service token.
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut directory, 0o700);
+    directory.create(library).map_err(|_| write_failed)?;
     let target = library.join(format!("{name}.json"));
-    let existed = fs::symlink_metadata(&target).is_ok();
-    if existed && !replace {
-        return Err(Failure::new("recipe.exists", 20));
-    }
     let temporary = library.join(format!(".{name}.{}.tmp", uuid::Uuid::now_v7()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|_| write_failed)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&temporary).map_err(|_| write_failed)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    if written
-        .and_then(|()| fs::rename(&temporary, &target))
-        .is_err()
-    {
-        let _ = fs::remove_file(&temporary);
-        return Err(write_failed);
-    }
-    Ok(existed)
+    let published = written.map_err(|_| write_failed).and_then(|()| {
+        if replace {
+            let existed = fs::symlink_metadata(&target).is_ok();
+            fs::rename(&temporary, &target)
+                .map(|()| existed)
+                .map_err(|_| write_failed)
+        } else {
+            fs::hard_link(&temporary, &target)
+                .map(|()| false)
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        Failure::new("recipe.exists", 20)
+                    } else {
+                        write_failed
+                    }
+                })
+        }
+    });
+    // Gone after a rename; otherwise the published link keeps the content.
+    let _ = fs::remove_file(&temporary);
+    published
 }
 
 struct PreparedRun {
@@ -294,7 +309,14 @@ struct PreparedRun {
     replacements: u64,
 }
 
+/// Stdout keeps exactly the command-result line; a parameter's index goes to stderr as metadata.
 fn rejected(device: &str, failure: Failure) -> u8 {
+    if failure.parameter_index.is_some() {
+        eprintln!(
+            "{}",
+            json!({"schema": CLI_ERROR_SCHEMA, "error": failure.json()})
+        );
+    }
     emit_sequence_result(device, None, SequenceOutcome::Rejected, Some(failure.code));
     failure.exit
 }
@@ -400,4 +422,78 @@ fn prepare_run(name: &str, unsupported: UnsupportedTextPolicy) -> Result<Prepare
         body,
         replacements: expanded.summary.replacements,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn library() -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("keyctl-publish-{}", uuid::Uuid::now_v7()))
+            .join("library")
+    }
+
+    fn entries(library: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(library)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn publish_never_overwrites_without_replace_even_when_the_entry_appears_late() {
+        let library = library();
+        assert_eq!(publish(&library, "open", b"first", false).ok(), Some(false));
+        // No existence pre-check: the atomic link itself refuses an entry another import won.
+        let refused = publish(&library, "open", b"second", false).err().unwrap();
+        assert_eq!((refused.code, refused.exit), ("recipe.exists", 20));
+        assert_eq!(fs::read(library.join("open.json")).unwrap(), b"first");
+        assert_eq!(publish(&library, "open", b"third", true).ok(), Some(true));
+        assert_eq!(fs::read(library.join("open.json")).unwrap(), b"third");
+        assert_eq!(
+            entries(&library),
+            ["open.json"],
+            "no temporary file remains"
+        );
+        fs::remove_dir_all(library.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_keeps_the_library_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let library = library();
+        assert_eq!(publish(&library, "open", b"first", false).ok(), Some(false));
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&library), 0o700);
+        assert_eq!(mode(&library.join("open.json")), 0o600);
+        assert_eq!(publish(&library, "open", b"second", true).ok(), Some(true));
+        assert_eq!(mode(&library.join("open.json")), 0o600);
+        fs::remove_dir_all(library.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn every_library_code_is_documented() {
+        let doc = include_str!("../../../protocol/recipe-v1.md");
+        let source = include_str!("recipe.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let codes: Vec<&str> = production
+            .split('"')
+            .filter(|token| {
+                token.strip_prefix("recipe.").is_some_and(|suffix| {
+                    !suffix.is_empty()
+                        && suffix
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+            })
+            .collect();
+        assert!(codes.contains(&"recipe.exists"), "{codes:?}");
+        for code in codes {
+            assert!(doc.contains(&format!("`{code}`")), "{code} is undocumented");
+        }
+    }
 }

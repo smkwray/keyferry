@@ -8,9 +8,10 @@ use keyferry_layouts::text_stream::{
     TEXT_STREAM_SCHEMA_V1,
 };
 use keyferry_layouts::{
-    compile_input_sequence, compile_sequence, parse_input_sequence_json_with_command_id, KeyClass,
-    KeyPortability, KeyboardSequenceV1, SequenceAction, SequenceArmPolicy, TypingTiming,
-    KEYBOARD_KEYS, SEQUENCE_SCHEMA_V1,
+    canonicalize_input_sequence_keys, canonicalize_sequence_keys, compile_input_sequence,
+    compile_sequence, parse_input_sequence_json_with_command_id, KeyClass, KeyPortability,
+    KeyboardSequenceV1, SequenceAction, SequenceArmPolicy, TypingTiming, KEYBOARD_KEYS,
+    LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1502,7 +1503,7 @@ fn run_stream(client: &Client, device: &str, options: &StreamOptions) -> u8 {
         "schema": TEXT_STREAM_SCHEMA_V1,
         "epoch": capabilities.epoch,
         "job_id": job_id,
-        "profile": "windows-us",
+        "profile": LEGACY_WIRE_MAPPING,
         "key_down_ms": options.key_down_ms,
         "key_gap_ms": options.key_gap_ms,
         "send_after_seconds": options.send_after_seconds,
@@ -2117,10 +2118,12 @@ fn input_sequence_description_json() -> String {
     .expect("input sequence description serialization is infallible")
 }
 
+/// Key aliases are posted as canonical names, so holders that predate aliases accept the body.
 fn prepare_input_sequence(bytes: &[u8]) -> Result<PreparedInputSequence, &'static str> {
     let generated = uuid::Uuid::now_v7().to_string();
-    let request = parse_input_sequence_json_with_command_id(bytes, &generated)
+    let mut request = parse_input_sequence_json_with_command_id(bytes, &generated)
         .map_err(|error| error.code())?;
+    canonicalize_input_sequence_keys(&mut request);
     compile_input_sequence(&request).map_err(|error| error.code())?;
     let body = serde_json::to_string(&request).map_err(|_| "internal.serialization")?;
     if body.len() > MAX_SEQUENCE_BODY {
@@ -2246,6 +2249,7 @@ fn read_bounded_sequence_stdin() -> Result<String, ClientError> {
     String::from_utf8(bytes).map_err(|_| ClientError("sequence input is not UTF-8".to_owned()))
 }
 
+/// Key aliases are posted as canonical names, so holders that predate aliases accept the body.
 fn prepare_sequence(raw: &str) -> Result<PreparedSequence, &'static str> {
     let mut value: Value = serde_json::from_str(raw).map_err(|_| "input.invalid_json")?;
     let object = value.as_object_mut().ok_or("input.not_object")?;
@@ -2255,7 +2259,9 @@ fn prepare_sequence(raw: &str) -> Result<PreparedSequence, &'static str> {
             Value::String(uuid::Uuid::now_v7().to_string()),
         );
     }
-    let request: KeyboardSequenceV1 = serde_json::from_value(value).map_err(|_| "input.schema")?;
+    let mut request: KeyboardSequenceV1 =
+        serde_json::from_value(value).map_err(|_| "input.schema")?;
+    canonicalize_sequence_keys(&mut request);
     let command_id = uuid::Uuid::parse_str(&request.command_id).map_err(|_| "input.command_id")?;
     if command_id.get_version_num() != 7 {
         return Err("input.command_id");
@@ -2403,7 +2409,7 @@ fn run_type(client: &Client, args: &[String]) -> u8 {
     let request = KeyboardSequenceV1 {
         schema: SEQUENCE_SCHEMA_V1.to_owned(),
         command_id: uuid::Uuid::now_v7().to_string(),
-        profile: "windows-us".to_owned(),
+        profile: LEGACY_WIRE_MAPPING.to_owned(),
         arm: SequenceArmPolicy::CommandScoped,
         start_within_ms: 5000,
         timing: Some(TypingTiming {

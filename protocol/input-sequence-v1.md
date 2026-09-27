@@ -1,8 +1,9 @@
 # Input Sequence v1
 
 This document is normative for the capability-gated mixed keyboard/relative-pointer extension. It
-does not modify `keyboard-sequence-v1.schema.json`, legacy command bodies, or the existing keyboard
-and provisioning USB interfaces.
+does not modify legacy command bodies or the existing keyboard and provisioning USB interfaces. Its
+[Key names](#key-names) section also governs key names in `keyferry.keyboard-sequence.v1`
+(`keyboard-sequence-v1.schema.json`); nothing else here changes that schema.
 
 ## Public model
 
@@ -45,7 +46,8 @@ canonical name from `keyboard-key-registry-v1.csv` or an alias below. Names are 
 uppercase. An alias is never a registry row; it resolves to exactly its canonical key, so the
 compiled chunks and fingerprint are identical to the canonical form. Chord duplicates are detected
 on the resolved key: `["LEFT_GUI","COMMAND"]` rejects with `chord.duplicate_key`. Clients may
-rewrite aliases to canonical names before submission.
+rewrite aliases to canonical names before submission; keyctl always does, so a body forwarded to a
+holder that predates aliases stays acceptable.
 
 | Aliases | Canonical key |
 | --- | --- |
