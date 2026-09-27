@@ -86,10 +86,12 @@ and recovery guidance.
 1. **Connect USB power to the stick.** For USB keyboard/mouse input or file handoff, plug it into the
    computer that should receive those functions. Bluetooth keyboard output can use another USB power
    source; nothing is installed on the target.
-2. **Build and install Keyferry on the controller.** No GitHub release archives are published yet.
-   Build a Windows or macOS archive from source (see [Building from source](#building-from-source)),
-   extract it, and run its installer (`install.ps1` or `install.sh`, described in the archive's
-   `README.txt`). The installer sets up Keyferry's background service but does not leave it running.
+2. **Download and install Keyferry on the controller.** Get the Windows x64 or macOS Apple silicon
+   package from [Releases](https://github.com/smkwray/keyferry/releases). The Windows ZIP contains
+   `keyferry.exe` and its required helpers; the macOS ZIP contains `Keyferry.app`. Extract the whole
+   package and follow its `README.txt` to run `install.ps1` or `install.sh`. The installer sets up
+   Keyferry's background service but does not leave it running. You can also
+   [build from source](#building-from-source).
 3. **Open Keyferry and choose Authorize this computer.** Pick the owner-kit file, enter the owner
    password, and choose which stick this computer will control. The computer receives its own
    credential for that stick.
@@ -97,6 +99,9 @@ and recovery guidance.
    Bluetooth control link; on macOS, allow Bluetooth access when asked. Do not pair the controller
    to that control link in the operating system's Bluetooth settings. Bluetooth keyboard mode needs
    Wi-Fi control, including from a Mac controller.
+
+These are preview builds. Windows executables are unsigned, and the macOS app is not notarized;
+macOS may require [manual approval on first launch](https://support.apple.com/en-us/102445).
 
 To type into a Bluetooth target, select the stick under **Devices**, then choose **Keyboard &
 display → Bluetooth keyboard**. The stick restarts; pair its keyboard on the *target* through the
