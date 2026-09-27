@@ -4,7 +4,7 @@ use keyferry_layouts::{
         TextStreamError, TextStreamErrorKind, TextStreamReader, UnsupportedTextPolicy,
         TEXT_STREAM_RECEIPT_SCHEMA_V1, TEXT_STREAM_SCHEMA_V1,
     },
-    TypingTiming,
+    TypingTiming, LEGACY_WIRE_MAPPING,
 };
 use serde::Deserialize;
 use std::{
@@ -361,7 +361,7 @@ fn run_text_reader<R: Read>(
         "schema": TEXT_STREAM_SCHEMA_V1,
         "epoch": capabilities.epoch,
         "job_id": job_id,
-        "profile": "windows-us",
+        "profile": LEGACY_WIRE_MAPPING,
         "key_down_ms": timing.key_down_ms,
         "key_gap_ms": timing.release_gap_ms,
         "send_after_seconds": send_after_seconds,

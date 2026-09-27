@@ -1388,6 +1388,14 @@ pub struct DeviceView {
     pub active_outcome: Option<CommandOutcome>,
 }
 
+/// The only keyboard lock state any daemon reports today. A view without the field (an older
+/// daemon) reads as unsupported, never as "off".
+pub const KEYBOARD_LOCK_STATE_UNSUPPORTED: &str = "unsupported";
+
+fn unsupported_keyboard_lock_state() -> String {
+    KEYBOARD_LOCK_STATE_UNSUPPORTED.to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct FirmwareView {
     pub endpoint: String,
@@ -1405,6 +1413,8 @@ pub struct FirmwareView {
     pub usb_file_handoff_v1: bool,
     #[serde(default)]
     pub usb_file_set_v2: bool,
+    #[serde(default = "unsupported_keyboard_lock_state")]
+    pub keyboard_lock_state: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

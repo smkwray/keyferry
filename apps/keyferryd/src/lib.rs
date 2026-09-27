@@ -23,10 +23,11 @@ use keyferry_layouts::text_stream::{
     TEXT_STREAM_RECEIPT_SCHEMA_V1, TEXT_STREAM_SCHEMA_V1,
 };
 use keyferry_layouts::{
-    chord_from_names, compile_input_sequence, compile_sequence, parse_input_sequence_json,
-    stroke_for_key_name, CompiledInputSequence, CompiledSequence, InputSequenceV1, KeyClass,
-    KeyboardReport, KeyboardSequenceV1, Keystroke, ReportStep, SequenceAction, SequenceArmPolicy,
-    SequenceError, TypingTiming, KEYBOARD_KEYS, SEQUENCE_SCHEMA_V1,
+    chord_from_names, compile_input_sequence, compile_sequence, is_wire_mapping,
+    parse_input_sequence_json, stroke_for_key_name, CompiledInputSequence, CompiledSequence,
+    InputSequenceV1, KeyClass, KeyboardReport, KeyboardSequenceV1, Keystroke, ReportStep,
+    SequenceAction, SequenceArmPolicy, SequenceError, TypingTiming, KEYBOARD_KEYS,
+    LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
 };
 use keyferry_sim::{execute_input_gestures, SimulatedEndpoint};
 use serde::{Deserialize, Serialize};
@@ -527,6 +528,15 @@ pub struct DeviceView {
     pub active_outcome: Option<CommandOutcome>,
 }
 
+/// The only keyboard lock (Caps/Num/Scroll LED) state rendered today: no firmware reports
+/// host LED output and no capability bit claims it. A holder view from a daemon that predates
+/// the field deserializes to the same value, so it never reads as "off".
+const KEYBOARD_LOCK_STATE_UNSUPPORTED: &str = "unsupported";
+
+fn unsupported_keyboard_lock_state() -> String {
+    KEYBOARD_LOCK_STATE_UNSUPPORTED.to_owned()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FirmwareView {
     pub endpoint: String,
@@ -549,6 +559,8 @@ pub struct FirmwareView {
     pub usb_file_handoff_v1: bool,
     #[serde(default)]
     pub usb_file_set_v2: bool,
+    #[serde(default = "unsupported_keyboard_lock_state")]
+    pub keyboard_lock_state: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -918,7 +930,7 @@ pub struct TypeRequest {
 }
 
 fn default_profile() -> String {
-    "windows-us".to_owned()
+    LEGACY_WIRE_MAPPING.to_owned()
 }
 
 fn default_timing() -> String {
@@ -3290,6 +3302,7 @@ impl Daemon {
             usb_file_set_v2: identity.device_capability_mask
                 & keyferry_protocol::capability::USB_FILE_SET_V2
                 != 0,
+            keyboard_lock_state: unsupported_keyboard_lock_state(),
         })
     }
 
@@ -3343,7 +3356,7 @@ impl Daemon {
         let compatibility = KeyboardSequenceV1 {
             schema: SEQUENCE_SCHEMA_V1.to_owned(),
             command_id: "019d0000-0000-7000-8000-000000000000".to_owned(),
-            profile: "windows-us".to_owned(),
+            profile: LEGACY_WIRE_MAPPING.to_owned(),
             arm: SequenceArmPolicy::RequireExisting,
             start_within_ms: request.expires_in_ms.unwrap_or(MAX_COMMAND_EXPIRY_MS),
             timing: Some(timing),
@@ -3786,7 +3799,7 @@ impl Daemon {
             char_count: compiled.text_characters,
             // The existing authenticated command envelope accepts this profile.
             // Pointer-only plans remain profile-independent in their fingerprint.
-            profile: "windows-us".to_owned(),
+            profile: LEGACY_WIRE_MAPPING.to_owned(),
             expires_at: Instant::now() + Duration::from_millis(request.start_within_ms),
             arm_before_first: true,
             input: Some(compiled),
@@ -3812,7 +3825,7 @@ impl Daemon {
         if command_id.get_version_num() != 7 {
             return Err(ApiError::bad_request("command_id must be UUID v7"));
         }
-        if !valid_profile(&profile) {
+        if !is_wire_mapping(&profile) {
             return Err(ApiError::bad_request("unsupported target profile"));
         }
         let expiry = expires_in_ms.unwrap_or(MAX_COMMAND_EXPIRY_MS);
@@ -6861,7 +6874,7 @@ fn validate_text_stream_create(
         return Err(ApiError::bad_request("text_stream.schema"));
     }
     require_epoch(&request.epoch, epoch)?;
-    if request.profile != "windows-us" {
+    if !is_wire_mapping(&request.profile) {
         return Err(ApiError::bad_request("text_stream.profile"));
     }
     let timing = TypingTiming {
@@ -7065,10 +7078,6 @@ fn prune_text_stream_records(device: &mut DeviceRuntime) {
     });
 }
 
-fn valid_profile(profile: &str) -> bool {
-    matches!(profile, "windows-us" | "us-ascii")
-}
-
 fn parse_arm_policy(policy: &str) -> Option<ArmPolicy> {
     match policy {
         "command-scoped" => Some(ArmPolicy::CommandScoped),
@@ -7173,7 +7182,7 @@ fn action_steps(actions: &[ActionRequest]) -> Result<CompiledSequence, String> {
     let request = KeyboardSequenceV1 {
         schema: SEQUENCE_SCHEMA_V1.to_owned(),
         command_id: "019d0000-0000-7000-8000-000000000000".to_owned(),
-        profile: "windows-us".to_owned(),
+        profile: LEGACY_WIRE_MAPPING.to_owned(),
         arm: SequenceArmPolicy::RequireExisting,
         start_within_ms: MAX_COMMAND_EXPIRY_MS,
         timing: None,
@@ -8281,6 +8290,203 @@ mod tests {
             assert_eq!(error["error"], "input.json", "{uri}");
             assert!(!error.to_string().contains(marker), "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn non_wire_profiles_reject_before_arm_or_endpoint_contact() {
+        let transport = Arc::new(SimulatorTransport::default());
+        let daemon = Daemon::with_transport(
+            MemoryTokenStore::new("test-token-123456"),
+            transport.clone(),
+        )
+        .expect("daemon");
+        let mut router = daemon.router();
+        let device = format!("/v1/devices/{SIMULATOR_DEVICE_ID}");
+        let command_id = Uuid::now_v7();
+        let type_body = |field: &str, profile: &str| serde_json::json!({"text": "a", field: profile, "command_id": command_id.to_string()});
+        let rejected = [
+            (format!("{device}/type"), type_body("profile", "us-ascii")),
+            (
+                format!("{device}/type"),
+                type_body("target_profile", "us-ascii"),
+            ),
+            (
+                format!("{device}/actions"),
+                serde_json::json!({
+                    "actions": [{"type": "text", "value": "a"}],
+                    "profile": "us-ascii",
+                    "command_id": command_id.to_string(),
+                }),
+            ),
+        ];
+        // Unarmed, the profile gate answers before the arm check would.
+        for (uri, body) in &rejected {
+            let (status, error) =
+                call_json(&mut router, "POST", uri.clone(), Some(body.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(error["error"], "unsupported target profile", "{uri}");
+        }
+        // Armed, nothing is admitted, the arm is not consumed, and the endpoint sees nothing.
+        arm(&daemon).await;
+        let controls = transport.control_request_counts();
+        for (uri, body) in &rejected {
+            let (status, error) =
+                call_json(&mut router, "POST", uri.clone(), Some(body.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(error["error"], "unsupported target profile", "{uri}");
+        }
+        let view = daemon.device_view(SIMULATOR_DEVICE_ID).unwrap();
+        assert!(view.armed);
+        assert_eq!(view.active_command_id, None);
+        assert_eq!(transport.control_request_counts(), controls);
+        assert_eq!(transport.execution_count(command_id), 0);
+
+        // The same command under the wire mapping id is admitted and runs once.
+        let (status, _) = call_json(
+            &mut router,
+            "POST",
+            format!("{device}/type"),
+            Some(type_body("profile", LEGACY_WIRE_MAPPING)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Emitted)
+        );
+        assert_eq!(transport.execution_count(command_id), 1);
+    }
+
+    #[tokio::test]
+    async fn sequence_route_resolves_mac_aliases_to_the_canonical_plan() {
+        let transport = Arc::new(SimulatorTransport::default());
+        let daemon = Daemon::with_transport(
+            MemoryTokenStore::new("test-token-123456"),
+            transport.clone(),
+        )
+        .expect("daemon");
+        let mut router = daemon.router();
+        let uri = format!("/v1/devices/{SIMULATOR_DEVICE_ID}/sequences");
+        let sequence = |command_id: Uuid, chord: &[&str], ordered: &[&str]| {
+            serde_json::json!({
+                "schema": keyferry_layouts::SEQUENCE_SCHEMA_V1,
+                "command_id": command_id.to_string(),
+                "profile": "windows-us",
+                "arm": "command-scoped",
+                "start_within_ms": 5000,
+                "actions": [
+                    {"type": "chord", "keys": chord},
+                    {"type": "ordered_chord", "keys": ordered}
+                ]
+            })
+        };
+        let command_id = Uuid::now_v7();
+        let alias = sequence(command_id, &["COMMAND", "OPT", "ESCAPE"], &["CMD", "SPACE"]);
+        let (status, _) = call_json(&mut router, "POST", uri.clone(), Some(alias)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Emitted)
+        );
+
+        // The canonical spelling of the same command is the same plan: a duplicate, not a
+        // conflict, and nothing runs twice.
+        let canonical = sequence(
+            command_id,
+            &["LEFT_GUI", "LEFT_ALT", "ESCAPE"],
+            &["LEFT_GUI", "SPACE"],
+        );
+        let (status, duplicate) =
+            call_json(&mut router, "POST", uri.clone(), Some(canonical)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            duplicate["message"],
+            "duplicate command returned existing outcome"
+        );
+        assert_eq!(transport.execution_count(command_id), 1);
+
+        // A different side is a different plan under the same id.
+        let changed = sequence(
+            command_id,
+            &["RIGHT_COMMAND", "OPT", "ESCAPE"],
+            &["CMD", "SPACE"],
+        );
+        let (status, _) = call_json(&mut router, "POST", uri.clone(), Some(changed)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // An alias and its canonical name are one key inside a chord or an ordered chord.
+        for (chord, ordered) in [
+            (&["LEFT_GUI", "COMMAND", "L"][..], &["SPACE"][..]),
+            (&["LEFT_GUI", "L"][..], &["OPTION", "LEFT_ALT"][..]),
+        ] {
+            let body = sequence(Uuid::now_v7(), chord, ordered);
+            let (status, error) = call_json(&mut router, "POST", uri.clone(), Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error["error"], "chord.duplicate_key");
+        }
+        assert_eq!(transport.control_request_counts(), (1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn firmware_view_reports_keyboard_lock_state_as_unsupported() {
+        let gateway_transport = TlsTransport::new(TlsCredentials::new(
+            HostIdentity::generate().unwrap(),
+            [0x22; 16],
+            [0x77; 32],
+        ))
+        .unwrap();
+        gateway_transport.set_test_session_snapshot(tls::TlsSessionSnapshot {
+            link_path: tls::TlsLinkPath::Wifi,
+            protocol_session_id: [0x44; 16],
+            firmware_identity: Some(keyferry_protocol::firmware_identity::FirmwareIdentityV1 {
+                // Every capability bit set: none of them claims keyboard lock reporting.
+                device_capability_mask: u32::MAX,
+                protocol_min_minor: 0,
+                protocol_max_minor: 0,
+                release: "ABC12345".to_owned(),
+                board_compatibility_id: 1,
+                elf_sha256: [0x5a; 32],
+            }),
+        });
+        let daemon = Daemon::with_device_transport_and_gateway(
+            MemoryTokenStore::new("test-token-123456"),
+            SIMULATOR_DEVICE_ID.to_owned(),
+            "Simulator keyboard".to_owned(),
+            Arc::new(SimulatorTransport::default()),
+            Some(GatewayAuthority {
+                transport: gateway_transport,
+                daemon_boot_id: [0x33; 16],
+            }),
+        )
+        .unwrap();
+        let mut router = daemon.router();
+        let (status, device) = call_json(
+            &mut router,
+            "GET",
+            format!("/v1/devices/{SIMULATOR_DEVICE_ID}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(device["firmware"]["endpoint"], "ABC12345");
+        assert_eq!(device["firmware"]["usb_file_set_v2"], true);
+        assert_eq!(device["firmware"]["keyboard_lock_state"], "unsupported");
+        let (status, devices) = call_json(&mut router, "GET", "/v1/devices".to_owned(), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            devices["devices"][0]["firmware"]["keyboard_lock_state"],
+            "unsupported"
+        );
+
+        // A holder view rendered by a daemon that predates the field never reads as "off".
+        let mut older = device["firmware"].clone();
+        older.as_object_mut().unwrap().remove("keyboard_lock_state");
+        let older: FirmwareView = serde_json::from_value(older).unwrap();
+        assert_eq!(older.keyboard_lock_state, KEYBOARD_LOCK_STATE_UNSUPPORTED);
+        assert_eq!(
+            serde_json::to_value(&older).unwrap()["keyboard_lock_state"],
+            "unsupported"
+        );
     }
 
     fn text_stream_request(daemon: &Daemon, job_id: Uuid) -> CreateTextStreamRequest {

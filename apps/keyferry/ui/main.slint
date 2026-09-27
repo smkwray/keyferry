@@ -681,7 +681,6 @@ export component MainWindow inherits Window {
     callback text-changed(string);
     callback text-options-changed();
     callback sequence-changed(string);
-    callback profile-changed(string);
 
     changed text-input => { root.text-changed(text-input); }
     changed text-key-gap-ms => { root.text-options-changed(); }
@@ -690,7 +689,6 @@ export component MainWindow inherits Window {
     changed text-file-path => { root.text-file-path-changed(); }
     changed hotkey => { root.hotkey-changed(hotkey); }
     changed sequence-input => { root.sequence-changed(sequence-input); }
-    changed selected-profile => { root.profile-changed(selected-profile); }
     changed width => { root.compact = root.width < 900px; }
     init => {
         Palette.color-scheme = ColorScheme.dark;
@@ -1276,7 +1274,7 @@ export component MainWindow inherits Window {
                                             }
                                         }
                                         if root.sequence-builder-type == "Text": Field {
-                                            label: "Literal windows-us text";
+                                            label: "Literal text (US ASCII)";
                                             vertical-stretch: 0;
                                             LineEdit {
                                                 text <=> root.sequence-builder-text;
@@ -1518,16 +1516,10 @@ export component MainWindow inherits Window {
                                     title: "Typing";
                                     subtitle: "How text becomes keystrokes on the target computer. Applies to typed text and files.";
                                 }
-                                Field {
-                                    label: "Target keyboard layout";
-                                    HorizontalLayout {
-                                        alignment: start;
-                                        ComboBox {
-                                            min-width: 220px;
-                                            model: ["windows-us"];
-                                            current-value <=> root.selected-profile;
-                                        }
-                                    }
+                                Text {
+                                    text: "Text layout: US ASCII (Windows US or Mac ANSI with U.S. input)";
+                                    color: Theme.text-primary;
+                                    wrap: word-wrap;
                                 }
                                 HorizontalLayout {
                                     spacing: 16px;

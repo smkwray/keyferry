@@ -1,11 +1,12 @@
 use keyferry_layouts::text_stream::replace_unsupported_text;
 use keyferry_layouts::{
-    compile_sequence, keyboard_key, plan_text_us, KeyboardSequenceV1, LayoutError, SequenceAction,
-    SequenceArmPolicy, TypingTiming, KEYBOARD_KEYS, SEQUENCE_SCHEMA_V1,
+    compile_sequence, keyboard_key, plan_text_us, resolve_key_name, KeyboardSequenceV1,
+    LayoutError, SequenceAction, SequenceArmPolicy, TypingTiming, KEYBOARD_KEYS, KEY_ALIASES,
+    LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
 };
 use serde_json::Value;
 
-pub const DEFAULT_PROFILE: &str = "windows-us";
+pub const DEFAULT_PROFILE: &str = LEGACY_WIRE_MAPPING;
 pub const SEQUENCE_EXAMPLE: &str = r#"{
   "schema": "keyferry.keyboard-sequence.v1",
   "profile": "windows-us",
@@ -222,14 +223,20 @@ fn canonical_key_name(name: &str) -> Option<String> {
         .filter(|character| !matches!(character, ' ' | '_' | '-'))
         .collect::<String>()
         .to_ascii_uppercase();
-    let alias = match compact.as_str() {
-        "CTRL" | "CONTROL" => "LEFT_CONTROL",
-        "SHIFT" => "LEFT_SHIFT",
-        "ALT" | "OPTION" => "LEFT_ALT",
-        "WIN" | "WINDOWS" | "GUI" | "META" | "SUPER" | "CMD" | "COMMAND" => "LEFT_GUI",
+    // Registry names, then the shared layouts alias table (the single alias authority), both
+    // compared in the same compacted form and resolved by the production resolver.
+    if let Some(key) = KEYBOARD_KEYS
+        .iter()
+        .map(|entry| entry.name)
+        .chain(KEY_ALIASES.iter().map(|(alias, _)| *alias))
+        .find(|name| name.replace('_', "") == compact)
+        .and_then(resolve_key_name)
+    {
+        return Some(key.name.to_owned());
+    }
+    // Typing abbreviations for keys that have no protocol alias.
+    let abbreviation = match compact.as_str() {
         "CAPS" => "CAPS_LOCK",
-        "ESC" => "ESCAPE",
-        "RETURN" => "ENTER",
         "DEL" => "DELETE",
         "INS" => "INSERT",
         "PGUP" => "PAGE_UP",
@@ -238,14 +245,9 @@ fn canonical_key_name(name: &str) -> Option<String> {
         "DOWN" => "DOWN_ARROW",
         "LEFT" => "LEFT_ARROW",
         "RIGHT" => "RIGHT_ARROW",
-        _ => {
-            return KEYBOARD_KEYS
-                .iter()
-                .find(|entry| entry.name.replace('_', "") == compact)
-                .map(|entry| entry.name.to_owned())
-        }
+        _ => return None,
     };
-    Some(alias.to_owned())
+    Some(abbreviation.to_owned())
 }
 
 /// Parses keys typed in press order and separated by `+` into registry names.
@@ -265,7 +267,7 @@ pub fn parse_key_names(input: &str) -> Result<Vec<String>, String> {
                 .filter(|canonical| keyboard_key(canonical).is_some())
                 .ok_or_else(|| {
                     format!(
-                        "Key {} is not a known key name. Try Ctrl, Shift, Alt, Win, CapsLock, Enter, F5, PageUp, or a single character.",
+                        "Key {} is not a known key name. Try Ctrl, Shift, Alt or Opt, Win or Cmd, CapsLock, Enter, F5, PageUp, or a single character.",
                         index + 1
                     )
                 })
@@ -556,6 +558,37 @@ mod tests {
             ready.status,
             "Ready · presses CAPS_LOCK → SPACE → J in order, then releases in reverse."
         );
+    }
+
+    #[test]
+    fn hotkeys_resolve_mac_names_through_the_shared_alias_table() {
+        assert_eq!(
+            parse_key_names("Cmd + Opt + Esc").unwrap(),
+            ["LEFT_GUI", "LEFT_ALT", "ESCAPE"]
+        );
+        assert_eq!(
+            parse_key_names("right cmd + Right-Option + command + return").unwrap(),
+            ["RIGHT_GUI", "RIGHT_ALT", "LEFT_GUI", "ENTER"]
+        );
+        for (alias, canonical) in KEY_ALIASES {
+            let friendly = alias.to_ascii_lowercase().replace('_', " ");
+            assert_eq!(parse_key_names(alias).unwrap(), [*canonical], "{alias}");
+            assert_eq!(parse_key_names(&friendly).unwrap(), [*canonical], "{alias}");
+        }
+        let ready = preview_hotkey("Cmd + Opt + Esc");
+        assert!(ready.accepted);
+        assert_eq!(
+            ready.status,
+            "Ready · presses LEFT_GUI → LEFT_ALT → ESCAPE in order, then releases in reverse."
+        );
+        assert!(matches!(
+            hotkey_action("Cmd+Opt+Esc").unwrap(),
+            SequenceAction::OrderedChord { keys, timing: None }
+                if keys == ["LEFT_GUI", "LEFT_ALT", "ESCAPE"]
+        ));
+        let duplicate = preview_hotkey("Cmd + Win");
+        assert!(!duplicate.accepted);
+        assert!(duplicate.status.contains("no command will be sent"));
     }
 
     #[test]

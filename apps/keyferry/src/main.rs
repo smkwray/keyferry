@@ -10,8 +10,8 @@ mod provisioning;
 use keyferry::{
     api::{
         ApiClient, ApiError, CommandOutcome, DeviceView, DisplayOrientation,
-        DisplayOrientationStatus, EventRecord, OutputMode, OutputModeStatus, ScreenPower,
-        ScreenPowerStatus, UsbFileStatus,
+        DisplayOrientationStatus, EventRecord, FirmwareView, OutputMode, OutputModeStatus,
+        ScreenPower, ScreenPowerStatus, UsbFileStatus, KEYBOARD_LOCK_STATE_UNSUPPORTED,
     },
     presentation::{outcome_view, render_diagnostic_event, OutcomeTone},
     preview::{
@@ -26,8 +26,8 @@ use keyferry::{
     },
 };
 use keyferry_layouts::{
-    compile_sequence, text_stream::UnsupportedTextPolicy, KeyboardSequenceV1, SequenceAction,
-    SequenceArmPolicy, TypingTiming, SEQUENCE_SCHEMA_V1,
+    compile_sequence, is_wire_mapping, text_stream::UnsupportedTextPolicy, KeyboardSequenceV1,
+    SequenceAction, SequenceArmPolicy, TypingTiming, SEQUENCE_SCHEMA_V1,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::{
@@ -1390,10 +1390,6 @@ fn install_preview(window: &ui::MainWindow) {
         update_text_preview(&weak);
     });
     let weak = window.as_weak();
-    window.on_profile_changed(move |_| {
-        update_text_preview(&weak);
-    });
-    let weak = window.as_weak();
     window.on_text_options_changed(move || {
         update_text_preview(&weak);
     });
@@ -1651,7 +1647,7 @@ fn update_text_preview(weak: &Weak<ui::MainWindow>) {
             return;
         }
     };
-    if window.get_selected_profile().as_str() != "windows-us" {
+    if !is_wire_mapping(window.get_selected_profile().as_str()) {
         window.set_preview_status("Rejected: unsupported target profile.".into());
         window.set_text_send_enabled(false);
         return;
@@ -2171,7 +2167,7 @@ fn install_api_actions(
             return;
         };
         let Some(window) = weak.upgrade() else { return };
-        if window.get_selected_profile().as_str() != "windows-us" {
+        if !is_wire_mapping(window.get_selected_profile().as_str()) {
             set_status(&weak, "Text rejected: unsupported target profile.");
             return;
         }
@@ -3578,12 +3574,7 @@ fn update_device_view(window: &ui::MainWindow, device: &DeviceView) {
         .map(|outcome| format!("Active: {}", outcome_label(outcome)))
         .unwrap_or_else(|| "No active command".to_owned());
     window.set_active_command(active.into());
-    let firmware = device
-        .firmware
-        .as_ref()
-        .map(|firmware| format!("Reported endpoint firmware: {}", firmware.endpoint))
-        .unwrap_or_else(|| "Firmware version is not reported by this device.".to_owned());
-    window.set_firmware_status(firmware.into());
+    window.set_firmware_status(firmware_status(device.firmware.as_ref()).into());
     let usb_file_supported = device
         .firmware
         .as_ref()
@@ -3856,6 +3847,19 @@ fn device_count_status(count: usize) -> String {
         1 => "1 device".to_owned(),
         n => format!("{n} devices"),
     }
+}
+
+/// The Keyboard & display page status line. The lock-state sentence stays out of the Devices
+/// summary, which never shows "not reported" placeholders.
+fn firmware_status(firmware: Option<&FirmwareView>) -> String {
+    let Some(firmware) = firmware else {
+        return "Firmware version is not reported by this device.".to_owned();
+    };
+    let mut status = format!("Reported endpoint firmware: {}", firmware.endpoint);
+    if firmware.keyboard_lock_state == KEYBOARD_LOCK_STATE_UNSUPPORTED {
+        status.push_str("\nCaps Lock state is not reported by this firmware.");
+    }
+    status
 }
 
 fn render_device_fields(device: &DeviceView) -> Vec<ui::DetailRow> {
@@ -4439,6 +4443,7 @@ mod tests {
                 screen_power_v1: false,
                 usb_file_handoff_v1: false,
                 usb_file_set_v2: false,
+                keyboard_lock_state: KEYBOARD_LOCK_STATE_UNSUPPORTED.to_owned(),
             }),
             capabilities: Vec::new(),
             active_command_id: None,
@@ -4693,6 +4698,44 @@ mod tests {
         device.link_path = Some("wifi".to_owned());
         device.via = None;
         assert_eq!(device_route_label(&device), "Wi-Fi");
+    }
+
+    #[test]
+    fn firmware_status_says_caps_lock_is_not_reported_only_on_the_keyboard_page() {
+        let daemon_view = serde_json::json!({
+            "id": "device-1", "label": "Keyferry", "transport": "tls", "link": "authenticated",
+            "link_path": "wifi", "mode": "keyboard", "armed": false,
+            "arm_policy": "command-scoped",
+            "firmware": {
+                "endpoint": "ABC12345", "elf_sha256": "00", "board_compatibility_id": 1,
+                "protocol_major": 1, "protocol_min_minor": 0, "protocol_max_minor": 0,
+                "usb_file_set_v2": true, "keyboard_lock_state": "unsupported"
+            }
+        });
+        let mut device: DeviceView = serde_json::from_value(daemon_view.clone()).unwrap();
+        let expected =
+            "Reported endpoint firmware: ABC12345\nCaps Lock state is not reported by this firmware.";
+        assert_eq!(firmware_status(device.firmware.as_ref()), expected);
+        assert!(!render_device_details(&device).contains("not reported"));
+
+        // A daemon that predates the field reads as unsupported, never as "off".
+        let mut older = daemon_view;
+        older["firmware"]
+            .as_object_mut()
+            .unwrap()
+            .remove("keyboard_lock_state");
+        let older: DeviceView = serde_json::from_value(older).unwrap();
+        assert_eq!(
+            older.firmware.as_ref().unwrap().keyboard_lock_state,
+            KEYBOARD_LOCK_STATE_UNSUPPORTED
+        );
+        assert_eq!(firmware_status(older.firmware.as_ref()), expected);
+
+        device.firmware = None;
+        assert_eq!(
+            firmware_status(device.firmware.as_ref()),
+            "Firmware version is not reported by this device."
+        );
     }
 
     #[test]
