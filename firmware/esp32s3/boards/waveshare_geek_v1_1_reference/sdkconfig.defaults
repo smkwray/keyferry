@@ -1,0 +1,2 @@
+# Directly measured flash capacity on the recovery-qualified first owner unit.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

@@ -1,0 +1,4 @@
+# Qualified board-profile flash capacity; exact-unit identity remains private.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+# The official T-Dongle-S3 profile and observed package have no PSRAM.
+# CONFIG_SPIRAM is not set

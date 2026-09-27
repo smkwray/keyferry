@@ -1,0 +1,13 @@
+{
+  "name": "hello-empty",
+  "frame": {
+    "major": 1,
+    "minor": 0,
+    "message_type": "0x01",
+    "flags": "0x00",
+    "sequence": 1,
+    "payload_hex": ""
+  },
+  "decoded_hex": "48420100010001000000000041cb",
+  "wire_hex": "0448420102010201010101010341cb00"
+}

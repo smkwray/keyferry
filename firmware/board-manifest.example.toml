@@ -1,0 +1,62 @@
+# Copy into an ignored exact-unit evidence directory only from Phase 0 evidence.
+# Never fill a field from a vendor listing, schematic, tutorial, or another unit.
+
+manifest_version = 2
+status = "UNQUALIFIED"
+device_label = "owner-assigned-label"
+qualified_at = "UNMEASURED"
+qualified_by = "UNMEASURED"
+evidence_directory = "hardware/evidence/private/YYYY-MM-DD-device-label"
+
+[identity]
+vendor = "UNMEASURED"
+product = "UNMEASURED"
+sku = "UNMEASURED"
+pcb_revision = "UNMEASURED"
+soc = "UNMEASURED"
+soc_revision = "UNMEASURED"
+
+[usb]
+connector = "UNMEASURED"
+vid = "UNMEASURED"
+pid = "UNMEASURED"
+interfaces = []
+data_gpio_dm = 0
+data_gpio_dp = 0
+external_phy = false
+
+[boot]
+boot_gpio = 0
+reset_method = "UNMEASURED"
+rom_entry_proven_count = 0
+
+[flash]
+manufacturer_id = "UNMEASURED"
+device_id = "UNMEASURED"
+size_bytes = 0
+partition_table_offset = 0
+
+[security]
+secure_boot = "UNMEASURED"
+flash_encryption = "UNMEASURED"
+secure_download_mode = "UNMEASURED"
+efuse_before_sha256 = "UNMEASURED"
+efuse_after_sha256 = "UNMEASURED"
+
+[capabilities]
+display = "UNMEASURED"
+touch = "UNMEASURED"
+button = "UNMEASURED"
+led = "UNMEASURED"
+removable_storage = "UNMEASURED"
+uart0_header = "UNMEASURED"
+
+[pins]
+profile = "UNMEASURED"
+
+[recovery]
+factory_dump_sha256 = "UNMEASURED"
+vendor_archive_sha256 = "UNMEASURED"
+cycle_a_passed = false
+cycle_b_passed = false
+tool_versions_file = "UNMEASURED"

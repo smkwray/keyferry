@@ -1,0 +1,13 @@
+{
+  "name": "status-zero-rich",
+  "frame": {
+    "major": 1,
+    "minor": 0,
+    "message_type": "0x03",
+    "flags": "0x00",
+    "sequence": 7,
+    "payload_hex": "000100ff0002"
+  },
+  "decoded_hex": "484201000300070000000600000100ff0002ecfe",
+  "wire_hex": "04484201020302070101020601020102ff0402ecfe00"
+}

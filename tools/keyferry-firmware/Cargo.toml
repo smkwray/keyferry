@@ -1,0 +1,17 @@
+[package]
+name = "keyferry-firmware-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "keyferry-fw"
+path = "src/main.rs"
+
+[dependencies]
+keyferry-firmware = { path = "../../crates/keyferry-firmware" }
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+sha2 = { version = "=0.10.9", default-features = false }

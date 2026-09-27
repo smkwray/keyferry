@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keyferry.invalid/schema/pairing-bundle-v1.json",
+  "title": "Keyferry first-HIL private pairing bundle",
+  "oneOf": [
+    { "$ref": "#/$defs/device" },
+    { "$ref": "#/$defs/wifi" },
+    { "$ref": "#/$defs/keyferryd" }
+  ],
+  "$defs": {
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "device_id",
+        "link_secret_hex",
+        "host_address",
+        "host_port",
+        "host_certificate_der",
+        "host_spki_der",
+        "host_spki_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "device_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "link_secret_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "writeOnly": true
+        },
+        "host_address": { "type": "string", "minLength": 2, "maxLength": 45 },
+        "host_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "host_certificate_der": { "const": "host-cert.der" },
+        "host_spki_der": { "const": "host-spki.der" },
+        "host_spki_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "wifi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "ssid", "password"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "ssid": { "type": "string", "minLength": 1, "maxLength": 32, "writeOnly": true },
+        "password": { "type": "string", "minLength": 8, "maxLength": 63, "writeOnly": true }
+      }
+    },
+    "keyferryd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "tls_bind", "tls_device_id", "tls_secret_dir"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "tls_bind": { "type": "string", "minLength": 4, "maxLength": 53 },
+        "tls_device_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "tls_secret_dir": { "const": "secrets" }
+      }
+    }
+  }
+}

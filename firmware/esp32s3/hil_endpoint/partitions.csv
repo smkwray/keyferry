@@ -1,0 +1,5 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+factory,  app,  factory, 0x10000, 1M,
+kf_cfg_a, data, 0x40,     0x110000, 0x4000,
+kf_cfg_b, data, 0x41,     0x114000, 0x4000,
+nvs,      data, nvs,      0x118000, 0x3000,

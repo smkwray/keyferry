@@ -1,0 +1,18 @@
+working_name = "keyferry"
+display_name = "Keyferry"
+protocol_name = "hidbridge"
+owner = "smkwray"
+status = "development-seed"
+created = "2026-09-01"
+
+[name_policy]
+minimum_length = 3
+maximum_length = 9
+lowercase_ascii = true
+allow_single_internal_hyphen = true
+
+[product]
+controller_os = ["macos", "windows", "linux"]
+endpoint_hardware = "ESP32-S3 board family with native USB"
+initial_board = "Waveshare ESP32-S3-GEEK (Phase 0 recovery-qualified)"
+legacy_endpoint = "Cactus WHID ESP8266 + ATmega32U4 (parked; recovery retained)"

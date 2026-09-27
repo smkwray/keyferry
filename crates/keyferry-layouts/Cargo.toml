@@ -1,0 +1,17 @@
+[package]
+name = "keyferry-layouts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+keyferry-protocol = { path = "../keyferry-protocol" }
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+sha2 = { version = "=0.10.9", default-features = false }
+uuid = { version = "=1.26.0", default-features = false, features = ["std"] }

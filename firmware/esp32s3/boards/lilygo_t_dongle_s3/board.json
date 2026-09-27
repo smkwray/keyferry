@@ -1,0 +1,43 @@
+{
+  "schema": "keyferry.board-profile.v1",
+  "id": "lilygo_t_dongle_s3",
+  "compatibility_id": 2,
+  "qualified": false,
+  "flash": {"size_mb": 16},
+  "display": {
+    "present": true,
+    "controller": "st7735",
+    "presentation": "compact",
+    "dc_gpio": 2,
+    "cs_gpio": 4,
+    "clk_gpio": 5,
+    "mosi_gpio": 3,
+    "reset_gpio": 1,
+    "backlight_gpio": 38,
+    "width": 160,
+    "height": 80,
+    "x_gap": 1,
+    "y_gap": 26,
+    "madctl": 104,
+    "invert_colors": true,
+    "swap_color_bytes": true,
+    "backlight_active_high": false,
+    "backlight_percent": 18,
+    "pixel_clock_hz": 27000000
+  },
+  "capabilities": {
+    "display": true,
+    "touch": false,
+    "button": true,
+    "led": true,
+    "removable_storage": true,
+    "uart0_header": true
+  },
+  "pins": {
+    "usb_dm_gpio": 19,
+    "usb_dp_gpio": 20,
+    "boot_gpio": 0,
+    "uart0_rx_gpio": 44,
+    "uart0_tx_gpio": 43
+  }
+}

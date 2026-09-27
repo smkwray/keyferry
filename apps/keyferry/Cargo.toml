@@ -1,0 +1,34 @@
+[package]
+name = "keyferry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+getrandom = { version = "=0.4.3", default-features = false }
+keyferry-gateway = { path = "../../crates/keyferry-gateway" }
+keyferry-layouts = { path = "../../crates/keyferry-layouts" }
+keyferry-local-management = { path = "../../crates/keyferry-local-management" }
+keyferry-protocol = { path = "../../crates/keyferry-protocol" }
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+sha2 = { version = "=0.10.9", default-features = false }
+slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-software", "unstable-winit-030"] }
+ureq = { version = "=3.4.1", default-features = false, features = ["rustls"] }
+rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
+rfd = { version = "=0.17.2" }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+uuid = { version = "=1.26.0", default-features = false, features = ["serde", "std", "v7"] }
+
+[dev-dependencies]
+i-slint-backend-testing = { version = "=1.17.1", default-features = false, features = ["renderer-software"] }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+ring = { version = "=0.17.14", default-features = false }
+
+[build-dependencies]
+embed-resource = { version = "=3.0.11" }
+slint-build = { version = "=1.17.1" }

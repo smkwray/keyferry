@@ -1,0 +1,25 @@
+# Public example only. Never put real Wi-Fi, link, recovery, or TLS secrets in this file.
+
+[[devices]]
+id = "00000000-0000-0000-0000-000000000000"
+label = "office-hid"
+target_profile = "windows-us"
+network_mode = "station"
+operational_mode = "keyboard"
+arm_policy = "command-scoped"
+
+[devices.timing]
+key_down_ms = 12
+release_gap_ms = 8
+
+[[devices.wifi_profiles]]
+priority = 10
+ssid = "EXAMPLE-IOT-NETWORK"
+credential_ref = "os-store://keyferry/example-wifi"
+
+[[devices.hosts]]
+label = "example-host"
+host_id = "11111111-1111-1111-1111-111111111111"
+public_key_fingerprint = "EXAMPLE-ONLY"
+link_secret_ref = "os-store://keyferry/example-link"
+enabled = true

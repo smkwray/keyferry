@@ -1,0 +1,13 @@
+{
+  "name": "set-operational-mode",
+  "frame": {
+    "major": 1,
+    "minor": 0,
+    "message_type": "0x13",
+    "flags": "0x00",
+    "sequence": 2,
+    "payload_hex": "02"
+  },
+  "decoded_hex": "484201001300020000000100024e73",
+  "wire_hex": "04484201021302020101020104024e7300"
+}
