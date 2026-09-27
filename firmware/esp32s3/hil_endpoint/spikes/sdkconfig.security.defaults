@@ -1,0 +1,22 @@
+# Compile-only BLE HID feasibility spike. This overlay is never selected by a
+# normal firmware build. It measures the exact pinned secure-connection and
+# one-bond persistence delta without changing the installed device.
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+# CONFIG_BT_NIMBLE_SM_LEGACY is not set
+CONFIG_BT_NIMBLE_SM_SC=y
+# CONFIG_BT_NIMBLE_SM_SC_DEBUG_KEYS is not set
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=y
+# The pinned HID service attaches encrypted+authenticated characteristic flags
+# only for its level-3 branch. SC-only below still forbids legacy pairing.
+CONFIG_BT_NIMBLE_SM_LVL=3
+CONFIG_BT_NIMBLE_SM_SC_ONLY=1
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# ESP-IDF 6.0.3's NVS restore implementation trips GCC 15's array-bounds
+# diagnostic when this compile-time array has exactly one entry. Measure the
+# conservative two-entry stack allocation; the product contract still admits
+# one bond and rejects a second before pairing rather than evicting anything.
+CONFIG_BT_NIMBLE_MAX_BONDS=2
+CONFIG_BT_NIMBLE_MAX_CCCDS=4
+# CONFIG_BT_NIMBLE_HANDLE_REPEAT_PAIRING_DELETION is not set
+CONFIG_BT_NIMBLE_HS_PVCY=y
+CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=y

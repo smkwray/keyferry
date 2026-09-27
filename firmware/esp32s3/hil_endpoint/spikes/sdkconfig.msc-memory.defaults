@@ -1,0 +1,4 @@
+# Unflashed candidate: old cfg/NVS addresses are unchanged; factory is moved.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="spikes/partitions.msc-memory.csv"
+CONFIG_PARTITION_TABLE_FILENAME="spikes/partitions.msc-memory.csv"

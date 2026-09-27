@@ -1,0 +1,2377 @@
+import { ComboBox, LineEdit, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct DeviceListItem {
+    id: string,
+    title: string,
+    subtitle: string,
+}
+
+export struct DetailRow {
+    label: string,
+    value: string,
+    tone: int,
+}
+
+export struct NavEntry {
+    title: string,
+    shortcut: keys,
+    page: int,
+    section: string,
+}
+
+export struct DiagnosticItem {
+    summary: string,
+    explanation: string,
+    tone: int,
+}
+
+export struct WifiProfileItem {
+    index: int,
+    title: string,
+    subtitle: string,
+}
+
+export struct SequenceActionItem {
+    index: int,
+    title: string,
+    detail: string,
+}
+
+export struct UsbFileItem {
+    name: string,
+    path: string,
+    size: int,
+}
+
+export global Theme {
+    in-out property <color> app-background: #07090c;
+    in-out property <color> panel-background: #10151c;
+    in-out property <color> inset-background: #0b0f14;
+    in-out property <color> panel-border: #27313d;
+    in-out property <color> row-hover: #18202a;
+    in-out property <color> row-active: #1c2733;
+    in-out property <color> text-primary: #e6edf3;
+    in-out property <color> text-secondary: #8b98a7;
+    in-out property <color> accent: #2f6fed;
+    in-out property <color> focus-ring: #78a9ff;
+    in-out property <color> success: #67d391;
+    in-out property <color> warn: #e3b341;
+    in-out property <color> danger: #ff7b72;
+}
+
+component AppButton inherits FocusScope {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> compact: false;
+    callback clicked();
+    min-height: root.compact ? 28px : 32px;
+    min-width: root.compact
+        ? max(32px, label-text.preferred-width + 16px)
+        : max(76px, label-text.preferred-width + 28px);
+    horizontal-stretch: 0;
+    focus-on-tab-navigation: true;
+
+    function activate() {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    KeyBinding { keys: @keys(Return); activated => { root.activate(); } }
+    KeyBinding { keys: @keys(Space); activated => { root.activate(); } }
+
+    Rectangle {
+        border-radius: 6px;
+        background: !root.enabled ? #12171e
+            : touch.pressed ? (root.primary ? #2458c9 : #1b2430)
+            : touch.has-hover ? (root.primary ? #2c6ae6 : #1a222c)
+            : root.primary ? Theme.accent
+            : #151b24;
+        border-width: root.has-focus ? 2px : 1px;
+        border-color: root.has-focus ? Theme.focus-ring
+            : root.primary && root.enabled ? Theme.accent
+            : !root.enabled ? #1d252f
+            : Theme.panel-border;
+
+        label-text := Text {
+            text: root.label;
+            color: !root.enabled ? #5f6b78
+                : root.danger ? Theme.danger
+                : Theme.text-primary;
+            font-size: 13px;
+            font-weight: root.primary && root.enabled ? 600 : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        touch := TouchArea {
+            clicked => {
+                root.focus();
+                root.activate();
+            }
+        }
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> label;
+    in property <color> tone: Theme.text-secondary;
+    width: pill-text.preferred-width + 22px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.tone.with-alpha(0.12);
+    border-width: 1px;
+    border-color: root.tone.with-alpha(0.35);
+
+    pill-text := Text {
+        text: root.label;
+        color: root.tone;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component PageHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <color> subtitle-color: Theme.text-secondary;
+    spacing: 12px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 4px;
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-size: 18px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        if root.subtitle != "": Text {
+            text: root.subtitle;
+            color: root.subtitle-color;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+    }
+    @children
+}
+
+component SectionLabel inherits Text {
+    color: Theme.text-secondary;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}
+
+component Field inherits VerticalLayout {
+    in property <string> label;
+    spacing: 5px;
+    Text {
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 12px;
+    }
+    @children
+}
+
+component Card inherits Rectangle {
+    background: Theme.inset-background;
+    border-color: Theme.panel-border;
+    border-width: 1px;
+    border-radius: 8px;
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.panel-border;
+}
+
+component ShortcutHint inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> shortcut;
+    spacing: 6px;
+    Text {
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+    Text {
+        text: root.shortcut;
+        color: Theme.text-secondary;
+        font-size: 11px;
+    }
+}
+
+component NavItem inherits FocusScope {
+    in property <string> title;
+    in property <keys> shortcut;
+    in property <bool> active;
+    in property <bool> show-shortcut: true;
+    callback clicked();
+    height: 34px;
+    focus-on-tab-navigation: true;
+
+    function activate() {
+        root.clicked();
+    }
+
+    KeyBinding { keys: @keys(Return); activated => { root.activate(); } }
+    KeyBinding { keys: @keys(Space); activated => { root.activate(); } }
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.active ? Theme.row-active
+            : touch.has-hover ? Theme.row-hover
+            : transparent;
+        border-width: root.has-focus ? 1px : 0px;
+        border-color: Theme.focus-ring;
+
+        Rectangle {
+            x: 0px;
+            y: (parent.height - self.height) / 2;
+            width: 3px;
+            height: 16px;
+            border-radius: 1.5px;
+            background: Theme.accent;
+            visible: root.active;
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 8px;
+            Text {
+                text: root.title;
+                color: root.active ? Theme.text-primary : Theme.text-secondary;
+                font-size: 13px;
+                font-weight: root.active ? 600 : 400;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if root.show-shortcut: Text {
+                text: root.shortcut.to-string();
+                color: Theme.text-secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        touch := TouchArea {
+            clicked => {
+                root.focus();
+                root.activate();
+            }
+        }
+    }
+}
+
+component ListRow inherits FocusScope {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> badge;
+    in property <color> badge-color: Theme.text-secondary;
+    in property <bool> active;
+    in property <bool> available: true;
+    callback clicked();
+    height: 52px;
+    enabled: root.available;
+    focus-on-tab-navigation: true;
+
+    function activate() {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    KeyBinding { keys: @keys(Return); activated => { root.activate(); } }
+    KeyBinding { keys: @keys(Space); activated => { root.activate(); } }
+
+    Rectangle {
+        border-radius: 8px;
+        background: root.active ? Theme.row-active
+            : touch.has-hover && root.available ? Theme.row-hover
+            : Theme.inset-background;
+        border-width: root.has-focus || root.active ? 1.5px : 1px;
+        border-color: root.has-focus ? Theme.focus-ring
+            : root.active ? Theme.accent.with-alpha(0.7)
+            : Theme.panel-border;
+        opacity: root.available ? 1.0 : 0.55;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 8px;
+            VerticalLayout {
+                spacing: 3px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.title;
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.subtitle;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+            if root.badge != "": Pill {
+                label: root.badge;
+                tone: root.badge-color;
+            }
+        }
+
+        touch := TouchArea {
+            clicked => {
+                root.focus();
+                root.activate();
+            }
+        }
+    }
+}
+
+component SequenceActionRow inherits Rectangle {
+    in property <int> index;
+    in property <int> action-count;
+    in property <string> title;
+    in property <string> detail;
+    callback move-action(int);
+    callback remove-action();
+    height: 46px;
+    border-radius: 8px;
+    background: Theme.inset-background;
+    border-width: 1px;
+    border-color: Theme.panel-border;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 8px;
+        padding-top: 9px;
+        padding-bottom: 9px;
+        spacing: 4px;
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: (root.index + 1) + ". " + root.title;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.detail;
+                color: Theme.text-secondary;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+        AppButton {
+            label: "↑";
+            compact: true;
+            enabled: root.index > 0;
+            clicked => { root.move-action(-1); }
+        }
+        AppButton {
+            label: "↓";
+            compact: true;
+            enabled: root.index < root.action-count - 1;
+            clicked => { root.move-action(1); }
+        }
+        AppButton {
+            label: "×";
+            compact: true;
+            danger: true;
+            clicked => { root.remove-action(); }
+        }
+    }
+}
+
+// Issues this computer its own controller credential from the owner kit, for exactly one Keyferry.
+// When the kit covers several devices, the password is already held by the app and only the
+// device choice remains.
+component AuthorizeForm inherits VerticalLayout {
+    in-out property <string> owner-kit-path;
+    in-out property <string> password;
+    in property <[string]> devices;
+    in-out property <string> device;
+    in property <bool> busy;
+    in property <string> status;
+    in property <bool> failed;
+    callback choose-owner-kit();
+    callback authorize();
+    callback cancel();
+    property <bool> choosing: root.devices.length > 1;
+    spacing: 10px;
+    alignment: start;
+
+    Field {
+        label: "Owner kit";
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> root.owner-kit-path;
+                placeholder-text: "owner-kit.json";
+                enabled: !root.busy && !root.choosing;
+                horizontal-stretch: 1;
+            }
+            AppButton {
+                label: "Browse…";
+                enabled: !root.busy && !root.choosing;
+                clicked => { root.choose-owner-kit(); }
+            }
+        }
+    }
+    if !root.choosing: Field {
+        label: "Owner-kit password";
+        LineEdit {
+            text <=> root.password;
+            input-type: InputType.password;
+            enabled: !root.busy;
+            accepted => {
+                if (root.owner-kit-path != "" && root.password != "" && !root.busy) {
+                    root.authorize();
+                }
+            }
+        }
+    }
+    if root.choosing: Field {
+        label: "Keyferry this computer will control";
+        HorizontalLayout {
+            alignment: start;
+            ComboBox {
+                min-width: 320px;
+                height: 32px;
+                model: root.devices;
+                current-value <=> root.device;
+                enabled: !root.busy;
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        AppButton {
+            label: root.busy ? "Authorizing…" : "Authorize this computer";
+            primary: true;
+            enabled: !root.busy && (root.choosing || (root.owner-kit-path != "" && root.password != ""));
+            clicked => { root.authorize(); }
+        }
+        if root.choosing: AppButton {
+            label: "Cancel";
+            enabled: !root.busy;
+            clicked => { root.cancel(); }
+        }
+    }
+    if root.status != "": Text {
+        text: root.status;
+        color: root.failed ? Theme.danger : root.busy ? Theme.warn : Theme.text-secondary;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: root.endpoint-is-local
+        ? "Keyferry"
+        : "Keyferry — " + root.active-endpoint;
+    icon: @image-url("../assets/icons/png/keyferry-256.png");
+    preferred-width: 980px;
+    preferred-height: 660px;
+    min-width: 760px;
+    min-height: 540px;
+    background: Theme.app-background;
+    forward-focus: key-handler;
+
+    in property <color> app-background: Theme.app-background;
+    in property <color> panel-background: Theme.panel-background;
+    in property <color> inset-background: Theme.inset-background;
+    in property <color> panel-border: Theme.panel-border;
+    in property <color> text-primary: Theme.text-primary;
+    in property <color> text-secondary: Theme.text-secondary;
+    in property <color> success: Theme.success;
+    in property <color> danger: Theme.danger;
+
+    in-out property <int> page: 0;
+    in-out property <[DeviceListItem]> device-items: [];
+    in-out property <string> active-endpoint: "Local";
+    in-out property <string> active-link: "Control offline";
+    in-out property <string> route-via: "";
+    in-out property <bool> route-is-tailnet: false;
+    in-out property <string> local-computer-name: "This computer";
+    in-out property <bool> endpoint-is-local: true;
+    in-out property <[DiagnosticItem]> diagnostic-lines: [];
+    in-out property <string> selected-device: "No device selected";
+    in-out property <string> selected-device-id: "";
+    in-out property <[DetailRow]> device-fields: [];
+    in-out property <string> device-details: "";
+    in-out property <string> active-command: "No active command";
+    in-out property <bool> can-cancel: false;
+    in-out property <bool> can-release-input: false;
+    in-out property <bool> can-submit: false;
+    property <string> readiness-label: !root.control-online ? "Unavailable" : root.text-file-busy || root.can-cancel ? "Busy" : root.can-submit ? "Ready" : "Unavailable";
+    in-out property <string> control-status: "Select an authenticated device to begin.";
+    in-out property <bool> diagnostics-enabled: false;
+    in-out property <string> text-input: "";
+    in-out property <string> text-key-gap-ms: "40";
+    in-out property <string> text-send-after-seconds: "0";
+    in-out property <string> text-unsupported: "Stop on unsupported";
+    in-out property <string> selected-profile: "windows-us";
+    in-out property <string> preview-status: "Enter text to send.";
+    in-out property <bool> text-send-enabled: false;
+    in-out property <string> text-file-path: "";
+    in-out property <string> text-file-status: "Paste a UTF-8 text or AHK path, or choose a file.";
+    in-out property <bool> text-file-ready: false;
+    in-out property <bool> text-file-busy: false;
+    in-out property <bool> text-file-cancellable: false;
+    in-out property <bool> usb-file-supported: false;
+    in-out property <bool> usb-file-set-supported: false;
+    in-out property <bool> usb-file-ready: false;
+    in-out property <int> usb-file-limit-kib;
+    in-out property <string> usb-file-status: "";
+    in-out property <[UsbFileItem]> usb-pending-files: [];
+    in-out property <int> usb-pending-total: 0;
+    in-out property <[UsbFileItem]> usb-published-files: [];
+    in-out property <bool> usb-published-known: false;
+    in-out property <int> usb-published-total: 0;
+    in-out property <string> hotkey: "";
+    in-out property <string> hotkey-status: "";
+    in-out property <bool> hotkey-valid: false;
+    in-out property <string> sequence-example: "";
+    in-out property <string> sequence-input: "";
+    in-out property <string> sequence-status: "Load the example or enter a Sequence v1 JSON object.";
+    in-out property <bool> sequence-valid: false;
+    in-out property <[SequenceActionItem]> sequence-actions: [];
+    in-out property <string> sequence-builder-type: "Keys in order";
+    in-out property <string> sequence-builder-keys: "";
+    in-out property <string> sequence-builder-text: "";
+    in-out property <string> sequence-builder-wait-ms: "250";
+    in-out property <string> sequence-builder-status: "Choose an action; the builder updates the JSON only after validation.";
+    in-out property <string> pairing-bundle: "";
+    in-out property <string> owner-kit-path: "";
+    in-out property <string> current-owner-password: "";
+    in-out property <string> new-owner-password: "";
+    in-out property <string> confirm-owner-password: "";
+    in-out property <string> owner-password-status: "Changes only the encrypted owner-kit file. Existing installations stay valid.";
+    in-out property <bool> owner-password-busy: false;
+    in-out property <string> wifi-ssid: "";
+    in-out property <string> wifi-password: "";
+    in-out property <[WifiProfileItem]> wifi-profile-items: [];
+    in-out property <int> selected-wifi-profile: -1;
+    in-out property <string> wifi-policy-path: "";
+    in-out property <string> wifi-owner-password: "";
+    in-out property <bool> wifi-policy-loaded: false;
+    in-out property <bool> wifi-policy-dirty: false;
+    in-out property <string> provisioning-status: "USB access is required to change Wi-Fi or pairing.";
+    in-out property <bool> provisioning-busy: false;
+    in-out property <string> local-recovery-password: "";
+    in-out property <string> local-recovery-status: "";
+    in-out property <bool> local-recovery-busy: false;
+    in-out property <bool> local-recovery-confirming: false;
+    in-out property <string> local-recovery-confirm-device-id: "";
+    in-out property <string> second-device-password: "";
+    in-out property <string> second-device-status: "Preparation updates local owner materials only; no dongle is written.";
+    in-out property <string> firmware-status: "Select a device to view its reported firmware.";
+    in-out property <bool> output-mode-supported: false;
+    in-out property <bool> output-mode-busy: false;
+    in-out property <string> output-mode-status: "Direct Bluetooth keyboard mode is unavailable.";
+    in-out property <bool> display-orientation-supported: false;
+    in-out property <bool> display-orientation-busy: false;
+    in-out property <string> display-orientation-status: "Display orientation control is unavailable.";
+    in-out property <bool> screen-power-supported: false;
+    in-out property <bool> screen-power-busy: false;
+    in-out property <bool> screen-power-known: false;
+    in-out property <bool> screen-power-on: true;
+    in-out property <bool> screen-power-pending: false;
+    in-out property <string> screen-power-status: "Select a device to view its screen setting.";
+    property <bool> screen-power-ready: root.screen-power-supported && root.screen-power-known
+        && root.can-submit && !root.screen-power-busy && !root.screen-power-pending
+        && !root.provisioning-busy && !root.text-file-busy && !root.output-mode-busy
+        && !root.display-orientation-busy;
+    in-out property <bool> ble-hid-bond-reset-supported: false;
+    in-out property <bool> ble-hid-active: false;
+    in-out property <bool> ble-hid-bond-reset-busy: false;
+    in-out property <bool> ble-hid-bond-reset-confirming: false;
+    in-out property <string> ble-hid-bond-reset-status: "Pairing reset is unavailable.";
+    in-out property <string> nearby-status: "Checking the background nearby gateway…";
+    in-out property <string> status: "Starting…";
+    in-out property <bool> computer-authorized: true;
+    in-out property <string> authorize-password: "";
+    in-out property <[string]> authorize-devices: [];
+    in-out property <string> authorize-device: "";
+    in-out property <bool> authorize-busy: false;
+    in-out property <bool> authorize-failed: false;
+    in-out property <string> authorize-status: "";
+
+    // The Send page sends either typed/pasted text or one validated file streamed by the daemon.
+    in-out property <bool> file-mode: false;
+    // Set from width changes rather than bound to width, so layout constraints cannot form a binding loop.
+    property <bool> compact: false;
+    property <bool> control-online: root.computer-authorized && root.selected-device-id != "" && root.active-link != "Control offline";
+    property <bool> text-ready-to-send: root.can-submit && root.text-send-enabled && !root.text-file-busy;
+    property <bool> file-ready-to-send: root.can-submit && root.text-file-ready && !root.text-file-busy;
+    property <bool> hotkey-ready-to-send: root.can-submit && root.hotkey-valid && !root.text-file-busy;
+
+    in-out property <[NavEntry]> nav-items: [
+        { title: "Send", shortcut: @keys(Control + Digit1), page: 0, section: "" },
+        { title: "Sequences", shortcut: @keys(Control + Digit2), page: 1, section: "" },
+        { title: "Devices", shortcut: @keys(Control + Digit3), page: 2, section: "" },
+        { title: "Typing", shortcut: @keys(Control + Digit4), page: 3, section: "SETTINGS" },
+        { title: "Setup & security", shortcut: @keys(Control + Digit5), page: 7, section: "" },
+        { title: "Diagnostics", shortcut: @keys(Control + Digit6), page: 8, section: "" },
+    ];
+
+    callback navigate(int);
+    callback select-device(string);
+    callback refresh();
+    callback send-text();
+    callback choose-text-file();
+    callback load-text-file-path();
+    callback text-file-path-changed();
+    callback send-text-file();
+    callback publish-usb-file();
+    callback clear-usb-file();
+    callback choose-usb-files();
+    callback remove-usb-pending-file(int);
+    callback publish-usb-files();
+    callback refresh-usb-files();
+    callback cancel-text-file();
+    callback send-hotkey();
+    callback hotkey-changed(string);
+    callback send-sequence();
+    callback add-sequence-action();
+    callback remove-sequence-action(int);
+    callback move-sequence-action(int, int);
+    callback set-output-mode(string);
+    callback set-local-output-mode(string);
+    callback set-display-orientation(string);
+    callback set-screen-power(string);
+    callback reset-ble-hid-bond();
+    callback cancel();
+    callback release-input();
+    callback toggle-diagnostics();
+    callback apply-wifi();
+    callback recover-initial-wifi-policy();
+    callback load-wifi-policy();
+    callback new-wifi-profile();
+    callback select-wifi-profile(int);
+    callback save-wifi-profile();
+    callback remove-wifi-profile();
+    callback move-wifi-profile(int);
+    callback check-provisioning();
+    callback refresh-local-status();
+    callback run-local-recovery(string);
+    callback prepare-second-device();
+    callback change-owner-password();
+    callback choose-owner-kit();
+    callback authorize-this-computer();
+    callback cancel-authorize();
+    callback text-changed(string);
+    callback text-options-changed();
+    callback sequence-changed(string);
+    callback profile-changed(string);
+
+    changed text-input => { root.text-changed(text-input); }
+    changed text-key-gap-ms => { root.text-options-changed(); }
+    changed text-send-after-seconds => { root.text-options-changed(); }
+    changed text-unsupported => { root.text-options-changed(); }
+    changed text-file-path => { root.text-file-path-changed(); }
+    changed hotkey => { root.hotkey-changed(hotkey); }
+    changed sequence-input => { root.sequence-changed(sequence-input); }
+    changed selected-profile => { root.profile-changed(selected-profile); }
+    changed width => { root.compact = root.width < 900px; }
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+        key-handler.focus();
+    }
+
+    pure function field-color(tone: int) -> color {
+        if (tone == 1) {
+            Theme.success
+        } else if (tone == 2) {
+            Theme.warn
+        } else if (tone == 3) {
+            Theme.danger
+        } else {
+            Theme.text-primary
+        }
+    }
+
+    function go-to(page: int) {
+        root.navigate(page);
+        key-handler.focus();
+    }
+
+    // Stop cancels active work or drops an existing input grant.
+    function stop() {
+        if (root.text-file-cancellable) {
+            root.cancel-text-file();
+        } else if (root.can-cancel) {
+            root.cancel();
+        } else if (root.can-release-input) {
+            root.release-input();
+        }
+    }
+
+    function send-current-text() {
+        if (root.file-mode) {
+            root.send-text-file();
+        } else {
+            root.send-text();
+        }
+    }
+
+    function add-hotkey-key(key: string) {
+        root.hotkey = root.hotkey == "" ? key : root.hotkey + " + " + key;
+    }
+
+    key-handler := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: true;
+        focus-on-tab-navigation: false;
+
+        KeyBinding { keys: @keys(Control + Digit1); activated => { root.go-to(0); } }
+        KeyBinding { keys: @keys(Control + Digit2); activated => { root.go-to(1); } }
+        KeyBinding { keys: @keys(Control + Digit3); activated => { root.go-to(2); } }
+        KeyBinding { keys: @keys(Control + Digit4); activated => { root.go-to(3); } }
+        KeyBinding { keys: @keys(Control + Digit5); activated => { root.go-to(7); } }
+        KeyBinding { keys: @keys(Control + Digit6); activated => { root.go-to(8); } }
+        refresh-key := KeyBinding { keys: @keys(Control + R); activated => { root.refresh(); } }
+        KeyBinding { keys: @keys(Control + OpenBracket); activated => { root.go-to(root.page == 0 ? 8 : root.page == 1 ? 0 : root.page == 2 ? 1 : root.page == 3 ? 2 : root.page == 7 ? 3 : 7); } }
+        KeyBinding { keys: @keys(Control + CloseBracket); activated => { root.go-to(root.page == 0 ? 1 : root.page == 1 ? 2 : root.page == 2 || (root.page >= 4 && root.page <= 6) ? 3 : root.page == 3 ? 7 : root.page == 7 ? 8 : 0); } }
+        send-key := KeyBinding {
+            keys: @keys(Control + Return);
+            enabled: (root.page == 0 && (root.file-mode ? root.file-ready-to-send : root.text-ready-to-send))
+                || (root.page == 1 && root.can-submit && root.sequence-valid && !root.text-file-busy);
+            activated => {
+                if (root.page == 0) {
+                    root.send-current-text();
+                } else if (root.page == 1) {
+                    root.send-sequence();
+                }
+            }
+        }
+        stop-key := KeyBinding {
+            keys: @keys(Escape);
+            enabled: root.text-file-cancellable || root.can-cancel || root.can-release-input;
+            activated => { root.stop(); }
+        }
+
+        Rectangle {
+            background: Theme.app-background;
+            VerticalLayout {
+                padding: 16px;
+                padding-top: 12px;
+                padding-bottom: 10px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    height: 36px;
+                    spacing: 10px;
+                    Image {
+                        source: @image-url("../assets/icons/png/keyferry-128.png");
+                        width: 34px;
+                        height: 34px;
+                        image-rendering: smooth;
+                    }
+                    Text {
+                        text: "Keyferry";
+                        color: Theme.text-primary;
+                        font-size: 20px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: !root.computer-authorized ? "This computer is not authorized"
+                                : root.active-endpoint == "No daemon" ? "Controller service not running"
+                                : root.selected-device-id == "" ? "No device selected"
+                                : root.control-online ? "Online · " + root.active-link : "Offline";
+                            tone: root.control-online ? Theme.success : Theme.warn;
+                        }
+                    }
+                    if !root.endpoint-is-local && root.active-endpoint != "No daemon": VerticalLayout {
+                        alignment: center;
+                        Pill {
+                            label: "Controller: " + root.active-endpoint;
+                            tone: Theme.focus-ring;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        alignment: center;
+                        AppButton {
+                            label: "Refresh";
+                            clicked => { root.refresh(); }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        width: root.compact ? 148px : 176px;
+                        spacing: 2px;
+                        for item in root.nav-items: VerticalLayout {
+                            spacing: 2px;
+                            if item.section != "": VerticalLayout {
+                                padding-left: 12px;
+                                padding-top: 14px;
+                                padding-bottom: 4px;
+                                SectionLabel { text: item.section; }
+                            }
+                            NavItem {
+                                title: item.title;
+                                shortcut: item.shortcut;
+                                show-shortcut: !root.compact;
+                                active: root.page == item.page || (item.page == 2 && root.page >= 4 && root.page <= 6);
+                                clicked => { root.go-to(item.page); }
+                            }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                        VerticalLayout {
+                            vertical-stretch: 0;
+                            padding-left: 12px;
+                            padding-right: 10px;
+                            spacing: 4px;
+                            Divider { }
+                            Rectangle { height: 2px; }
+                            ShortcutHint { label: "Stop"; shortcut: stop-key.keys.to-string(); }
+                            ShortcutHint { label: "Refresh"; shortcut: refresh-key.keys.to-string(); }
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                        background: Theme.panel-background;
+                        border-color: Theme.panel-border;
+                        border-width: 1px;
+                        border-radius: 10px;
+
+                        if root.page == 0 && !root.computer-authorized: HorizontalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            alignment: center;
+                            VerticalLayout {
+                                max-width: 540px;
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 16px;
+                                PageHeader {
+                                    title: "Authorize this computer";
+                                    subtitle: "Use your owner kit to give this computer its own key, so it can control your Keyferry. Nothing needs to be copied or run elsewhere.";
+                                }
+                                AuthorizeForm {
+                                    owner-kit-path <=> root.owner-kit-path;
+                                    password <=> root.authorize-password;
+                                    devices: root.authorize-devices;
+                                    device <=> root.authorize-device;
+                                    busy: root.authorize-busy;
+                                    status: root.authorize-status;
+                                    failed: root.authorize-failed;
+                                    choose-owner-kit => { root.choose-owner-kit(); }
+                                    authorize => { root.authorize-this-computer(); }
+                                    cancel => { root.cancel-authorize(); }
+                                }
+                            }
+                        }
+
+                        if root.page == 0 && root.computer-authorized: ScrollView {
+                          VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: root.compact ? 8px : 10px;
+
+                            Card {
+                                VerticalLayout {
+                                    padding: 12px;
+                                    padding-left: 14px;
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Rectangle {
+                                                width: 10px;
+                                                height: 10px;
+                                                border-radius: 5px;
+                                                background: root.control-online ? Theme.success : Theme.warn;
+                                            }
+                                        }
+                                        Text {
+                                            text: root.selected-device;
+                                            color: Theme.text-primary;
+                                            font-size: 16px;
+                                            font-weight: 700;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                        }
+                                        if root.selected-device-id != "": VerticalLayout {
+                                            alignment: center;
+                                            Pill {
+                                                label: root.readiness-label;
+                                                tone: root.readiness-label == "Ready" ? Theme.success : Theme.warn;
+                                            }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        if root.can-cancel || root.can-release-input: AppButton {
+                                            label: "Stop";
+                                            danger: true;
+                                            clicked => { root.stop(); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        padding-left: 20px;
+                                        Text {
+                                            text: root.selected-device-id == ""
+                                                ? (root.device-items.length == 0
+                                                    ? "Waiting for your Keyferry. Keep it plugged into the target computer; it connects here over Wi-Fi or Bluetooth."
+                                                    : "Choose which Keyferry to control in Devices.")
+                                                : !root.control-online
+                                                ? "Not connected yet. Waiting for it over Wi-Fi or Bluetooth; this updates automatically."
+                                                : root.route-is-tailnet
+                                                ? "Online via " + root.route-via + " over tailnet"
+                                                : root.active-link == "Wi-Fi" || root.active-link == "Bluetooth" || root.active-link == "Connected"
+                                                ? (root.active-link == "Connected" ? "Online" : "Online over " + root.active-link)
+                                                    + " · controlled by "
+                                                    + (root.endpoint-is-local
+                                                        ? root.local-computer-name + " (this computer)"
+                                                        : root.active-endpoint)
+                                                : "Online · " + root.active-link;
+                                            color: root.selected-device-id != "" && !root.control-online
+                                                ? Theme.warn : Theme.text-primary;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        if root.device-items.length > 1 || root.selected-device-id == "": AppButton {
+                                            label: "Devices";
+                                            compact: true;
+                                            clicked => { root.go-to(2); }
+                                        }
+                                    }
+                                    if root.control-online: HorizontalLayout {
+                                        padding-left: 20px;
+                                        Text {
+                                            text: root.text-file-busy ? "Transfer in progress." : root.control-status;
+                                            color: Theme.text-secondary;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                SectionLabel { text: "TEXT"; vertical-alignment: center; }
+                                Text {
+                                    text: send-key.keys.to-string() + " sends";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    horizontal-stretch: 1;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if !root.file-mode: TextEdit {
+                                text <=> root.text-input;
+                                placeholder-text: "Type or paste text to send to the target computer…";
+                                enabled: !root.text-file-busy;
+                                min-height: 56px;
+                                vertical-stretch: 1;
+                            }
+                            if root.file-mode: Card {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 8px;
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        LineEdit {
+                                            text <=> root.text-file-path;
+                                            placeholder-text: "Paste a UTF-8 text or AHK file path";
+                                            enabled: !root.text-file-busy;
+                                            horizontal-stretch: 1;
+                                        }
+                                        AppButton {
+                                            label: "Load path";
+                                            enabled: root.text-file-path != "" && !root.text-file-busy;
+                                            clicked => { root.load-text-file-path(); }
+                                        }
+                                        AppButton {
+                                            label: "Choose file";
+                                            enabled: !root.text-file-busy;
+                                            clicked => { root.choose-text-file(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Files are checked first, then streamed in bounded chunks.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.text-file-busy || root.file-mode ? root.text-file-status : root.preview-status;
+                                    color: root.text-file-busy ? Theme.warn
+                                        : root.file-mode ? (root.text-file-ready ? Theme.success : Theme.text-secondary)
+                                        : root.text-send-enabled ? Theme.success
+                                        : root.text-input == "" ? Theme.text-secondary
+                                        : Theme.danger;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                if root.text-file-cancellable: AppButton {
+                                    label: "Cancel stream";
+                                    danger: true;
+                                    clicked => { root.cancel-text-file(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                AppButton {
+                                    label: root.file-mode ? "Type text instead" : "Send a file…";
+                                    enabled: !root.text-file-busy;
+                                    clicked => {
+                                        if (root.file-mode) {
+                                            root.file-mode = false;
+                                            root.text-file-path = "";
+                                        } else {
+                                            root.file-mode = true;
+                                            root.choose-text-file();
+                                        }
+                                    }
+                                }
+                                AppButton {
+                                    label: "Typing options";
+                                    clicked => { root.go-to(3); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                AppButton {
+                                    label: root.file-mode ? "Type file contents" : "Send";
+                                    primary: true;
+                                    enabled: root.file-mode ? root.file-ready-to-send : root.text-ready-to-send;
+                                    clicked => { root.send-current-text(); }
+                                }
+                            }
+
+                            if root.usb-file-supported || root.usb-file-set-supported: VerticalLayout {
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    AppButton {
+                                        label: "Save as USB file";
+                                        enabled: root.usb-file-supported && root.usb-file-ready && !root.text-file-busy && (!root.file-mode || root.text-file-path != "");
+                                        clicked => { root.publish-usb-file(); }
+                                    }
+                                    AppButton {
+                                        label: "Clear USB drive";
+                                        enabled: root.usb-file-ready && !root.text-file-busy;
+                                        clicked => { root.clear-usb-file(); }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    AppButton {
+                                        label: "Choose USB files…";
+                                        enabled: root.usb-file-set-supported && root.usb-file-ready && !root.text-file-busy;
+                                        clicked => { root.choose-usb-files(); }
+                                    }
+                                    if root.usb-file-set-supported: AppButton {
+                                        label: "Refresh drive";
+                                        enabled: root.usb-file-ready && !root.text-file-busy;
+                                        clicked => { root.refresh-usb-files(); }
+                                    }
+                                    if root.usb-pending-files.length > 0: AppButton {
+                                        label: "Publish " + root.usb-pending-files.length + " files";
+                                        primary: true;
+                                        enabled: root.usb-file-set-supported && root.usb-file-ready && !root.text-file-busy;
+                                        clicked => { root.publish-usb-files(); }
+                                    }
+                                }
+                                if root.usb-file-supported && !root.usb-file-set-supported: Text {
+                                    text: "Several files need newer stick firmware. One MESSAGE.TXT still works.";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                if root.usb-pending-files.length > 0: VerticalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Ready to replace the whole USB drive: " + root.usb-pending-files.length
+                                            + " files · " + root.usb-pending-total + " of "
+                                            + root.usb-file-limit-kib * 1024 + " bytes";
+                                        color: Theme.warn;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    ScrollView {
+                                        height: root.compact ? 96px : 120px;
+                                        VerticalLayout {
+                                            alignment: start;
+                                            spacing: 3px;
+                                            for file[index] in root.usb-pending-files: HorizontalLayout {
+                                                spacing: 6px;
+                                                Text {
+                                                    text: file.name + " · " + file.size + " bytes";
+                                                    color: Theme.text-primary;
+                                                    font-size: 11px;
+                                                    overflow: elide;
+                                                    horizontal-stretch: 1;
+                                                }
+                                                AppButton {
+                                                    label: "Remove";
+                                                    compact: true;
+                                                    enabled: !root.text-file-busy;
+                                                    clicked => { root.remove-usb-pending-file(index); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.usb-file-set-supported && root.usb-published-known: VerticalLayout {
+                                    spacing: 3px;
+                                    Text {
+                                        text: root.usb-published-files.length == 0
+                                            ? "Currently on drive: empty"
+                                            : "Currently on drive: " + root.usb-published-files.length
+                                                + " files · " + root.usb-published-total + " bytes";
+                                        color: Theme.text-primary;
+                                        font-size: 11px;
+                                    }
+                                    if root.usb-published-files.length > 0: ScrollView {
+                                        height: root.compact ? 68px : 88px;
+                                        VerticalLayout {
+                                            alignment: start;
+                                            for file in root.usb-published-files: Text {
+                                                text: file.name + " · " + file.size + " bytes";
+                                                color: Theme.text-secondary;
+                                                font-size: 11px;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.usb-file-supported: Text {
+                                    text: "Save as USB file publishes only MESSAGE.TXT and replaces the whole drive.";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: root.can-release-input ? "Stop input before saving a USB file."
+                                        : root.usb-file-status != "" ? root.usb-file-status
+                                        : "KEYFERRY USB drive · " + root.usb-file-limit-kib + " KiB shared maximum · Cleared when unplugged.";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            Divider { }
+                            SectionLabel { text: "KEYS AND HOTKEYS"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                LineEdit {
+                                    text <=> root.hotkey;
+                                    placeholder-text: "Enter, Ctrl + L, CapsLock + Space + J…";
+                                    horizontal-stretch: 1;
+                                    accepted => {
+                                        if (root.hotkey-ready-to-send) {
+                                            root.send-hotkey();
+                                        }
+                                    }
+                                }
+                                AppButton {
+                                    label: "Send keys";
+                                    primary: true;
+                                    enabled: root.hotkey-ready-to-send;
+                                    clicked => { root.send-hotkey(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                for key in ["Ctrl", "Shift", "Alt", "Win", "CapsLock", "Space", "Enter", "Tab", "Esc"]: AppButton {
+                                    label: key;
+                                    compact: true;
+                                    clicked => { root.add-hotkey-key(key); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                AppButton {
+                                    label: "Clear";
+                                    compact: true;
+                                    enabled: root.hotkey != "";
+                                    clicked => { root.hotkey = ""; }
+                                }
+                            }
+                            Text {
+                                text: root.hotkey-status;
+                                color: root.hotkey-valid ? Theme.success
+                                    : root.hotkey == "" ? Theme.text-secondary
+                                    : Theme.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                          }
+                        }
+
+                        if root.page == 1: VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            PageHeader {
+                                title: "Sequences";
+                                subtitle: "Combine text, keys, hotkeys, waits, and repeats into one command.";
+                                VerticalLayout {
+                                    alignment: start;
+                                    AppButton {
+                                        label: "Run sequence";
+                                        primary: true;
+                                        enabled: root.can-submit && root.sequence-valid && !root.text-file-busy;
+                                        clicked => { root.send-sequence(); }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                vertical-stretch: 1;
+                                Card {
+                                    width: root.compact ? 236px : 290px;
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+                                        SectionLabel { text: "ADD VALIDATED ACTION"; }
+                                        ComboBox {
+                                            model: ["Keys in order", "Keys together", "Text", "Wait"];
+                                            current-value <=> root.sequence-builder-type;
+                                        }
+                                        if root.sequence-builder-type == "Keys in order" || root.sequence-builder-type == "Keys together": Field {
+                                            label: root.sequence-builder-type == "Keys in order"
+                                                ? "Keys, in press order" : "Keys pressed at the same instant";
+                                            vertical-stretch: 0;
+                                            LineEdit {
+                                                text <=> root.sequence-builder-keys;
+                                                placeholder-text: "Ctrl + L";
+                                                accepted => { root.add-sequence-action(); }
+                                            }
+                                        }
+                                        if root.sequence-builder-type == "Text": Field {
+                                            label: "Literal windows-us text";
+                                            vertical-stretch: 0;
+                                            LineEdit {
+                                                text <=> root.sequence-builder-text;
+                                                placeholder-text: "Text to type";
+                                            }
+                                        }
+                                        if root.sequence-builder-type == "Wait": Field {
+                                            label: "Released-state wait (1–10000 ms)";
+                                            vertical-stretch: 0;
+                                            LineEdit {
+                                                text <=> root.sequence-builder-wait-ms;
+                                                placeholder-text: "250";
+                                                input-type: InputType.number;
+                                            }
+                                        }
+                                        AppButton {
+                                            label: "Add to sequence";
+                                            clicked => { root.add-sequence-action(); }
+                                        }
+                                        Text {
+                                            text: root.sequence-builder-status;
+                                            color: Theme.text-secondary;
+                                            font-size: 11px;
+                                            wrap: word-wrap;
+                                        }
+                                        Divider { }
+                                        HorizontalLayout {
+                                            SectionLabel { text: "CURRENT ORDER"; vertical-alignment: center; }
+                                            Text {
+                                                text: root.sequence-actions.length;
+                                                color: Theme.text-secondary;
+                                                font-size: 11px;
+                                                horizontal-stretch: 1;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        ScrollView {
+                                            vertical-stretch: 1;
+                                            VerticalLayout {
+                                                alignment: start;
+                                                padding-right: 12px;
+                                                spacing: 5px;
+                                                for action in root.sequence-actions: SequenceActionRow {
+                                                    index: action.index;
+                                                    action-count: root.sequence-actions.length;
+                                                    title: action.title;
+                                                    detail: action.detail;
+                                                    move-action(offset) => { root.move-sequence-action(action.index, offset); }
+                                                    remove-action => { root.remove-sequence-action(action.index); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        SectionLabel { text: "SEQUENCE V1 JSON"; vertical-alignment: center; horizontal-stretch: 1; }
+                                        AppButton {
+                                            label: "Reset example";
+                                            compact: true;
+                                            clicked => { root.sequence-input = root.sequence-example; }
+                                        }
+                                    }
+                                    Rectangle {
+                                        min-height: 120px;
+                                        vertical-stretch: 1;
+                                        clip: true;
+                                        TextEdit {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text <=> root.sequence-input;
+                                            wrap: word-wrap;
+                                            placeholder-text: "Load the example or enter a Sequence v1 JSON object…";
+                                        }
+                                    }
+                                    Text {
+                                        text: root.sequence-status;
+                                        color: root.sequence-valid ? Theme.success : Theme.danger;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: send-key.keys.to-string() + " runs the sequence. Repeat is available through the JSON.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.page == 2: HorizontalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 16px;
+
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                min-width: 200px;
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    SectionLabel { text: "KEYFERRY DEVICES"; vertical-alignment: center; }
+                                    Text {
+                                        text: root.device-items.length;
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        horizontal-stretch: 1;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                if root.device-items.length == 0: Text {
+                                    text: "None found. Plug a Keyferry into the target computer; it connects here over Wi-Fi or Bluetooth.";
+                                    color: Theme.text-secondary;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                ScrollView {
+                                    vertical-stretch: 1;
+                                    VerticalLayout {
+                                        alignment: start;
+                                        spacing: 6px;
+                                        for device in root.device-items: ListRow {
+                                            title: device.title;
+                                            subtitle: device.id == root.selected-device-id && root.text-file-busy
+                                                ? root.readiness-label + " · " + root.active-link : device.subtitle;
+                                            active: device.id == root.selected-device-id;
+                                            clicked => { root.select-device(device.id); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card {
+                                horizontal-stretch: 1;
+                                min-width: 240px;
+                                ScrollView {
+                                VerticalLayout {
+                                    padding: 16px;
+                                    spacing: 10px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: root.selected-device;
+                                            color: Theme.text-primary;
+                                            font-size: 17px;
+                                            font-weight: 700;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                        if root.selected-device-id != "": Pill {
+                                            label: root.readiness-label;
+                                            tone: root.readiness-label == "Ready" ? Theme.success : Theme.warn;
+                                        }
+                                    }
+                                    Text {
+                                        text: root.selected-device-id == "" ? "Choose a Keyferry from the list to see its controls." : root.selected-device-id;
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.selected-device-id != "": VerticalLayout {
+                                        spacing: 6px;
+                                        alignment: start;
+                                        AppButton { label: "Connection / Wi-Fi"; clicked => { root.go-to(5); } }
+                                        AppButton { label: "Keyboard & display"; clicked => { root.go-to(4); } }
+                                        AppButton { label: "USB maintenance"; clicked => { root.go-to(6); } }
+                                    }
+                                    Divider { }
+                                    for row in root.device-fields: HorizontalLayout {
+                                        visible: root.selected-device-id != "";
+                                        spacing: 12px;
+                                        Text {
+                                            text: row.label;
+                                            color: Theme.text-secondary;
+                                            font-size: 12px;
+                                            width: 104px;
+                                        }
+                                        Text {
+                                            text: row.value;
+                                            color: root.field-color(row.tone);
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                    Divider { }
+                                    VerticalLayout {
+                                        visible: root.selected-device-id != "";
+                                        spacing: 4px;
+                                        Text {
+                                            text: "Automatic control route";
+                                            color: Theme.text-secondary;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                        }
+                                        Text {
+                                            text: root.nearby-status;
+                                            color: Theme.text-primary;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Divider { }
+                                    HorizontalLayout {
+                                        visible: root.selected-device-id != "";
+                                        spacing: 12px;
+                                        Text {
+                                            text: "Command";
+                                            color: Theme.text-secondary;
+                                            font-size: 12px;
+                                            width: 104px;
+                                        }
+                                        Text {
+                                            text: root.active-command;
+                                            color: root.active-command == "No active command"
+                                                ? Theme.text-secondary : Theme.warn;
+                                            font-size: 12px;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                                }
+                            }
+                        }
+
+                        if root.page == 3: HorizontalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            VerticalLayout {
+                                max-width: 560px;
+                                spacing: 12px;
+                                alignment: start;
+                                PageHeader {
+                                    title: "Typing";
+                                    subtitle: "How text becomes keystrokes on the target computer. Applies to typed text and files.";
+                                }
+                                Field {
+                                    label: "Target keyboard layout";
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        ComboBox {
+                                            min-width: 220px;
+                                            model: ["windows-us"];
+                                            current-value <=> root.selected-profile;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    alignment: start;
+                                    Field {
+                                        label: "Between keys (5–100 ms)";
+                                        LineEdit {
+                                            width: 150px;
+                                            text <=> root.text-key-gap-ms;
+                                            input-type: number;
+                                        }
+                                    }
+                                    Field {
+                                        label: "Send after (0–10 seconds)";
+                                        LineEdit {
+                                            width: 150px;
+                                            text <=> root.text-send-after-seconds;
+                                            input-type: number;
+                                        }
+                                    }
+                                }
+                                Field {
+                                    label: "Characters the layout cannot type";
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        ComboBox {
+                                            min-width: 220px;
+                                            model: ["Stop on unsupported", "Replace with ?"];
+                                            current-value <=> root.text-unsupported;
+                                        }
+                                    }
+                                }
+                                Divider { }
+                                Text {
+                                    text: root.preview-status;
+                                    color: root.text-send-enabled ? Theme.success : Theme.text-secondary;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 0.001; }
+                        }
+
+                        if root.page == 4 && root.selected-device-id == "": VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                            PageHeader { title: "Keyboard & display"; subtitle: "Choose a Keyferry in Devices first."; }
+                        }
+
+                        if root.page == 4 && root.selected-device-id != "" && root.route-is-tailnet: VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            HorizontalLayout {
+                                alignment: start;
+                                AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                            }
+                            PageHeader {
+                                title: "Keyboard & display · " + root.selected-device;
+                                subtitle: root.selected-device-id;
+                            }
+                            Text {
+                                text: "This Keyferry is connected through " + root.route-via + ". Connect it physically by USB here to change keyboard output, pairing, or display settings; these controls never operate through the relay.";
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.page == 4 && root.selected-device-id != "" && !root.route-is-tailnet: ScrollView {
+                            HorizontalLayout {
+                                padding: root.compact ? 14px : 18px;
+                                VerticalLayout {
+                                    max-width: 560px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                                    }
+                                    PageHeader {
+                                        title: "Keyboard & display · " + root.selected-device;
+                                        subtitle: root.selected-device-id;
+                                    }
+                                    Text { text: root.firmware-status; color: Theme.text-secondary; font-size: 12px; wrap: word-wrap; }
+                                    Divider { }
+                                    SectionLabel { text: "SCREEN"; }
+                                    Text {
+                                        text: root.screen-power-status;
+                                        color: root.screen-power-known ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        AppButton {
+                                            label: "Screen on";
+                                            primary: root.screen-power-known && root.screen-power-on;
+                                            enabled: root.screen-power-ready;
+                                            clicked => { root.set-screen-power("on"); }
+                                        }
+                                        AppButton {
+                                            label: "Screen off";
+                                            primary: root.screen-power-known && !root.screen-power-on;
+                                            enabled: root.screen-power-ready;
+                                            clicked => { root.set-screen-power("off"); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Remembers your choice when unplugged. Changing it does not restart the stick.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    SectionLabel { text: "ORIENTATION"; }
+                                    Text {
+                                        text: root.display-orientation-status;
+                                        color: root.display-orientation-supported ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        AppButton {
+                                            label: "Normal";
+                                            enabled: root.display-orientation-supported && !root.display-orientation-busy;
+                                            clicked => { root.set-display-orientation("normal"); }
+                                        }
+                                        AppButton {
+                                            label: "Rotate 180°";
+                                            enabled: root.display-orientation-supported && !root.display-orientation-busy;
+                                            clicked => { root.set-display-orientation("rotated-180"); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "The choice is stored on this dongle and takes effect after its automatic restart.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "KEYBOARD OUTPUT"; }
+                                    Text {
+                                        text: root.output-mode-status;
+                                        color: root.output-mode-supported ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    if !root.output-mode-supported: Field {
+                                        label: "Owner password for direct USB change";
+                                        LineEdit {
+                                            text <=> root.local-recovery-password;
+                                            input-type: InputType.password;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        AppButton {
+                                            label: "USB keyboard";
+                                            enabled: !root.output-mode-busy && !root.local-recovery-busy;
+                                            clicked => {
+                                                if (root.output-mode-supported) {
+                                                    root.set-output-mode("usb-hid");
+                                                } else {
+                                                    root.set-local-output-mode("usb-hid");
+                                                }
+                                            }
+                                        }
+                                        AppButton {
+                                            label: "Bluetooth keyboard";
+                                            enabled: !root.output-mode-busy && !root.local-recovery-busy;
+                                            clicked => {
+                                                if (root.output-mode-supported) {
+                                                    root.set-output-mode("ble-hid");
+                                                } else {
+                                                    root.set-local-output-mode("ble-hid");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Changing output restarts the stick. When control is offline, the same buttons use the connected USB cable.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "BLUETOOTH PAIRING"; }
+                                    Text {
+                                        text: root.ble-hid-bond-reset-status;
+                                        color: root.ble-hid-bond-reset-supported ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    if !root.ble-hid-bond-reset-confirming: HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: root.ble-hid-bond-reset-busy ? "Forgetting…" : "Forget Bluetooth keyboard…";
+                                            enabled: root.ble-hid-bond-reset-supported
+                                                && root.ble-hid-active
+                                                && !root.ble-hid-bond-reset-busy
+                                                && !root.output-mode-busy;
+                                            clicked => { root.ble-hid-bond-reset-confirming = true; }
+                                        }
+                                    }
+                                    if root.ble-hid-bond-reset-confirming: VerticalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: "This disconnects the paired keyboard computer, forgets only that Bluetooth bond, and restarts the stick in pairing mode. Wi-Fi, ownership, and recovery data are preserved.";
+                                            color: Theme.warn;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            spacing: 8px;
+                                            AppButton {
+                                                label: "Confirm forget and restart";
+                                                danger: true;
+                                                enabled: !root.ble-hid-bond-reset-busy;
+                                                clicked => { root.reset-ble-hid-bond(); }
+                                            }
+                                            AppButton {
+                                                label: "Cancel";
+                                                enabled: !root.ble-hid-bond-reset-busy;
+                                                clicked => { root.ble-hid-bond-reset-confirming = false; }
+                                            }
+                                        }
+                                    }
+                                    Divider { }
+                                    Text {
+                                        text: "Firmware updates are unavailable in Keyferry v1. The desktop app cannot perform OTA or write the dongle.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 0.001; }
+                            }
+                        }
+
+                        if root.page == 5 && root.selected-device-id == "": VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                            PageHeader { title: "Connection / Wi-Fi"; subtitle: "Choose a Keyferry in Devices first."; }
+                        }
+
+                        if root.page == 5 && root.selected-device-id != "" && root.route-is-tailnet: VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                            PageHeader { title: "Connection / Wi-Fi · " + root.selected-device; subtitle: root.selected-device-id; }
+                            Text {
+                                text: "This Keyferry is reachable through " + root.route-via + ". Connect it physically by USB here to change its Wi-Fi policy; maintenance never operates through the relay.";
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.page == 5 && root.selected-device-id != "" && !root.route-is-tailnet: ScrollView {
+                          VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: root.height < 600px ? 8px : 12px;
+                            HorizontalLayout {
+                                alignment: start;
+                                AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                            }
+                            PageHeader {
+                                title: "Connection / Wi-Fi · " + root.selected-device;
+                                subtitle: root.selected-device-id;
+                            }
+                            Text { text: "Automatic control route: " + root.nearby-status; color: Theme.text-primary; font-size: 11px; wrap: word-wrap; }
+                            Text { text: "Applying a Wi-Fi policy requires this exact Keyferry connected here by USB."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                LineEdit {
+                                    text <=> root.wifi-policy-path;
+                                    placeholder-text: "Complete roaming-policy.json";
+                                    horizontal-stretch: 1;
+                                }
+                                AppButton {
+                                    label: "Load policy";
+                                    enabled: root.wifi-policy-path != "" && !root.provisioning-busy;
+                                    clicked => { root.load-wifi-policy(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 14px;
+                                height: root.compact ? 218px : 280px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 8px;
+                                    HorizontalLayout {
+                                        SectionLabel { text: "SAVED NETWORKS"; vertical-alignment: center; }
+                                        Text {
+                                            text: root.wifi-profile-items.length + " / 8";
+                                            color: Theme.text-secondary;
+                                            font-size: 11px;
+                                            horizontal-stretch: 1;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if !root.wifi-policy-loaded: Text {
+                                        text: "Load the complete owner policy before editing so access revocations are preserved.";
+                                        color: Theme.warn;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    ScrollView {
+                                        height: root.compact ? 130px : 190px;
+                                        VerticalLayout {
+                                            alignment: start;
+                                            spacing: 6px;
+                                            for profile in root.wifi-profile-items: ListRow {
+                                                title: profile.title;
+                                                subtitle: profile.subtitle;
+                                                active: profile.index == root.selected-wifi-profile;
+                                                clicked => { root.select-wifi-profile(profile.index); }
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        AppButton {
+                                            label: "New";
+                                            enabled: root.wifi-policy-loaded
+                                                && root.wifi-profile-items.length < 8
+                                                && !root.provisioning-busy;
+                                            clicked => { root.new-wifi-profile(); }
+                                        }
+                                        AppButton {
+                                            label: root.compact ? "↑" : "Up";
+                                            compact: root.compact;
+                                            enabled: root.selected-wifi-profile > 0 && !root.provisioning-busy;
+                                            clicked => { root.move-wifi-profile(-1); }
+                                        }
+                                        AppButton {
+                                            label: root.compact ? "↓" : "Down";
+                                            compact: root.compact;
+                                            enabled: root.selected-wifi-profile >= 0
+                                                && root.selected-wifi-profile < root.wifi-profile-items.length - 1
+                                                && !root.provisioning-busy;
+                                            clicked => { root.move-wifi-profile(1); }
+                                        }
+                                        AppButton {
+                                            label: "Remove";
+                                            danger: true;
+                                            enabled: root.selected-wifi-profile >= 0 && !root.provisioning-busy;
+                                            clicked => { root.remove-wifi-profile(); }
+                                        }
+                                    }
+                                }
+                                Rectangle { width: 1px; background: Theme.panel-border; }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 10px;
+                                    SectionLabel {
+                                        text: root.selected-wifi-profile >= 0 ? "EDIT NETWORK" : "ADD NETWORK";
+                                    }
+                                    Field {
+                                        label: "Network name (SSID)";
+                                        LineEdit { text <=> root.wifi-ssid; placeholder-text: "1–32 UTF-8 bytes"; }
+                                    }
+                                    Field {
+                                        label: root.selected-wifi-profile >= 0
+                                            ? "New password (blank keeps current)" : "Password";
+                                        LineEdit {
+                                            text <=> root.wifi-password;
+                                            placeholder-text: "8–63 UTF-8 bytes";
+                                            input-type: InputType.password;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: root.selected-wifi-profile >= 0 ? "Update" : "Add";
+                                            enabled: root.wifi-policy-loaded
+                                                && root.wifi-ssid != ""
+                                                && (root.selected-wifi-profile >= 0 || root.wifi-password != "")
+                                                && !root.provisioning-busy;
+                                            clicked => { root.save-wifi-profile(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Top networks are preferred. Reordering assigns deterministic priorities when saved.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    Rectangle { vertical-stretch: 1; }
+                                }
+                            }
+                            Divider { }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Field {
+                                    label: "Owner-kit file";
+                                    LineEdit { text <=> root.owner-kit-path; placeholder-text: "owner-kit.json"; }
+                                }
+                                Field {
+                                    label: "Owner-kit password";
+                                    LineEdit {
+                                        text <=> root.wifi-owner-password;
+                                        input-type: InputType.password;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: end;
+                                    spacing: 6px;
+                                    if !root.wifi-policy-loaded: AppButton {
+                                        label: "Recover initial policy by USB";
+                                        enabled: root.endpoint-is-local
+                                            && !root.route-is-tailnet
+                                            && root.selected-device-id != ""
+                                            && root.pairing-bundle != ""
+                                            && root.wifi-policy-path != ""
+                                            && root.owner-kit-path != ""
+                                            && root.wifi-owner-password != ""
+                                            && !root.provisioning-busy;
+                                        clicked => { root.recover-initial-wifi-policy(); }
+                                    }
+                                    AppButton {
+                                        label: root.provisioning-busy ? "Applying…" : "Apply policy by USB";
+                                        primary: true;
+                                        enabled: root.endpoint-is-local
+                                            && !root.route-is-tailnet
+                                            && root.selected-device-id != ""
+                                            && root.wifi-policy-loaded
+                                            && root.wifi-policy-dirty
+                                            && root.owner-kit-path != ""
+                                            && root.wifi-owner-password != ""
+                                            && !root.provisioning-busy;
+                                        clicked => { root.apply-wifi(); }
+                                    }
+                                }
+                            }
+                            Text {
+                                text: root.provisioning-status;
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                          }
+                        }
+
+                        if root.page == 6: ScrollView {
+                            HorizontalLayout {
+                                padding: root.compact ? 14px : 18px;
+                                VerticalLayout {
+                                    max-width: 620px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton { label: "← Back to devices"; clicked => { root.go-to(2); } }
+                                    }
+                                    PageHeader {
+                                        title: "USB maintenance · " + root.selected-device;
+                                        subtitle: root.selected-device-id == "" ? "Choose a Keyferry in Devices first." : root.selected-device-id;
+                                    }
+                                    Text {
+                                        text: root.route-is-tailnet
+                                            ? "This stick is connected through another controller. These controls require its USB connection on this computer."
+                                            : "These controls require this stick's USB connection on this computer.";
+                                        color: root.route-is-tailnet ? Theme.warn : Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    if root.local-recovery-status != "": Card {
+                                        VerticalLayout {
+                                            padding: 10px;
+                                            Text { text: root.local-recovery-status; color: Theme.text-primary; font-size: 12px; wrap: word-wrap; }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Field {
+                                            label: "Owner password";
+                                            LineEdit {
+                                                text <=> root.local-recovery-password;
+                                                input-type: InputType.password;
+                                            }
+                                        }
+                                        Field {
+                                            label: "Owner-kit file";
+                                            LineEdit {
+                                                text <=> root.owner-kit-path;
+                                                placeholder-text: "owner-kit.json";
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        AppButton {
+                                            label: "Check USB status";
+                                            enabled: root.selected-device-id != ""
+                                                && root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.local-recovery-password != ""
+                                                && !root.local-recovery-busy
+                                                && !root.provisioning-busy;
+                                            clicked => { root.refresh-local-status(); }
+                                        }
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "NETWORK"; }
+                                    Text {
+                                        text: "Restart networking interrupts the connection, retries Wi-Fi, then falls back to Bluetooth. It clears any published USB file.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        spacing: 8px;
+                                        AppButton {
+                                            label: "Restart networking";
+                                            enabled: root.selected-device-id != ""
+                                                && root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.local-recovery-password != ""
+                                                && !root.local-recovery-busy
+                                                && !root.provisioning-busy;
+                                            clicked => { root.run-local-recovery("restart-network"); }
+                                        }
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "BLUETOOTH"; }
+                                    Text { text: "Stop the current Bluetooth pairing attempt."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: "Cancel Bluetooth pairing";
+                                            enabled: root.selected-device-id != ""
+                                                && root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.local-recovery-password != ""
+                                                && !root.local-recovery-busy
+                                                && !root.provisioning-busy;
+                                            clicked => { root.run-local-recovery("cancel-enrollment"); }
+                                        }
+                                    }
+                                    Text { text: "Forget this stick's paired Bluetooth keyboard and restart in pairing mode."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: "Forget Bluetooth keyboard…";
+                                            enabled: root.selected-device-id != ""
+                                                && root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.local-recovery-password != ""
+                                                && !root.local-recovery-busy
+                                                && !root.provisioning-busy;
+                                            clicked => {
+                                                root.local-recovery-confirm-device-id = root.selected-device-id;
+                                                root.local-recovery-confirming = true;
+                                            }
+                                        }
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "DEVICE"; }
+                                    Text { text: "Reboot disconnects this stick and clears its published USB file."; color: Theme.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: "Reboot Keyferry";
+                                            enabled: root.selected-device-id != ""
+                                                && root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.local-recovery-password != ""
+                                                && !root.local-recovery-busy
+                                                && !root.provisioning-busy;
+                                            clicked => { root.run-local-recovery("reboot"); }
+                                        }
+                                    }
+                                    if root.local-recovery-confirming && root.local-recovery-confirm-device-id == root.selected-device-id: VerticalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: "Forget the Bluetooth keyboard paired with " + root.selected-device + " (" + root.selected-device-id + ") and restart this stick in pairing mode?";
+                                            color: Theme.warn;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            spacing: 8px;
+                                            AppButton {
+                                                label: "Forget and restart";
+                                                danger: true;
+                                                enabled: root.selected-device-id != "" && !root.local-recovery-busy && !root.provisioning-busy;
+                                                clicked => { root.run-local-recovery("forget-bluetooth"); }
+                                            }
+                                            AppButton {
+                                                label: "Cancel";
+                                                enabled: !root.local-recovery-busy;
+                                                clicked => { root.local-recovery-confirming = false; }
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 0.001; }
+                            }
+                        }
+
+                        if root.page == 7: ScrollView {
+                            HorizontalLayout {
+                                padding: root.compact ? 14px : 18px;
+                                VerticalLayout {
+                                    max-width: 560px;
+                                    spacing: 10px;
+                                    alignment: start;
+                                    PageHeader {
+                                        title: "Setup & security";
+                                        subtitle: "A target or tailnet peer cannot authorize itself. Recovery material stays local.";
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "THIS COMPUTER"; }
+                                    if root.computer-authorized: Text {
+                                        text: "This computer is authorized to control Keyferry. "
+                                            + (root.control-online
+                                                ? root.selected-device + " is connected over " + root.active-link + "."
+                                                : "Waiting for the Keyferry to connect.");
+                                        color: Theme.success;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    if !root.computer-authorized: AuthorizeForm {
+                                        owner-kit-path <=> root.owner-kit-path;
+                                        password <=> root.authorize-password;
+                                        devices: root.authorize-devices;
+                                        device <=> root.authorize-device;
+                                        busy: root.authorize-busy;
+                                        status: root.authorize-status;
+                                        failed: root.authorize-failed;
+                                        choose-owner-kit => { root.choose-owner-kit(); }
+                                        authorize => { root.authorize-this-computer(); }
+                                        cancel => { root.cancel-authorize(); }
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "INITIAL SETUP"; }
+                                    Text {
+                                        text: "Administrative USB access is local to this computer and never uses a selected tailnet gateway.";
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Field {
+                                        label: "Private pairing bundle";
+                                        LineEdit {
+                                            text <=> root.pairing-bundle;
+                                            placeholder-text: "firmware/, keyferryd/, recovery/";
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: root.provisioning-busy ? "Checking…" : "Check USB access";
+                                            enabled: root.pairing-bundle != "" && !root.provisioning-busy;
+                                            clicked => { root.check-provisioning(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.provisioning-status;
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: "Wi-Fi changes remain disabled until this bundle, the local controller, and a device are selected.";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                    Divider { }
+                                    SectionLabel { text: "PREPARE SECOND KEYFERRY"; }
+                                    Text {
+                                        text: "Prepare the private pairing bundle and owner kit for another Keyferry. This works offline and does not write a dongle; installation later requires the exact hardware.";
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Field {
+                                        label: "Owner-kit password for new Keyferry";
+                                        LineEdit { text <=> root.second-device-password; input-type: InputType.password; }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: root.provisioning-busy ? "Preparing…" : "Prepare second Keyferry";
+                                            enabled: root.endpoint-is-local
+                                                && root.owner-kit-path != ""
+                                                && root.pairing-bundle != ""
+                                                && root.second-device-password != ""
+                                                && !root.provisioning-busy;
+                                            clicked => { root.prepare-second-device(); }
+                                        }
+                                    }
+                                    Text { text: root.second-device-status; color: Theme.text-secondary; font-size: 12px; wrap: word-wrap; }
+                                    Divider { }
+                                    SectionLabel { text: "OWNER-KIT PASSWORD"; }
+                                    Text {
+                                        text: "This re-encrypts the local owner kit. It does not contact the dongle or invalidate installed computers.";
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Field {
+                                        label: "Owner-kit file";
+                                        LineEdit { text <=> root.owner-kit-path; placeholder-text: "owner-kit.json"; }
+                                    }
+                                    Field {
+                                        label: "Current password";
+                                        LineEdit {
+                                            text <=> root.current-owner-password;
+                                            input-type: InputType.password;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        Field {
+                                            label: "New password";
+                                            LineEdit {
+                                                text <=> root.new-owner-password;
+                                                input-type: InputType.password;
+                                            }
+                                        }
+                                        Field {
+                                            label: "Confirm new password";
+                                            LineEdit {
+                                                text <=> root.confirm-owner-password;
+                                                input-type: InputType.password;
+                                            }
+                                        }
+                                    }
+                                    if root.confirm-owner-password != ""
+                                        && root.new-owner-password != root.confirm-owner-password: Text {
+                                        text: "New passwords do not match.";
+                                        color: Theme.warn;
+                                        font-size: 12px;
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        AppButton {
+                                            label: root.owner-password-busy ? "Changing…" : "Change password";
+                                            primary: true;
+                                            enabled: root.owner-kit-path != ""
+                                                && root.current-owner-password != ""
+                                                && root.new-owner-password != ""
+                                                && root.new-owner-password == root.confirm-owner-password
+                                                && !root.owner-password-busy;
+                                            clicked => { root.change-owner-password(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.owner-password-status;
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 0.001; }
+                            }
+                        }
+
+                        if root.page == 8: VerticalLayout {
+                            padding: root.compact ? 14px : 18px;
+                            spacing: 12px;
+                            PageHeader {
+                                title: "Diagnostics";
+                                subtitle: root.diagnostics-enabled
+                                    ? "Collecting metadata for this app session only. Command contents are never recorded."
+                                    : "Off by default. Command contents are never recorded.";
+                                AppButton {
+                                    label: root.diagnostics-enabled ? "Disable diagnostics" : "Enable metadata diagnostics";
+                                    clicked => { root.toggle-diagnostics(); }
+                                }
+                            }
+                            Card {
+                                vertical-stretch: 1;
+                                if root.diagnostic-lines.length == 0: Text {
+                                    text: root.diagnostics-enabled
+                                        ? "No events collected since diagnostics were enabled."
+                                        : "Command history is off.";
+                                    color: Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                ScrollView {
+                                    VerticalLayout {
+                                        padding: 12px;
+                                        spacing: 8px;
+                                        alignment: start;
+                                        for item in root.diagnostic-lines: VerticalLayout {
+                                            spacing: 2px;
+                                            Text {
+                                                text: item.summary;
+                                                color: root.field-color(item.tone);
+                                                font-size: 12px;
+                                                font-family: "Menlo";
+                                                wrap: word-wrap;
+                                            }
+                                            Text {
+                                                text: item.explanation;
+                                                color: Theme.text-secondary;
+                                                font-size: 11px;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    padding-left: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: root.device-items.length > 0 ? Theme.success : Theme.text-secondary;
+                        }
+                    }
+                    Text {
+                        text: root.status;
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+    }
+}

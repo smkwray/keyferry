@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keyferry.invalid/schema/keyboard-sequence-v1.schema.json",
+  "title": "Keyferry Keyboard Sequence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "command_id", "profile", "arm", "start_within_ms", "actions"],
+  "properties": {
+    "schema": {"const": "keyferry.keyboard-sequence.v1"},
+    "command_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "profile": {"const": "windows-us"},
+    "arm": {"enum": ["command-scoped", "require-existing"]},
+    "start_within_ms": {"type": "integer", "minimum": 1, "maximum": 5000},
+    "timing": {"$ref": "#/$defs/timing"},
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/action"}
+    }
+  },
+  "$defs": {
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_down_ms", "release_gap_ms"],
+      "properties": {
+        "key_down_ms": {"type": "integer", "minimum": 5, "maximum": 100},
+        "release_gap_ms": {"type": "integer", "minimum": 5, "maximum": 100}
+      }
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$",
+      "$comment": "The value must occur in keyboard-key-registry-v1.csv."
+    },
+    "text_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"const": "text"},
+        "value": {"type": "string", "maxLength": 4096},
+        "timing": {"$ref": "#/$defs/timing"}
+      }
+    },
+    "tap_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "key"],
+      "properties": {
+        "type": {"const": "tap"},
+        "key": {"$ref": "#/$defs/key"},
+        "timing": {"$ref": "#/$defs/timing"}
+      }
+    },
+    "chord_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "keys"],
+      "properties": {
+        "type": {"const": "chord"},
+        "keys": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 14,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/key"}
+        },
+        "timing": {"$ref": "#/$defs/timing"}
+      }
+    },
+    "ordered_chord_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "keys"],
+      "properties": {
+        "type": {"const": "ordered_chord"},
+        "keys": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/key"}
+        },
+        "timing": {"$ref": "#/$defs/timing"}
+      }
+    },
+    "wait_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "ms"],
+      "properties": {
+        "type": {"const": "wait"},
+        "ms": {"type": "integer", "minimum": 1, "maximum": 10000}
+      }
+    },
+    "non_repeat_action": {
+      "oneOf": [
+        {"$ref": "#/$defs/text_action"},
+        {"$ref": "#/$defs/tap_action"},
+        {"$ref": "#/$defs/chord_action"},
+        {"$ref": "#/$defs/ordered_chord_action"},
+        {"$ref": "#/$defs/wait_action"}
+      ]
+    },
+    "repeat_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "count", "actions"],
+      "properties": {
+        "type": {"const": "repeat"},
+        "count": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/non_repeat_action"}
+        }
+      }
+    },
+    "action": {
+      "oneOf": [
+        {"$ref": "#/$defs/non_repeat_action"},
+        {"$ref": "#/$defs/repeat_action"}
+      ]
+    }
+  }
+}

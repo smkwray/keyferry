@@ -1,0 +1,13 @@
+[package]
+name = "keyferry-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+keyferry-layouts = { path = "../keyferry-layouts" }
+
+[lib]
+path = "src/lib.rs"

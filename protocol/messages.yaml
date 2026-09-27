@@ -1,0 +1,732 @@
+schema_version: 1
+protocol_name: hidbridge
+magic_ascii: HB
+wire_byte_order: little-endian
+max_decoded_frame: 256
+checksum: crc16-ccitt-false
+framing: cobs-zero-delimited
+
+discovery:
+  magic_ascii: KFHB
+  version: 1
+  beacon_size: 22
+  port: 43917
+
+ble_transport:
+  version: 1
+  service_uuid: a2e3f2a8-a4ff-4ed8-9b68-dde0e3ad7691
+  gateway_to_device_uuid: 74beff36-3449-44df-8daf-0da9c136f4ab
+  device_to_gateway_uuid: c912cbbf-a2f9-418f-985c-cc6279389c54
+  minimum_att_mtu: 23
+  preferred_att_mtu: 247
+  maximum_fragment_bytes: 244
+  receive_ring_bytes: 1024
+  transmit_staging_bytes: 244
+  connection_metadata_max_bytes: 256
+  cccd_setup_timeout_ms: 20000
+  authentication_timeout_ms: 20000
+  progress_timeout_ms: 5000
+  operation_timeout_ms: 8000
+  host_candidate_timeout_ms: 40000
+  advertising_delay_ms: 5000
+  wifi_preference_ms: 15000
+  wifi_retry_interval_ms: 30000
+  failed_candidates_before_wifi_retry: 3
+
+roaming:
+  version: 2
+  device_tls_port: 7443
+  installation_id_bytes: 16
+  owner_id_bytes: 16
+  device_id_bytes: 16
+  recovery_secret_bytes: 32
+  device_link_secret_bytes: 32
+  p256_spki_bytes: 91
+  route_proof_secret_bytes: 32
+  route_proof_tag_bytes: 32
+  route_proof_body_bytes: 201
+  route_proof_fields_bytes: 178
+  route_proof_response_bytes: 210
+  policy_auth_tag_bytes: 32
+  revocation_entry_bytes: 16
+  roaming_config_fixed_header_bytes: 192
+  roaming_config_payload_bytes: 3064
+  policy_hash_input_bytes: 3018
+  policy_auth_input_bytes: 55
+  maximum_revoked_installations: 64
+  route_proof_ttl_ms: 5000
+  gateway_handoff_start_payload_bytes: 96
+  gateway_handoff_accept_payload_bytes: 66
+  gateway_handoff_query_payload_bytes: 18
+  gateway_handoff_status_payload_bytes: 94
+  gateway_handoff_target_valid_ms: 6000
+  gateway_handoff_recovery_ms: 6000
+  gateway_handoff_reservation_ms: 20000
+  installation_id_domain_ascii: keyferry/installation-id/v2
+  link_salt_domain_ascii: keyferry/link-salt/v2
+  device_link_domain_ascii: keyferry/device-link/v2
+  route_proof_key_domain_ascii: keyferry/route-proof-key/v2
+  route_proof_domain_ascii: keyferry/route-proof/v2
+  policy_hash_domain_ascii: keyferry/policy/v2
+  policy_auth_key_domain_ascii: keyferry/policy-auth-key/v2
+  policy_auth_domain_ascii: keyferry/policy-auth/v2
+  maintenance_authentication_domain_ascii: keyferry/maintenance/v2
+  device_gateway_dns_prefix_ascii: d-
+  device_gateway_dns_suffix_ascii: .gateway.keyferry.invalid
+  installation_gateway_dns_prefix_ascii: i-
+  installation_gateway_dns_suffix_ascii: .desktop.keyferry.invalid
+
+messages:
+  - name: HELLO
+    id: 0x01
+    transport: session
+    direction: both
+  - name: GET_STATUS
+    id: 0x02
+    transport: session
+    direction: host-to-device
+  - name: STATUS
+    id: 0x03
+    transport: session
+    direction: device-to-host
+  - name: LEGACY_EXECUTE_REPORTS_RESERVED
+    id: 0x10
+    transport: reserved
+    direction: none
+  - name: CANCEL
+    id: 0x11
+    transport: network
+    direction: host-to-device
+  - name: LEGACY_RELEASE_ALL_RESERVED
+    id: 0x12
+    transport: reserved
+    direction: none
+  - name: SET_OPERATIONAL_MODE
+    id: 0x13
+    transport: session
+    direction: host-to-device
+  - name: GET_OUTPUT_MODE
+    id: 0x14
+    transport: network
+    direction: host-to-device
+  - name: OUTPUT_MODE_STATUS
+    id: 0x15
+    transport: network
+    direction: device-to-host
+  - name: SET_OUTPUT_MODE
+    id: 0x16
+    transport: network
+    direction: host-to-device
+  - name: RESET_BLE_HID_BOND
+    id: 0x17
+    transport: network
+    direction: host-to-device
+  - name: BLE_HID_BOND_STATUS
+    id: 0x18
+    transport: network
+    direction: device-to-host
+  - name: GET_DISPLAY_ORIENTATION
+    id: 0x19
+    transport: network
+    direction: host-to-device
+  - name: DISPLAY_ORIENTATION_STATUS
+    id: 0x1A
+    transport: network
+    direction: device-to-host
+  - name: SET_DISPLAY_ORIENTATION
+    id: 0x1B
+    transport: network
+    direction: host-to-device
+  - name: GET_SCREEN_POWER
+    id: 0x1C
+    transport: network
+    direction: host-to-device
+  - name: SCREEN_POWER_STATUS
+    id: 0x1D
+    transport: network
+    direction: device-to-host
+  - name: SET_SCREEN_POWER
+    id: 0x1E
+    transport: network
+    direction: host-to-device
+  - name: ACK
+    id: 0x20
+    transport: session
+    direction: both
+  - name: ERROR
+    id: 0x21
+    transport: session
+    direction: both
+  - name: LEGACY_USB_STATUS_RESERVED
+    id: 0x22
+    transport: reserved
+    direction: none
+  - name: AUTH_CHALLENGE
+    id: 0x40
+    transport: network
+    direction: host-to-device
+  - name: AUTH_RESPONSE
+    id: 0x41
+    transport: network
+    direction: device-to-host
+  - name: SESSION_READY
+    id: 0x42
+    transport: network
+    direction: host-to-device
+  - name: COMMAND
+    id: 0x50
+    transport: network
+    direction: host-to-device
+  - name: COMMAND_RESULT
+    id: 0x51
+    transport: network
+    direction: device-to-host
+  - name: ARM
+    id: 0x52
+    transport: network
+    direction: host-to-device
+  - name: DISARM
+    id: 0x53
+    transport: network
+    direction: host-to-device
+  - name: LEASE_RENEW
+    id: 0x54
+    transport: network
+    direction: host-to-device
+  - name: CAPABILITIES
+    id: 0x55
+    transport: session
+    direction: both
+  - name: ROUTE_PROOF_REQUEST
+    id: 0x56
+    transport: network
+    direction: host-to-device
+  - name: ROUTE_PROOF_RESPONSE
+    id: 0x57
+    transport: network
+    direction: device-to-host
+  - name: INPUT_COMMAND_RESULT_V1
+    id: 0x58
+    transport: network
+    direction: device-to-host
+  - name: GATEWAY_HANDOFF
+    id: 0x59
+    transport: network
+    direction: host-to-device
+  - name: GATEWAY_HANDOFF_STATUS
+    id: 0x5A
+    transport: network
+    direction: device-to-host
+  - name: FILE_REQUEST
+    id: 0x60
+    transport: network
+    direction: host-to-device
+  - name: FILE_STATUS
+    id: 0x61
+    transport: network
+    direction: device-to-host
+  - name: FILE_SET_REQUEST
+    id: 0x62
+    transport: network
+    direction: host-to-device
+  - name: FILE_SET_STATUS
+    id: 0x63
+    transport: network
+    direction: device-to-host
+
+gateway_handoff_operations:
+  - name: START
+    id: 0x01
+  - name: ACCEPT
+    id: 0x02
+  - name: QUERY
+    id: 0x03
+
+gateway_handoff_statuses:
+  - name: OK
+    id: 0x0000
+  - name: BUSY
+    id: 0x0001
+  - name: STALE_PROOF
+    id: 0x0002
+  - name: NOT_READY
+    id: 0x0003
+  - name: UNSUPPORTED
+    id: 0x0004
+  - name: RELEASE_FAILED
+    id: 0x0005
+  - name: UNKNOWN_TRANSACTION
+    id: 0x0006
+  - name: INVALID_TRANSITION
+    id: 0x0007
+
+gateway_handoff_phases:
+  - name: UNKNOWN
+    id: 0x00
+  - name: RELEASING
+    id: 0x01
+  - name: TARGETING
+    id: 0x02
+  - name: TARGET_PROVISIONAL
+    id: 0x03
+  - name: RESTORING
+    id: 0x04
+  - name: TRANSFERRED
+    id: 0x05
+  - name: RESTORED
+    id: 0x06
+  - name: NOT_STARTED
+    id: 0x07
+  - name: RECOVERY_UNAVAILABLE
+    id: 0x08
+
+gateway_handoff_reasons:
+  - name: NONE
+    id: 0x00
+  - name: TARGET_ABSENT
+    id: 0x01
+  - name: TRANSPORT_FAILED
+    id: 0x02
+  - name: IDENTITY_FAILED
+    id: 0x03
+  - name: AUTHORIZATION_FAILED
+    id: 0x04
+  - name: ACCEPTANCE_TIMEOUT
+    id: 0x05
+  - name: RELEASE_FAILED
+    id: 0x06
+  - name: PREVIOUS_GATEWAY_UNAVAILABLE
+    id: 0x07
+
+command_kinds:
+  - name: EXECUTE_REPORT_CHUNK
+    id: 0x01
+  - name: CANCEL
+    id: 0x02
+  - name: RELEASE_ALL
+    id: 0x03
+  - name: EXECUTE_INPUT_CHUNK_V1
+    id: 0x04
+  - name: CANCEL_INPUT_SEQUENCE_V1
+    id: 0x05
+  - name: RELEASE_INPUT_ALL_V1
+    id: 0x06
+
+report_actions:
+  - name: KEY_REPORT
+    tag: 0x01
+    critical: true
+    payload: modifiers_u8_reserved_u8_keys_6xu8
+  - name: WAIT_MS
+    tag: 0x02
+    critical: true
+    payload: duration_u16_le
+  - name: RELEASE_ALL_ACTION
+    tag: 0x03
+    critical: true
+    payload: empty
+  - name: TAP_KEY
+    tag: 0x04
+    critical: true
+    payload: modifiers_u8_usage_u8_key_down_ms_u16_le_release_gap_ms_u16_le
+  - name: MOUSE_MOVE_RELATIVE
+    tag: 0x05
+    critical: true
+    payload: dx_i16_le_dy_i16_le
+  - name: MOUSE_CLICK
+    tag: 0x06
+    critical: true
+    payload: button_usage_u8_hold_ms_u16_le_release_gap_ms_u16_le
+  - name: NEUTRAL_ALL
+    tag: 0x07
+    critical: true
+    payload: empty
+
+provisioning:
+  version: 1
+  report_size: 64
+  challenge_size: 32
+  transaction_id_size: 16
+  authentication_tag_size: 32
+  data_bytes_per_report: 44
+  idle_timeout_ms: 30000
+  authentication_domain_ascii: keyferry-provision-v1
+  request_operation_offset: 0
+  response_operation_offset: 0
+  response_status_offset: 1
+  challenge_version_offset: 2
+  challenge_payload_length_offset: 3
+  challenge_device_id_offset: 5
+  challenge_nonce_offset: 21
+  challenge_generation_offset: 53
+  begin_version_offset: 1
+  begin_payload_length_offset: 2
+  begin_transaction_id_offset: 4
+  data_transaction_id_offset: 1
+  data_offset_offset: 17
+  data_length_offset: 19
+  data_bytes_offset: 20
+  commit_transaction_id_offset: 1
+  commit_tag_offset: 17
+  commit_slot_offset: 2
+  commit_generation_offset: 3
+  policy_status_state_offset: 2
+  policy_status_epoch_offset: 3
+  policy_status_sequence_offset: 11
+  policy_status_hash_offset: 19
+
+provisioning_operations:
+  - name: CHALLENGE
+    id: 0x01
+  - name: BEGIN
+    id: 0x02
+  - name: DATA
+    id: 0x03
+  - name: COMMIT
+    id: 0x04
+  - name: ABORT
+    id: 0x05
+  - name: POLICY_STATUS
+    id: 0x06
+
+provisioning_policy_states:
+  - name: LEGACY
+    id: 0x00
+  - name: ABSENT
+    id: 0x01
+  - name: MALFORMED
+    id: 0x02
+  - name: MIGRATION_PENDING
+    id: 0x03
+  - name: ACTIVE
+    id: 0x04
+  - name: STORAGE_ERROR
+    id: 0x05
+
+provisioning_statuses:
+  - name: OK
+    id: 0x00
+  - name: BAD_REPORT
+    id: 0x01
+  - name: BAD_STATE
+    id: 0x02
+  - name: BAD_TRANSACTION
+    id: 0x03
+  - name: BAD_OFFSET
+    id: 0x04
+  - name: AUTHENTICATION_FAILED
+    id: 0x05
+  - name: INVALID_CONFIG
+    id: 0x06
+  - name: IDENTITY_MISMATCH
+    id: 0x07
+  - name: COMMIT_FAILED
+    id: 0x08
+  - name: RANDOM_FAILED
+    id: 0x09
+
+local_management:
+  version: 1
+  status_schema: 1
+  report_size: 64
+  session_id_size: 8
+  device_nonce_size: 32
+  host_nonce_size: 16
+  authentication_tag_size: 32
+  envelope_tag_size: 16
+  operation_id_size: 16
+  request_payload_size: 18
+  response_payload_size: 16
+  idle_timeout_ms: 60000
+  hard_timeout_ms: 300000
+  enrollment_timeout_ms: 120000
+  admin_key_domain_ascii: keyferry/local-admin-key/v1
+  authentication_domain_ascii: keyferry/local-auth/v1
+  session_key_domain_ascii: keyferry/local-session/v1
+  device_proof_domain_ascii: keyferry/local-device-proof/v1
+  request_domain_ascii: keyferry/local-request/v1
+  response_domain_ascii: keyferry/local-response/v1
+
+local_management_operations:
+  - name: CHALLENGE
+    id: 0x10
+  - name: AUTHENTICATE
+    id: 0x11
+  - name: GET_STATUS
+    id: 0x12
+  - name: OPEN_MAINTENANCE
+    id: 0x13
+  - name: CLOSE_MAINTENANCE
+    id: 0x14
+  - name: RESTART_NETWORK
+    id: 0x15
+  - name: CLEAR_BLE_BOND_AND_ENROLL
+    id: 0x16
+  - name: CANCEL_ENROLLMENT
+    id: 0x17
+  - name: SET_OUTPUT_MODE
+    id: 0x18
+  - name: REBOOT
+    id: 0x19
+  - name: GET_RECEIPT
+    id: 0x1A
+
+local_management_statuses:
+  - name: OK
+    id: 0x00
+  - name: BAD_REPORT
+    id: 0x01
+  - name: BAD_STATE
+    id: 0x02
+  - name: AUTHENTICATION_FAILED
+    id: 0x03
+  - name: REPLAY
+    id: 0x04
+  - name: BUSY
+    id: 0x05
+  - name: UNSUPPORTED
+    id: 0x06
+  - name: NOT_NEUTRAL
+    id: 0x07
+  - name: OPERATION_UNKNOWN
+    id: 0x08
+  - name: OPERATION_CONFLICT
+    id: 0x09
+  - name: STORAGE_ERROR
+    id: 0x0A
+  - name: IN_PROGRESS
+    id: 0x0B
+  - name: INTERNAL
+    id: 0x7F
+
+local_management_status_pages:
+  - name: DEVICE
+    id: 0x01
+  - name: SAFETY
+    id: 0x02
+  - name: NETWORK
+    id: 0x03
+  - name: BLE_HID
+    id: 0x04
+  - name: POLICY
+    id: 0x05
+  - name: LAST_RECEIPT
+    id: 0x06
+  - name: PROBE_RUN
+    id: 0x07
+  - name: PROBE_HEAP
+    id: 0x08
+  - name: PROBE_STACK
+    id: 0x09
+
+local_management_probe_phases:
+  - name: BOOT
+    id: 0x01
+  - name: POST_AUTH
+    id: 0x02
+  - name: FIRST_HELD
+    id: 0x03
+  - name: FIRST_FAILED
+    id: 0x04
+  - name: SECOND_HELD
+    id: 0x05
+  - name: SECOND_FAILED
+    id: 0x06
+  - name: RELEASED
+    id: 0x07
+  - name: INTERRUPTED
+    id: 0x08
+  - name: FLOOR_DROP
+    id: 0x09
+  - name: MONITOR_FAILED
+    id: 0x0A
+  - name: HOLDING
+    id: 0x0B
+  - name: DRIFT
+    id: 0x0C
+  - name: WAITING
+    id: 0x0D
+
+local_management_probe_outcomes:
+  - name: NOT_ATTEMPTED
+    id: 0x00
+  - name: SUCCESS
+    id: 0x01
+  - name: GUARD_FAILED
+    id: 0x02
+  - name: CONTIGUOUS_FAILED
+    id: 0x03
+  - name: MALLOC_FAILED
+    id: 0x04
+  - name: POST_GUARD_FAILED
+    id: 0x05
+
+local_management_bond_states:
+  - name: NONE
+    id: 0x00
+  - name: SINGLE
+    id: 0x01
+  - name: MULTIPLE_INVALID
+    id: 0x02
+  - name: STORE_ERROR
+    id: 0x03
+
+local_management_receipt_states:
+  - name: NONE
+    id: 0x00
+  - name: IN_PROGRESS
+    id: 0x01
+  - name: COMMITTED
+    id: 0x02
+  - name: FAILED
+    id: 0x03
+  - name: UNKNOWN
+    id: 0x04
+
+configuration:
+  max_wifi_profiles: 8
+  max_paired_hosts: 8
+  max_ssid_bytes: 32
+  max_wifi_credential_bytes: 63
+  max_server_name_bytes: 253
+  max_ca_certificate_bytes: 1024
+  fixed_header_bytes: 52
+  wifi_record_bytes: 103
+  host_record_bytes: 1369
+  payload_bytes: 11828
+
+file_handoff:
+  max_file_bytes: 262144
+  max_chunk_bytes: 200
+  status_bytes: 10
+  max_files: 16
+  max_name_bytes: 64
+  file_set_status_bytes: 11
+
+capabilities:
+  - name: KEYBOARD
+    bit: 0x00000001
+  - name: VENDOR_HID_CONFIG
+    bit: 0x00000002
+  - name: STATION_MODE
+    bit: 0x00000004
+  - name: DIRECT_MODE
+    bit: 0x00000008
+  - name: MULTI_WIFI
+    bit: 0x00000010
+  - name: BLUETOOTH_GATT
+    bit: 0x00000020
+  - name: FIRMWARE_IDENTITY_V1
+    bit: 0x00000040
+  - name: MOUSE_RELATIVE_V1
+    bit: 0x00010000
+  - name: CONSUMER_KEYS_RESERVED
+    bit: 0x00020000
+  - name: REMOTE_WAKE_RESERVED
+    bit: 0x00040000
+  - name: BLE_HID_OUTPUT_V1
+    bit: 0x00080000
+  - name: BLE_HID_BOND_RESET_V1
+    bit: 0x00100000
+  - name: TARGETED_GATEWAY_TRANSFER_V1
+    bit: 0x00200000
+  - name: DISPLAY_ORIENTATION_V1
+    bit: 0x00400000
+  - name: LOCAL_MANAGEMENT_V1
+    bit: 0x00800000
+  - name: USB_FILE_HANDOFF_V1
+    bit: 0x01000000
+  - name: SCREEN_POWER_V1
+    bit: 0x02000000
+  - name: USB_FILE_SET_V2
+    bit: 0x04000000
+
+output_modes:
+  - name: USB_HID
+    id: 0x01
+  - name: BLE_HID
+    id: 0x02
+
+display_orientations:
+  - name: NORMAL
+    id: 0x01
+  - name: ROTATED_180
+    id: 0x02
+
+screen_powers:
+  - name: OFF
+    id: 0x01
+  - name: ON
+    id: 0x02
+
+operational_modes:
+  - name: KEYBOARD
+    id: 0x01
+  - name: MAINTENANCE
+    id: 0x02
+  - name: LOCKED
+    id: 0x03
+  - name: FAULT
+    id: 0x04
+
+arm_policies:
+  - name: COMMAND_SCOPED
+    id: 0x01
+  - name: TEMPORARY
+    id: 0x02
+  - name: ALWAYS_READY
+    id: 0x03
+
+result_codes:
+  - name: QUEUED
+    id: 0x01
+  - name: ACCEPTED
+    id: 0x02
+  - name: STARTED
+    id: 0x03
+  - name: EMITTED
+    id: 0x04
+  - name: ABORTED
+    id: 0x05
+  - name: REJECTED
+    id: 0x06
+  - name: UNKNOWN
+    id: 0x07
+
+error_codes:
+  - name: MALFORMED
+    id: 0x0001
+  - name: UNSUPPORTED_VERSION
+    id: 0x0002
+  - name: UNKNOWN_CRITICAL_FIELD
+    id: 0x0003
+  - name: NOT_AUTHENTICATED
+    id: 0x0004
+  - name: NOT_ARMED
+    id: 0x0005
+  - name: EXPIRED
+    id: 0x0006
+  - name: DUPLICATE
+    id: 0x0007
+  - name: BUSY
+    id: 0x0008
+  - name: INVALID_MODE
+    id: 0x0009
+  - name: USB_UNAVAILABLE
+    id: 0x000A
+  - name: LEGACY_UART_FAULT_RESERVED
+    id: 0x000B
+  - name: CAPABILITY_REQUIRED
+    id: 0x000C
+  - name: LIMIT_EXCEEDED
+    id: 0x000D
+  - name: NEUTRAL_UNCONFIRMED
+    id: 0x000E
+  - name: REPLAY_WINDOW_FULL
+    id: 0x000F
+  - name: CANCELLED
+    id: 0x0010
+  - name: WATCHDOG
+    id: 0x0011
+  - name: INTERNAL
+    id: 0x00FF

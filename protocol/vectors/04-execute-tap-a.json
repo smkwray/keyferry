@@ -1,0 +1,14 @@
+{
+  "name": "execute_tap_shift_a_then_release",
+  "description": "Compact TAP_KEY for shifted A using 12/8 ms timing, followed by RELEASE_ALL.",
+  "frame": {
+    "major": 1,
+    "minor": 0,
+    "message_type": "0x10",
+    "flags": "0x00",
+    "sequence": 43,
+    "payload_hex": "040602040c0008000300"
+  },
+  "decoded_hex": "4842010010002b0000000a00040602040c00080003008ab3",
+  "wire_hex": "044842010210022b0101020a06040602040c02080203038ab300"
+}

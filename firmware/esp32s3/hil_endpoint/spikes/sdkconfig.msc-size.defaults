@@ -1,0 +1,3 @@
+# Compile-only measurement. No file data or flash-backed MSC storage is mounted.
+CONFIG_TINYUSB_MSC_ENABLED=y
+CONFIG_TINYUSB_MSC_BUFSIZE=512

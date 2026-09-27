@@ -1,0 +1,13 @@
+{
+  "name": "get-status-empty",
+  "frame": {
+    "major": 1,
+    "minor": 0,
+    "message_type": "0x02",
+    "flags": "0x00",
+    "sequence": 1,
+    "payload_hex": ""
+  },
+  "decoded_hex": "4842010002000100000000003403",
+  "wire_hex": "04484201020202010101010103340300"
+}

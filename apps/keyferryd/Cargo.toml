@@ -1,0 +1,48 @@
+[package]
+name = "keyferryd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum = { version = "=0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
+getrandom = { version = "=0.4.3", default-features = false }
+getifaddrs = { version = "=0.6.2", default-features = false }
+hmac = { version = "=0.12.1", default-features = false }
+hyper = { version = "=1.10.1", default-features = false, features = ["http1", "server"] }
+keyferry-core = { path = "../../crates/keyferry-core" }
+keyferry-gateway = { path = "../../crates/keyferry-gateway" }
+keyferry-layouts = { path = "../../crates/keyferry-layouts" }
+keyferry-protocol = { path = "../../crates/keyferry-protocol" }
+keyferry-sim = { path = "../../crates/keyferry-sim" }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+sha2 = { version = "=0.10.9", default-features = false }
+socket2 = { version = "=0.6.5", default-features = false, features = ["all"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "=0.1.18", default-features = false, features = ["sync"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+uuid = { version = "=1.26.0", default-features = false, features = ["serde", "std", "v7"] }
+x509-parser = { version = "=0.18.1", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+futures-util = { version = "=0.3.34", default-features = false, features = ["async-await", "std"] }
+windows = { version = "=0.62.2", default-features = false, features = [
+    "std",
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }
+windows-future = { version = "=0.3.2", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+keyferry = { path = "../keyferry" }
+tower-service = { version = "=0.3.3", default-features = false }

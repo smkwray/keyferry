@@ -1,0 +1,43 @@
+{
+  "schema": "keyferry.board-profile.v1",
+  "id": "waveshare_geek_v1_1_reference",
+  "compatibility_id": 1,
+  "qualified": true,
+  "flash": {"size_mb": 16},
+  "display": {
+    "present": true,
+    "controller": "st7789",
+    "presentation": "normal",
+    "dc_gpio": 8,
+    "cs_gpio": 10,
+    "clk_gpio": 12,
+    "mosi_gpio": 11,
+    "reset_gpio": 9,
+    "backlight_gpio": 7,
+    "width": 240,
+    "height": 135,
+    "x_gap": 40,
+    "y_gap": 53,
+    "madctl": 112,
+    "invert_colors": true,
+    "swap_color_bytes": false,
+    "backlight_active_high": true,
+    "backlight_percent": 18,
+    "pixel_clock_hz": 20000000
+  },
+  "capabilities": {
+    "display": true,
+    "touch": false,
+    "button": true,
+    "led": false,
+    "removable_storage": true,
+    "uart0_header": true
+  },
+  "pins": {
+    "usb_dm_gpio": 19,
+    "usb_dp_gpio": 20,
+    "boot_gpio": 0,
+    "uart0_rx_gpio": 44,
+    "uart0_tx_gpio": 43
+  }
+}

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/keyferry",
+    "apps/keyferryd",
+    "apps/keyctl",
+    "crates/keyferry-core",
+    "crates/keyferry-gateway",
+    "crates/keyferry-firmware",
+    "crates/keyferry-layouts",
+    "crates/keyferry-local-management",
+    "crates/keyferry-protocol",
+    "crates/keyferry-sim",
+    "tools/keyferry-pairing",
+    "tools/keyferry-hil-check",
+    "tools/keyferry-firmware",
+    "xtask",
+]
+default-members = [
+    "apps/keyferry",
+    "apps/keyferryd",
+    "apps/keyctl",
+    "crates/keyferry-core",
+    "crates/keyferry-gateway",
+    "crates/keyferry-layouts",
+    "crates/keyferry-local-management",
+    "crates/keyferry-protocol",
+    "crates/keyferry-sim",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.92"
+authors = ["Keyferry contributors"]
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

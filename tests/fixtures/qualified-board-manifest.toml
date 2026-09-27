@@ -1,0 +1,60 @@
+manifest_version = 2
+status = "RECOVERY_QUALIFIED"
+device_label = "synthetic-test-unit"
+qualified_at = "2000-01-01"
+qualified_by = "tests/fixtures"
+evidence_directory = "tests/fixtures"
+
+[identity]
+vendor = "Example"
+product = "Synthetic ESP32-S3"
+sku = "TEST_ONLY"
+pcb_revision = "TEST_ONLY"
+soc = "ESP32-S3 QFN56"
+soc_revision = "v0.2"
+
+[usb]
+connector = "TEST_ONLY"
+vid = "0x303A"
+pid = "0x1001"
+interfaces = []
+data_gpio_dm = 19
+data_gpio_dp = 20
+external_phy = false
+
+[boot]
+boot_gpio = 0
+reset_method = "TEST_ONLY"
+rom_entry_proven_count = 2
+
+[flash]
+manufacturer_id = "0x20"
+device_id = "0x4018"
+size_bytes = 16777216
+partition_table_offset = 32768
+
+[security]
+secure_boot = false
+flash_encryption = false
+secure_download_mode = false
+efuse_before_sha256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+efuse_after_sha256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+[capabilities]
+display = true
+touch = "TEST_ONLY"
+button = true
+led = "TEST_ONLY"
+removable_storage = "TEST_ONLY"
+uart0_header = "TEST_ONLY"
+
+[pins]
+profile = "waveshare_geek_v1_1_reference"
+compatibility_id = 1
+
+[recovery]
+factory_dump_sha256 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+vendor_archive_sha256 = "TEST_ONLY"
+cycle_a_passed = true
+cycle_b_passed = true
+tool_versions_file = "tests/fixtures"

@@ -1,0 +1,73 @@
+/target/
+/.tools/
+/.pio/
+**/.pio/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+.tmp-*
+/release/
+/dist/
+/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+.env
+.env.*
+!*.example
+firmware/**/platformio.local.ini
+hardware/evidence/private/
+/hardware/board-manifest.toml
+
+# Agent orchestration (private, never tracked)
+/.claude/
+/.codex/
+/.cursor/
+do/
+CLAUDE.md
+AGENTS.md
+
+# Internal project notes
+docs/
+
+# Plans and generated project-local state
+*.plan.md
+plan.md
+plans/
+/data/
+/var/
+/outputs/
+/tmp/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+firmware/esp32s3/sdkconfig
+firmware/**/managed_components/
+
+# Worktrees are device-local and ephemeral
+.worktrees/
+
+# .githooks/ is intentionally tracked
+
+# MSVC C++ build intermediates (compiling firmware/common host tests)
+*.obj
+*.exe
+*.ilk
+*.pdb
+
+# Agent scaffolding kept locally
+START_HERE.md
+SEED_VALIDATION.md
+workorders/

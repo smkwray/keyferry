@@ -1,0 +1,13 @@
+[package]
+name = "keyferry-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+semver = { version = "=1.0.28", default-features = false }

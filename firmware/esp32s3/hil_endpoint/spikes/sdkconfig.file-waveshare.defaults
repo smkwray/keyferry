@@ -1,0 +1,9 @@
+# Waveshare GEEK has 2 MiB quad PSRAM. Only the file payload explicitly uses
+# this caps heap; standard malloc, TLS, task stacks, and USB buffers stay internal.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_MEMTEST=y
