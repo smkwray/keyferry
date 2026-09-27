@@ -62,10 +62,9 @@ nothing: no parameter values, expansion, compiled plan, or last-run state.
 ## Library
 
 The library is `KEYFERRY_RECIPE_DIR` if set, otherwise `recipes` under the per-user Keyferry state
-directory. Import is its only writer: it validates the source and writes a temporary file in the
-library, then publishes `<name>.json` atomically. Without replacement it links the file into place,
-which fails if the name exists, so concurrent imports never overwrite each other; with replacement
-it renames over the entry. A recipe is explicitly saved user content and may hold literal text: on
+directory. Import is its only writer: it validates the source first. Without replacement it creates
+`<name>.json` exclusively, which fails if the name exists, so concurrent imports never overwrite
+each other; with replacement it writes a complete temporary file and renames it over the entry. A recipe is explicitly saved user content and may hold literal text: on
 Unix the library directory is created owner-only (0700) and each entry is written owner-only
 (0600). Listing and inspection report metadata and validation results only, never an action body.
 

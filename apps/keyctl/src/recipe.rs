@@ -258,10 +258,11 @@ fn import(source: &Path, replace: bool) -> u8 {
     exit
 }
 
-/// Writes a complete temporary file in the library, then publishes it as `<name>.json`, so a
-/// reader never sees a partial recipe. Without `replace` the file is hard-linked into place, which
-/// fails atomically if the name exists, so a concurrent import cannot be overwritten; with
-/// `replace` it is renamed over the entry. Returns whether an entry was replaced.
+/// Publishes `<name>.json`. Without `replace` the entry is created exclusively, which fails
+/// atomically if the name exists, so a concurrent import is never overwritten. With `replace` a
+/// complete temporary file is renamed over the entry, so a reader never sees a partial recipe.
+/// No hard links: on Windows a scanner holding a deleted link open blocks later replacement.
+/// Returns whether an entry was replaced.
 fn publish(library: &Path, name: &str, bytes: &[u8], replace: bool) -> Result<bool, Failure> {
     let write_failed = Failure::new("recipe.write_failed", 25);
     // Saved recipes may hold literal text: owner-only on Unix, like the service token.
@@ -270,36 +271,56 @@ fn publish(library: &Path, name: &str, bytes: &[u8], replace: bool) -> Result<bo
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut directory, 0o700);
     directory.create(library).map_err(|_| write_failed)?;
-    let target = library.join(format!("{name}.json"));
-    let temporary = library.join(format!(".{name}.{}.tmp", uuid::Uuid::now_v7()));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&temporary).map_err(|_| write_failed)?;
+    let target = library.join(format!("{name}.json"));
+    let path = if replace {
+        library.join(format!(".{name}.{}.tmp", uuid::Uuid::now_v7()))
+    } else {
+        target.clone()
+    };
+    let mut file = options.open(&path).map_err(|error| {
+        if !replace && error.kind() == io::ErrorKind::AlreadyExists {
+            Failure::new("recipe.exists", 20)
+        } else {
+            write_failed
+        }
+    })?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    let published = written.map_err(|_| write_failed).and_then(|()| {
+    let published = written.and_then(|()| {
         if replace {
             let existed = fs::symlink_metadata(&target).is_ok();
-            fs::rename(&temporary, &target)
-                .map(|()| existed)
-                .map_err(|_| write_failed)
+            retry_transient(|| fs::rename(&path, &target)).map(|()| existed)
         } else {
-            fs::hard_link(&temporary, &target)
-                .map(|()| false)
-                .map_err(|error| {
-                    if error.kind() == io::ErrorKind::AlreadyExists {
-                        Failure::new("recipe.exists", 20)
-                    } else {
-                        write_failed
-                    }
-                })
+            Ok(false)
         }
     });
-    // Gone after a rename; otherwise the published link keeps the content.
-    let _ = fs::remove_file(&temporary);
-    published
+    if published.is_err() {
+        let _ = fs::remove_file(&path);
+    }
+    published.map_err(|_| write_failed)
+}
+
+/// Windows scanners briefly open new files, so replacing one can fail with access denied for a few
+/// milliseconds. This retries only that local file operation.
+fn retry_transient(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        match operation() {
+            Err(error)
+                if cfg!(windows)
+                    && error.kind() == io::ErrorKind::PermissionDenied
+                    && attempts < 40 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
 }
 
 struct PreparedRun {
