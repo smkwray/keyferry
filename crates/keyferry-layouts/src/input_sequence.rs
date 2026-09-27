@@ -410,14 +410,14 @@ impl<'de> Visitor<'de> for UniqueJsonVisitor {
 }
 
 pub fn parse_input_sequence_json(bytes: &[u8]) -> Result<InputSequenceV1, InputError> {
-    finish_input_sequence_json(parse_input_sequence_value(bytes)?)
+    finish_input_sequence_json(parse_strict_json_value(bytes)?)
 }
 
 pub fn parse_input_sequence_json_with_command_id(
     bytes: &[u8],
     command_id: &str,
 ) -> Result<InputSequenceV1, InputError> {
-    let mut value = parse_input_sequence_value(bytes)?;
+    let mut value = parse_strict_json_value(bytes)?;
     let object = value.as_object_mut().ok_or(InputError::Json)?;
     object
         .entry("command_id")
@@ -425,7 +425,9 @@ pub fn parse_input_sequence_json_with_command_id(
     finish_input_sequence_json(value)
 }
 
-fn parse_input_sequence_value(bytes: &[u8]) -> Result<serde_json::Value, InputError> {
+/// Strict JSON shared with recipes: at most [`MAX_INPUT_BYTES`], unique keys, bounded nesting, and
+/// integers only. Errors carry no source material.
+pub(crate) fn parse_strict_json_value(bytes: &[u8]) -> Result<serde_json::Value, InputError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(InputError::Limit);
     }
@@ -518,7 +520,10 @@ fn validate_timing_shape(value: &serde_json::Value) -> Result<(), InputError> {
     reject_unknown(object, &["key_down_ms", "release_gap_ms"])
 }
 
-fn validate_action_shape(value: &serde_json::Value, allow_repeat: bool) -> Result<(), InputError> {
+pub(crate) fn validate_action_shape(
+    value: &serde_json::Value,
+    allow_repeat: bool,
+) -> Result<(), InputError> {
     let object = value.as_object().ok_or(InputError::Json)?;
     let action_type = object
         .get("type")

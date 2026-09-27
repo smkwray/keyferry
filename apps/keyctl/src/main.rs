@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod recipe;
+
 use keyferry_core::TransportDiagnostic;
 use keyferry_layouts::text_stream::{
     TextStreamError, TextStreamReader, UnsupportedTextPolicy, TEXT_STREAM_RECEIPT_SCHEMA_V1,
@@ -161,6 +163,10 @@ fn main() -> ExitCode {
             .is_some_and(|argument| argument == "--describe" || argument == "--validate")
     {
         return ExitCode::from(run_input_sequence_local(&args));
+    }
+    // Only `recipe run` reaches the service, and only after local expansion succeeds.
+    if args.first().is_some_and(|command| command == "recipe") {
+        return ExitCode::from(recipe::run(&args[1..], &url, &token_file));
     }
     if args
         .first()
@@ -1130,24 +1136,21 @@ fn parse_endpoint(value: &str) -> Result<Endpoint, ClientError> {
     })
 }
 
-fn default_token_path() -> PathBuf {
-    if let Ok(path) = env::var("KEYFERRY_TOKEN_FILE") {
-        return PathBuf::from(path);
-    }
+/// The per-user Keyferry state directory shared with the daemon and app.
+fn state_root() -> PathBuf {
     #[cfg(windows)]
     if let Ok(root) = env::var("LOCALAPPDATA") {
-        return PathBuf::from(root).join("keyferry").join("token");
+        return PathBuf::from(root).join("keyferry");
     }
     #[cfg(target_os = "macos")]
     if let Ok(root) = env::var("HOME") {
         return PathBuf::from(root)
             .join("Library")
             .join("Application Support")
-            .join("keyferry")
-            .join("token");
+            .join("keyferry");
     }
     if let Ok(root) = env::var("XDG_STATE_HOME") {
-        return PathBuf::from(root).join("keyferry").join("token");
+        return PathBuf::from(root).join("keyferry");
     }
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -1155,11 +1158,24 @@ fn default_token_path() -> PathBuf {
         .join(".local")
         .join("state")
         .join("keyferry")
-        .join("token")
+}
+
+fn default_token_path() -> PathBuf {
+    if let Ok(path) = env::var("KEYFERRY_TOKEN_FILE") {
+        return PathBuf::from(path);
+    }
+    state_root().join("token")
+}
+
+/// The saved-sequence library: `KEYFERRY_RECIPE_DIR`, else `recipes` under the state root.
+fn default_recipe_dir() -> PathBuf {
+    env::var_os("KEYFERRY_RECIPE_DIR")
+        .filter(|path| !path.is_empty())
+        .map_or_else(|| state_root().join("recipes"), PathBuf::from)
 }
 
 fn help_text() -> &'static str {
-    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
+    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
 }
 
 fn run_local_helper(args: &[String]) -> u8 {
@@ -2087,9 +2103,9 @@ fn input_sequence_description_json() -> String {
         "validation": "keyctl input-sequence --validate [--input PATH]",
         "payload_source": "stdin-or-file",
         "units": {"move_relative": "counts-not-pixels"},
-        "actions": ["move_relative", "click", "text", "tap", "chord", "ordered_chord", "wait", "repeat"],
+        "actions": ["move_relative", "click", "double_click", "text", "tap", "chord", "ordered_chord", "wait", "repeat"],
         "buttons": ["button_1", "button_2"],
-        "deferred": ["absolute", "scroll", "double_click", "drag", "button_down", "button_up", "raw_report"],
+        "deferred": ["absolute", "scroll", "drag", "button_down", "button_up", "raw_report"],
         "bounds": {
             "axis_counts": [-4096, 4096],
             "click_ms": [10, 100],
@@ -3174,10 +3190,15 @@ mod tests {
             Some("keys"),
             Some("--help"),
             Some("local-status"),
+            Some("recipe"),
             Some("x"),
         ] {
             assert!(!needs_service(command), "{command:?}");
         }
+        assert!(help_text().contains("recipe list | inspect NAME | validate NAME"));
+        assert!(help_text().contains(
+            "recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)"
+        ));
         let local = Endpoint {
             host: "127.0.0.1".to_owned(),
             port: 8042,
@@ -3625,6 +3646,11 @@ mod tests {
             "MOUSE_RELATIVE_V1"
         );
         assert_eq!(description["units"]["move_relative"], "counts-not-pixels");
+        let listed = |field: &str| -> Vec<String> {
+            serde_json::from_value(description[field].clone()).unwrap()
+        };
+        assert!(listed("actions").contains(&"double_click".to_owned()));
+        assert!(!listed("deferred").contains(&"double_click".to_owned()));
 
         let raw = br#"{"schema":"keyferry.input-sequence.v1","arm":"command-scoped","start_within_ms":5000,"actions":[{"type":"move_relative","dx_counts":240,"dy_counts":-40},{"type":"click","button":"button_1"}]}"#;
         let generated = uuid::Uuid::now_v7().to_string();

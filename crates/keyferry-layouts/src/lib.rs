@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod recipe;
 pub mod text_stream;
 
 use serde::{Deserialize, Serialize};

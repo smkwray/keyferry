@@ -152,6 +152,10 @@ keyctl screen-power DEVICE                       # read active and saved screen 
 keyctl sequence DEVICE < hotkey.json            # run a key sequence (JSON on stdin)
 keyctl sequence --example                       # a valid starting sequence
 keyctl keys                                     # physical key names
+keyctl recipe list                              # saved sequences on this computer (local)
+keyctl recipe import open-url.json              # validate and save a recipe (the only writer)
+keyctl recipe inspect open-url                  # metadata, route and planned time; never actions
+keyctl recipe run DEVICE open-url < params.json # run once; parameters as a JSON object on stdin
 keyctl cancel DEVICE                            # stop the running command
 ```
 
@@ -161,6 +165,16 @@ firmware capability flags and `link_path`/`via` showing whether another computer
 Check command exit status and its JSON result. A missing response, `UNKNOWN`, or a lost connection
 after submission means the action may have happened: read status to reconcile it, never resend it
 automatically. Sends use command-scoped arming; ordinary agents do not need a separate `arm` call.
+
+Saved sequences (recipes, `protocol/recipe-v1.md`) live in this computer's library:
+`KEYFERRY_RECIPE_DIR`, or `recipes` in the per-user Keyferry state directory. `recipe list`,
+`inspect` and `validate` are local. Only `recipe import` writes the library, after validating the
+recipe with every parameter at its maximum length; it will not overwrite an existing name without
+`--replace`. `recipe run DEVICE NAME` expands the recipe on this computer into one ordinary sequence,
+posts it once and prints the usual `keyferry.command-result.v2` line. Keyboard-only recipes use
+`/sequences`; recipes with pointer actions use `/input-sequences` and need USB keyboard output.
+Parameter values come only from stdin. Unsupported characters are rejected unless that run passes
+`--unsupported replace`, which reports the replacement count on stderr. A run saves nothing.
 
 | Control | CLI | Effect and connection required |
 | --- | --- | --- |
