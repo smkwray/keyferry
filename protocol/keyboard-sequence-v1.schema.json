@@ -11,7 +11,10 @@
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     },
-    "profile": {"const": "windows-us"},
+    "profile": {
+      "const": "windows-us",
+      "$comment": "Legacy wire mapping id, unchanged: US-ASCII HID mapping for Windows US or a Mac identified as ANSI with the U.S./ABC input source."
+    },
     "arm": {"enum": ["command-scoped", "require-existing"]},
     "start_within_ms": {"type": "integer", "minimum": 1, "maximum": 5000},
     "timing": {"$ref": "#/$defs/timing"},
@@ -35,7 +38,7 @@
     "key": {
       "type": "string",
       "pattern": "^[A-Z][A-Z0-9_]*$",
-      "$comment": "The value must occur in keyboard-key-registry-v1.csv."
+      "$comment": "A canonical name in keyboard-key-registry-v1.csv or an alias listed under Key names in input-sequence-v1.md; case-sensitive."
     },
     "text_action": {
       "type": "object",

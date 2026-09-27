@@ -298,19 +298,35 @@ pub fn execute_input_gestures(
                 button,
                 hold_ms,
                 release_gap_ms,
+            }
+            | InputGesture::DoubleClick {
+                button,
+                hold_ms,
+                release_gap_ms,
             } => {
                 let bit = match button {
                     ClickButton::Button1 => 0x01,
                     ClickButton::Button2 => 0x02,
                 };
-                submit_and_complete(
-                    &mut simulator,
-                    &mut transfers,
-                    InputEffect::MouseButtons(bit),
-                )?;
-                elapsed_ms += u64::from(*hold_ms);
-                submit_and_complete(&mut simulator, &mut transfers, InputEffect::MouseButtons(0))?;
-                elapsed_ms += u64::from(*release_gap_ms);
+                let clicks = if matches!(gesture, InputGesture::DoubleClick { .. }) {
+                    2
+                } else {
+                    1
+                };
+                for _ in 0..clicks {
+                    submit_and_complete(
+                        &mut simulator,
+                        &mut transfers,
+                        InputEffect::MouseButtons(bit),
+                    )?;
+                    elapsed_ms += u64::from(*hold_ms);
+                    submit_and_complete(
+                        &mut simulator,
+                        &mut transfers,
+                        InputEffect::MouseButtons(0),
+                    )?;
+                    elapsed_ms += u64::from(*release_gap_ms);
+                }
             }
         }
     }
@@ -498,6 +514,43 @@ mod tests {
                 InputEffect::MouseButtons(0),
                 InputEffect::Keyboard(KeyboardReport::single(0, 0x28)),
                 InputEffect::Keyboard(KeyboardReport::RELEASED),
+                InputEffect::Keyboard(KeyboardReport::RELEASED),
+                InputEffect::MouseButtons(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn compiled_double_click_presses_twice_in_order_and_finishes_neutral() {
+        let request = InputSequenceV1 {
+            schema: INPUT_SEQUENCE_SCHEMA_V1.to_owned(),
+            command_id: "01995fa0-0000-7000-8000-000000000001".to_owned(),
+            keyboard_profile: None,
+            arm: InputArmPolicy::CommandScoped,
+            start_within_ms: 5000,
+            keyboard_timing: None,
+            actions: vec![InputAction::DoubleClick {
+                button: ClickButton::Button2,
+                hold_ms: Some(30),
+                release_gap_ms: Some(70),
+            }],
+        };
+        let compiled = compile_input_sequence(&request).unwrap();
+        let result = execute_input_gestures(&compiled.gestures, 5).unwrap();
+        assert_eq!(result.elapsed_ms, 2 * (30 + 70));
+        assert_eq!(result.outcome, InputOutcome::Emitted);
+        assert_eq!(result.neutral_mask, NEUTRAL_BOTH);
+        assert_eq!(
+            result
+                .transfers
+                .iter()
+                .map(|item| item.effect)
+                .collect::<Vec<_>>(),
+            vec![
+                InputEffect::MouseButtons(2),
+                InputEffect::MouseButtons(0),
+                InputEffect::MouseButtons(2),
+                InputEffect::MouseButtons(0),
                 InputEffect::Keyboard(KeyboardReport::RELEASED),
                 InputEffect::MouseButtons(0),
             ]

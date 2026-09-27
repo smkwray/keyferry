@@ -13,10 +13,16 @@ offer `MOUSE_RELATIVE_V1`. Every request uses canonical UUIDv7 identity, `comman
 
 Actions are profile-mapped `text`, named physical `tap`, bounded one-report `chord`, bounded
 `ordered_chord`, released `wait`,
-non-nested bounded `repeat`, signed-count `move_relative`, and complete single `click` of
-`button_1` or `button_2`. Relative counts are not pixels or screen coordinates. The contract has no
-absolute position, wheel, pan, double-click semantic, drag, held button, extra button, raw report,
-consumer control, target observation, or application-success field.
+non-nested bounded `repeat`, signed-count `move_relative`, complete single `click` of
+`button_1` or `button_2`, and complete `double_click`. Relative counts are not pixels or screen
+coordinates. The contract has no absolute position, wheel, pan, drag, held button, extra button,
+raw report, consumer control, target observation, or application-success field.
+
+`double_click` takes exactly the `click` fields, defaults, and 10–100 ms bounds. It compiles to one
+atomic unit of two identical `MOUSE_CLICK` records that never spans chunks, costs
+2 × (20 + hold + gap) ms, and counts as two effects. The wire carries only those two existing
+records; there is no new record kind. The interval between the clicks is the first click's release
+gap.
 
 `ordered_chord` holds 2–6 named keys in listed order, waiting 20 ms between key-down edges,
 then releases them in reverse order with 10 ms between releases and an all-keys-up terminal
@@ -28,7 +34,29 @@ such as Space or CapsLock whose hotkeys require a distinct first key-down event.
 All JSON keys are unique. Unknown fields/types, null optionals, floats/exponents, invalid enums,
 overflow, unsupported characters/keys, and resource-limit violations reject before ARM without
 echoing source material. `keyboard_profile` is exactly `windows-us` and is required iff an expanded
-keyboard gesture exists. `keyboard_timing` follows the same rule.
+keyboard gesture exists. `keyboard_timing` follows the same rule. `windows-us` is the unchanged
+legacy wire mapping id: the one US-ASCII HID mapping, valid for Windows US and for a Mac identified
+as ANSI with the U.S. or ABC input source.
+
+## Key names
+
+A key in `tap`, `chord`, or `ordered_chord` of this schema or `keyferry.keyboard-sequence.v1` is a
+canonical name from `keyboard-key-registry-v1.csv` or an alias below. Names are case-sensitive
+uppercase. An alias is never a registry row; it resolves to exactly its canonical key, so the
+compiled chunks and fingerprint are identical to the canonical form. Chord duplicates are detected
+on the resolved key: `["LEFT_GUI","COMMAND"]` rejects with `chord.duplicate_key`. Clients may
+rewrite aliases to canonical names before submission.
+
+| Aliases | Canonical key |
+| --- | --- |
+| `COMMAND`, `CMD`, `LEFT_COMMAND`, `LEFT_CMD`, `WIN`, `WINDOWS`, `GUI`, `META`, `SUPER` | `LEFT_GUI` |
+| `RIGHT_COMMAND`, `RIGHT_CMD` | `RIGHT_GUI` |
+| `OPTION`, `OPT`, `LEFT_OPTION`, `LEFT_OPT`, `ALT` | `LEFT_ALT` |
+| `RIGHT_OPTION`, `RIGHT_OPT` | `RIGHT_ALT` |
+| `CTRL`, `CONTROL` | `LEFT_CONTROL` |
+| `SHIFT` | `LEFT_SHIFT` |
+| `RETURN` | `ENTER` |
+| `ESC` | `ESCAPE` |
 
 ## Wire model
 

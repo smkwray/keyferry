@@ -259,7 +259,7 @@ def validate_input_sequence_contract() -> None:
     definitions = schema.get("$defs", {})
     variants = (
         "text_action", "tap_action", "chord_action", "wait_action",
-        "move_relative_action", "click_action", "repeat_action",
+        "move_relative_action", "click_action", "double_click_action", "repeat_action",
     )
     for name in variants:
         if definitions.get(name, {}).get("additionalProperties") is not False:
@@ -267,9 +267,9 @@ def validate_input_sequence_contract() -> None:
     repeat_items = definitions["repeat_action"]["properties"]["actions"]["items"]
     if repeat_items != {"$ref": "#/$defs/non_repeat_action"}:
         fail("input sequence repeat must reject nested repeats")
-    buttons = definitions["click_action"]["properties"]["button"].get("enum")
-    if buttons != ["button_1", "button_2"]:
-        fail("input sequence exposes an unexpected mouse button set")
+    for name in ("click_action", "double_click_action"):
+        if definitions[name]["properties"]["button"].get("enum") != ["button_1", "button_2"]:
+            fail("input sequence exposes an unexpected mouse button set")
     movement = definitions["move_relative_action"]["properties"]
     for axis in ("dx_counts", "dy_counts"):
         if movement[axis].get("minimum") != -4096 or movement[axis].get("maximum") != 4096:

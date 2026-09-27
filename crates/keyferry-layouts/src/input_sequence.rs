@@ -1,7 +1,7 @@
 use super::{
-    keyboard_key, ordered_reports, plan_text_us, KeyClass, KeyboardReport, LayoutError,
-    ReportError, ReportStep, TypingTiming, MAX_ORDERED_CHORD_KEYS, ORDERED_PRESS_MS,
-    ORDERED_RELEASE_MS,
+    canonicalize_key_name, insert_resolved, is_wire_mapping, ordered_reports, plan_text_us,
+    resolve_key_name, KeyClass, KeyboardReport, LayoutError, ReportError, ReportStep, TypingTiming,
+    LEGACY_WIRE_MAPPING, MAX_ORDERED_CHORD_KEYS, ORDERED_PRESS_MS, ORDERED_RELEASE_MS,
 };
 use keyferry_protocol::{action, arm_policy};
 use serde::{
@@ -9,7 +9,7 @@ use serde::{
     Deserialize, Deserializer, Serialize,
 };
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, fmt};
+use std::fmt;
 use uuid::Version;
 
 pub const INPUT_SEQUENCE_SCHEMA_V1: &str = "keyferry.input-sequence.v1";
@@ -133,6 +133,13 @@ pub enum InputAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         release_gap_ms: Option<u64>,
     },
+    DoubleClick {
+        button: ClickButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_gap_ms: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -172,6 +179,13 @@ pub enum InputLeafAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         release_gap_ms: Option<u64>,
     },
+    DoubleClick {
+        button: ClickButton,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release_gap_ms: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +213,12 @@ pub enum InputGesture {
         deltas: Vec<MouseDelta>,
     },
     Click {
+        button: ClickButton,
+        hold_ms: u16,
+        release_gap_ms: u16,
+    },
+    /// Two identical clicks encoded as one atomic unit that never spans chunks.
+    DoubleClick {
         button: ClickButton,
         hold_ms: u16,
         release_gap_ms: u16,
@@ -476,7 +496,7 @@ fn validate_shape(value: &serde_json::Value) -> Result<(), InputError> {
         .get("keyboard_profile")
         .and_then(serde_json::Value::as_str)
     {
-        if profile != "windows-us" {
+        if !is_wire_mapping(profile) {
             return Err(InputError::KeyboardProfile);
         }
     }
@@ -523,7 +543,7 @@ fn validate_action_shape(value: &serde_json::Value, allow_repeat: bool) -> Resul
         }
         "wait" => reject_unknown(object, &["type", "ms"])?,
         "move_relative" => reject_unknown(object, &["type", "dx_counts", "dy_counts"])?,
-        "click" => {
+        "click" | "double_click" => {
             reject_unknown(object, &["type", "button", "hold_ms", "release_gap_ms"])?;
             reject_null(object, &["hold_ms", "release_gap_ms"])?;
             if object
@@ -544,8 +564,9 @@ fn validate_action_shape(value: &serde_json::Value, allow_repeat: bool) -> Resul
                 validate_action_shape(action, false)?;
             }
         }
-        "move_absolute" | "double_click" | "scroll" | "drag" | "button_down" | "button_up"
-        | "mouse_report" => return Err(InputError::PointerOutOfScope),
+        "move_absolute" | "scroll" | "drag" | "button_down" | "button_up" | "mouse_report" => {
+            return Err(InputError::PointerOutOfScope)
+        }
         _ => return Err(InputError::ActionType),
     }
     if let Some(timing) = object.get("timing") {
@@ -593,7 +614,7 @@ enum Leaf<'a> {
     OrderedChord(&'a [String], Option<InputKeyboardTiming>),
     Wait(u64),
     MoveRelative(i64, i64),
-    Click(ClickButton, Option<u64>, Option<u64>),
+    Click(ClickButton, Option<u64>, Option<u64>, bool),
 }
 
 pub fn compile_input_sequence(
@@ -660,7 +681,16 @@ pub fn compile_input_sequence(
                 release_gap_ms,
             } => compile_leaf(
                 &mut state,
-                Leaf::Click(*button, *hold_ms, *release_gap_ms),
+                Leaf::Click(*button, *hold_ms, *release_gap_ms, false),
+                default_timing,
+            )?,
+            InputAction::DoubleClick {
+                button,
+                hold_ms,
+                release_gap_ms,
+            } => compile_leaf(
+                &mut state,
+                Leaf::Click(*button, *hold_ms, *release_gap_ms, true),
                 default_timing,
             )?,
             InputAction::Repeat { count, actions } => {
@@ -689,7 +719,12 @@ pub fn compile_input_sequence(
                                 button,
                                 hold_ms,
                                 release_gap_ms,
-                            } => Leaf::Click(*button, *hold_ms, *release_gap_ms),
+                            } => Leaf::Click(*button, *hold_ms, *release_gap_ms, false),
+                            InputLeafAction::DoubleClick {
+                                button,
+                                hold_ms,
+                                release_gap_ms,
+                            } => Leaf::Click(*button, *hold_ms, *release_gap_ms, true),
                         };
                         compile_leaf(&mut state, leaf, default_timing)?;
                     }
@@ -701,7 +736,7 @@ pub fn compile_input_sequence(
         return Err(InputError::NoEffect);
     }
     match (state.has_keyboard, request.keyboard_profile.as_deref()) {
-        (true, Some("windows-us")) => {}
+        (true, Some(profile)) if is_wire_mapping(profile) => {}
         (true, _) | (false, Some(_)) => return Err(InputError::KeyboardProfile),
         (false, None) => {
             if request.keyboard_timing.is_some() {
@@ -711,7 +746,7 @@ pub fn compile_input_sequence(
     }
     let (chunks, planned_ms) = packetize(&state.gestures)?;
     let profile = if state.has_keyboard {
-        "windows-us"
+        LEGACY_WIRE_MAPPING
     } else {
         "none"
     };
@@ -783,12 +818,12 @@ fn compile_leaf(
             let timing = timing.unwrap_or(default_timing).validated()?;
             let mut modifiers = 0_u8;
             let mut usages = Vec::with_capacity(6);
-            let mut seen = HashSet::with_capacity(names.len());
+            let mut seen = Vec::with_capacity(names.len());
             for name in names {
-                if !seen.insert(name.as_str()) {
+                let key = input_key(name)?;
+                if !insert_resolved(&mut seen, key) {
                     return Err(InputError::DuplicateChordKey);
                 }
-                let key = input_key(name)?;
                 match key.class {
                     KeyClass::Modifier => modifiers |= key.code,
                     KeyClass::NonModifier => usages.push(key.code),
@@ -812,13 +847,11 @@ fn compile_leaf(
                 return Err(InputError::ChordSize);
             }
             let timing = timing.unwrap_or(default_timing).validated()?;
-            let mut seen = HashSet::with_capacity(names.len());
             let mut keys = Vec::with_capacity(names.len());
             for name in names {
-                if !seen.insert(name.as_str()) {
+                if !insert_resolved(&mut keys, input_key(name)?) {
                     return Err(InputError::DuplicateChordKey);
                 }
-                keys.push(input_key(name)?);
             }
             let reports = ordered_reports(&keys).map_err(|error| match error {
                 ReportError::RolloverLimit => InputError::RolloverLimit,
@@ -864,29 +897,69 @@ fn compile_leaf(
                 true,
             )?;
         }
-        Leaf::Click(button, hold_ms, release_gap_ms) => {
+        Leaf::Click(button, hold_ms, release_gap_ms, double) => {
             let hold_ms = hold_ms.unwrap_or(DEFAULT_CLICK_MS);
             let release_gap_ms = release_gap_ms.unwrap_or(DEFAULT_CLICK_MS);
             if !(10..=100).contains(&hold_ms) || !(10..=100).contains(&release_gap_ms) {
                 return Err(InputError::PointerTiming);
             }
-            push_effect(
-                state,
+            let (hold_ms, release_gap_ms) = (hold_ms as u16, release_gap_ms as u16);
+            let gesture = if double {
+                InputGesture::DoubleClick {
+                    button,
+                    hold_ms,
+                    release_gap_ms,
+                }
+            } else {
                 InputGesture::Click {
                     button,
-                    hold_ms: hold_ms as u16,
-                    release_gap_ms: release_gap_ms as u16,
-                },
-                false,
-                true,
-            )?;
+                    hold_ms,
+                    release_gap_ms,
+                }
+            };
+            push_effect(state, gesture, false, true)?;
         }
     }
     Ok(())
 }
 
+/// Rewrite every alias key name in an input sequence, including inside `repeat`, to its
+/// canonical registry name. Chunks and fingerprint are unchanged; the body stays acceptable
+/// to holders that predate aliases.
+pub fn canonicalize_input_sequence_keys(request: &mut InputSequenceV1) {
+    for action in &mut request.actions {
+        match action {
+            InputAction::Tap { key, .. } => canonicalize_key_name(key),
+            InputAction::Chord { keys, .. } | InputAction::OrderedChord { keys, .. } => {
+                keys.iter_mut().for_each(canonicalize_key_name);
+            }
+            InputAction::Repeat { actions, .. } => {
+                for action in actions {
+                    match action {
+                        InputLeafAction::Tap { key, .. } => canonicalize_key_name(key),
+                        InputLeafAction::Chord { keys, .. }
+                        | InputLeafAction::OrderedChord { keys, .. } => {
+                            keys.iter_mut().for_each(canonicalize_key_name);
+                        }
+                        InputLeafAction::Text { .. }
+                        | InputLeafAction::Wait { .. }
+                        | InputLeafAction::MoveRelative { .. }
+                        | InputLeafAction::Click { .. }
+                        | InputLeafAction::DoubleClick { .. } => {}
+                    }
+                }
+            }
+            InputAction::Text { .. }
+            | InputAction::Wait { .. }
+            | InputAction::MoveRelative { .. }
+            | InputAction::Click { .. }
+            | InputAction::DoubleClick { .. } => {}
+        }
+    }
+}
+
 fn input_key(name: &str) -> Result<super::KeyboardKey, InputError> {
-    if let Some(key) = keyboard_key(name) {
+    if let Some(key) = resolve_key_name(name) {
         return Ok(key);
     }
     match name {
@@ -901,7 +974,13 @@ fn push_effect(
     keyboard: bool,
     pointer: bool,
 ) -> Result<(), InputError> {
-    state.effectful_gestures = state.effectful_gestures.saturating_add(1);
+    // A double click is two button presses, so it counts as two effects.
+    let effects = if matches!(gesture, InputGesture::DoubleClick { .. }) {
+        2
+    } else {
+        1
+    };
+    state.effectful_gestures = state.effectful_gestures.saturating_add(effects);
     if state.effectful_gestures > MAX_INPUT_EFFECTS {
         return Err(InputError::Limit);
     }
@@ -1099,18 +1178,32 @@ fn encode_unit(gesture: &InputGesture) -> EncodedUnit {
             button,
             hold_ms,
             release_gap_ms,
+        } => EncodedUnit {
+            records: vec![click_record(*button, *hold_ms, *release_gap_ms)],
+            cost_ms: 20 + u64::from(*hold_ms + *release_gap_ms),
+            effectful: true,
+        },
+        InputGesture::DoubleClick {
+            button,
+            hold_ms,
+            release_gap_ms,
         } => {
-            let mut payload = Vec::with_capacity(5);
-            payload.push(button.usage());
-            payload.extend_from_slice(&hold_ms.to_le_bytes());
-            payload.extend_from_slice(&release_gap_ms.to_le_bytes());
+            let click = click_record(*button, *hold_ms, *release_gap_ms);
             EncodedUnit {
-                records: vec![record(action::MOUSE_CLICK, &payload)],
-                cost_ms: 20 + u64::from(*hold_ms + *release_gap_ms),
+                records: vec![click.clone(), click],
+                cost_ms: 2 * (20 + u64::from(*hold_ms + *release_gap_ms)),
                 effectful: true,
             }
         }
     }
+}
+
+fn click_record(button: ClickButton, hold_ms: u16, release_gap_ms: u16) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(5);
+    payload.push(button.usage());
+    payload.extend_from_slice(&hold_ms.to_le_bytes());
+    payload.extend_from_slice(&release_gap_ms.to_le_bytes());
+    record(action::MOUSE_CLICK, &payload)
 }
 
 fn record(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -1365,6 +1458,149 @@ mod tests {
             compile_input_sequence(&repeated).unwrap().fingerprint,
             compiled.fingerprint
         );
+    }
+
+    #[test]
+    fn double_click_is_one_atomic_unit_of_two_click_records() {
+        let double = |hold_ms, release_gap_ms| InputAction::DoubleClick {
+            button: ClickButton::Button1,
+            hold_ms,
+            release_gap_ms,
+        };
+        let click = |hold_ms, release_gap_ms| InputAction::Click {
+            button: ClickButton::Button1,
+            hold_ms,
+            release_gap_ms,
+        };
+        let max_click = [action::MOUSE_CLICK, 5, 1, 100, 0, 100, 0];
+
+        let compiled =
+            compile_input_sequence(&request(vec![double(Some(100), Some(100))], false)).unwrap();
+        assert_eq!(compiled.effectful_gestures, 2);
+        assert_eq!(compiled.planned_ms, 460);
+        assert_eq!(compiled.chunks.len(), 1);
+        let mut body = vec![0, 0, 1, 0];
+        body.extend_from_slice(&max_click);
+        body.extend_from_slice(&max_click);
+        body.extend_from_slice(&[action::NEUTRAL_ALL, 0]);
+        assert_eq!(compiled.chunks[0].body, body);
+        assert_eq!(compiled.chunks[0].action_records, 3);
+
+        // The wire bytes are exactly two existing MOUSE_CLICK records; no new record kind.
+        let two = compile_input_sequence(&request(
+            vec![click(Some(100), Some(100)), click(Some(100), Some(100))],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(two.chunks, compiled.chunks);
+        assert_eq!(two.fingerprint, compiled.fingerprint);
+
+        // Separate clicks may split across chunks; a double click moves whole.
+        let clicks = compile_input_sequence(&request(
+            vec![
+                click(Some(100), Some(100)),
+                click(Some(100), Some(100)),
+                click(Some(100), Some(100)),
+            ],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(clicks.chunks.len(), 2);
+        let atomic = compile_input_sequence(&request(
+            vec![click(Some(100), Some(100)), double(Some(100), Some(100))],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(atomic.chunks.len(), 2);
+        let mut second = vec![1, 0, 2, 0];
+        second.extend_from_slice(&max_click);
+        second.extend_from_slice(&max_click);
+        second.extend_from_slice(&[action::NEUTRAL_ALL, 0]);
+        assert_eq!(atomic.chunks[1].body, second);
+
+        let defaults = compile_input_sequence(&request(vec![double(None, None)], false)).unwrap();
+        assert_eq!(
+            defaults.chunks[0].body[4..18],
+            [
+                action::MOUSE_CLICK,
+                5,
+                1,
+                40,
+                0,
+                40,
+                0,
+                action::MOUSE_CLICK,
+                5,
+                1,
+                40,
+                0,
+                40,
+                0
+            ]
+        );
+        for (hold_ms, release_gap_ms) in [
+            (Some(9), None),
+            (None, Some(9)),
+            (Some(101), Some(10)),
+            (Some(10), Some(101)),
+        ] {
+            assert_eq!(
+                compile_input_sequence(&request(vec![double(hold_ms, release_gap_ms)], false)),
+                Err(InputError::PointerTiming)
+            );
+        }
+    }
+
+    #[test]
+    fn strict_parser_accepts_double_click_with_click_fields_only() {
+        let body = |action: &str| {
+            format!(
+                r#"{{"schema":"{INPUT_SEQUENCE_SCHEMA_V1}","command_id":"{COMMAND_ID}","arm":"command-scoped","start_within_ms":5000,"actions":[{action}]}}"#
+            )
+        };
+        let parsed = parse_input_sequence_json(
+            body(r#"{"type":"double_click","button":"button_2","hold_ms":20,"release_gap_ms":30}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.actions,
+            vec![InputAction::DoubleClick {
+                button: ClickButton::Button2,
+                hold_ms: Some(20),
+                release_gap_ms: Some(30),
+            }]
+        );
+        let repeated = parse_input_sequence_json(
+            body(r#"{"type":"repeat","count":2,"actions":[{"type":"double_click","button":"button_1"}]}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            compile_input_sequence(&repeated)
+                .unwrap()
+                .effectful_gestures,
+            4
+        );
+        for (action, error) in [
+            (
+                r#"{"type":"double_click","button":"button_1","count":2}"#,
+                InputError::UnknownField,
+            ),
+            (
+                r#"{"type":"double_click","button":"button_1","hold_ms":null}"#,
+                InputError::Json,
+            ),
+            (
+                r#"{"type":"double_click","button":"button_3"}"#,
+                InputError::PointerButton,
+            ),
+        ] {
+            assert_eq!(
+                parse_input_sequence_json(body(action).as_bytes()),
+                Err(error)
+            );
+        }
     }
 
     #[test]
