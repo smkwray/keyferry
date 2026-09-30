@@ -6,7 +6,6 @@ use keyferry_layouts::{
 };
 use serde_json::Value;
 
-pub const DEFAULT_PROFILE: &str = LEGACY_WIRE_MAPPING;
 pub const SEQUENCE_EXAMPLE: &str = r#"{
   "schema": "keyferry.keyboard-sequence.v1",
   "profile": "windows-us",
@@ -317,7 +316,7 @@ pub fn preview_hotkey(input: &str) -> SequencePreview {
     let request = KeyboardSequenceV1 {
         schema: SEQUENCE_SCHEMA_V1.to_owned(),
         command_id: PREVIEW_COMMAND_ID.to_owned(),
-        profile: DEFAULT_PROFILE.to_owned(),
+        profile: LEGACY_WIRE_MAPPING.to_owned(),
         arm: SequenceArmPolicy::CommandScoped,
         start_within_ms: 5000,
         timing: None,
@@ -363,7 +362,7 @@ pub fn preview_text(
     timing: TypingTiming,
     replace_unsupported: bool,
 ) -> TextPreview {
-    if profile != DEFAULT_PROFILE {
+    if profile != LEGACY_WIRE_MAPPING {
         return TextPreview {
             accepted: false,
             status: format!("Rejected: target profile {profile:?} is not available in API v1."),
@@ -438,11 +437,21 @@ mod tests {
 
     #[test]
     fn previews_rejection_and_crlf_normalization() {
-        let rejected = preview_text(DEFAULT_PROFILE, "ok—no", TypingTiming::DESKTOP_SAFE, false);
+        let rejected = preview_text(
+            LEGACY_WIRE_MAPPING,
+            "ok—no",
+            TypingTiming::DESKTOP_SAFE,
+            false,
+        );
         assert!(!rejected.accepted);
         assert!(rejected.status.contains("U+2014"));
 
-        let replaced = preview_text(DEFAULT_PROFILE, "ok—no🙂", TypingTiming::DESKTOP_SAFE, true);
+        let replaced = preview_text(
+            LEGACY_WIRE_MAPPING,
+            "ok—no🙂",
+            TypingTiming::DESKTOP_SAFE,
+            true,
+        );
         assert!(replaced.accepted);
         assert_eq!(replaced.normalized_text, "ok?no?");
         assert!(replaced
@@ -450,7 +459,7 @@ mod tests {
             .contains("2 unsupported characters become ?"));
 
         let normalized = preview_text(
-            DEFAULT_PROFILE,
+            LEGACY_WIRE_MAPPING,
             "line\r\nnext",
             TypingTiming::DESKTOP_SAFE,
             false,

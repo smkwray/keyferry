@@ -140,7 +140,7 @@ fn run_tests() {
     fs::remove_dir(directory).unwrap();
     recipe_library_is_local_and_import_is_the_only_writer();
     recipe_run_posts_once_to_the_expanded_route();
-    direct_sequences_post_canonical_key_names();
+    direct_sequences_pass_key_aliases_to_the_daemon();
 }
 
 const SECRET: &str = "Hunter2-recipe-secret";
@@ -227,6 +227,42 @@ fn recipe_library_is_local_and_import_is_the_only_writer() {
     assert_eq!(listed["library"], library.to_str().unwrap());
     assert_eq!(listed["recipes"], serde_json::json!([]));
     assert!(!library.exists(), "listing never creates the library");
+
+    // The example is one valid recipe, printed without a token or service.
+    let (code, example, _) = offline(&["--example"]);
+    assert_eq!(code, Some(0));
+    let example_path = root.join("example.json");
+    fs::write(&example_path, example.to_string()).unwrap();
+    let (code, validated, _) = offline(&["validate", "--input", example_path.to_str().unwrap()]);
+    assert_eq!(
+        (code, &validated["valid"]),
+        (Some(0), &serde_json::json!(true))
+    );
+    let help = spawn_keyctl(
+        &library,
+        &missing_token,
+        "http://127.0.0.1:9",
+        &["recipe", "--help"],
+        None,
+    )
+    .wait_with_output()
+    .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8(help.stdout)
+        .unwrap()
+        .contains("run DEVICE NAME"));
+
+    // An oversize file is classified by the parser, not reported as unreadable.
+    let oversize = root.join("oversize.json");
+    fs::write(&oversize, " ".repeat(2 * 65_536)).unwrap();
+    for arguments in [
+        vec!["validate", "--input", oversize.to_str().unwrap()],
+        vec!["import", oversize.to_str().unwrap()],
+    ] {
+        let (code, rejected, _) = offline(&arguments);
+        assert_eq!(code, Some(20), "{arguments:?}");
+        assert_eq!(rejected["error"]["code"], "recipe.limit", "{arguments:?}");
+    }
 
     let draft = root.join("draft.json");
     fs::write(&draft, keyboard_recipe(1)).unwrap();
@@ -568,9 +604,9 @@ fn recipe_run_posts_once_to_the_expanded_route() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// `keyctl sequence` and `keyctl input-sequence` accept key aliases but post canonical names, so
-/// a forwarded body stays acceptable to holders that predate aliases.
-fn direct_sequences_post_canonical_key_names() {
+/// `keyctl sequence` and `keyctl input-sequence` accept key aliases and post them unchanged: the
+/// daemon compiles them locally and canonicalizes a body it forwards to another controller.
+fn direct_sequences_pass_key_aliases_to_the_daemon() {
     let root = env::temp_dir().join(format!("keyctl-canonical-{}", uuid::Uuid::now_v7()));
     fs::create_dir(&root).unwrap();
     let token = root.join("token");
@@ -578,7 +614,7 @@ fn direct_sequences_post_canonical_key_names() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-    for (command, route, input, expected) in [
+    for (command, route, input) in [
         (
             "sequence",
             "sequences",
@@ -590,10 +626,6 @@ fn direct_sequences_post_canonical_key_names() {
                     {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "RETURN"}]}
                 ]
             }),
-            serde_json::json!([
-                {"type": "chord", "keys": ["LEFT_GUI", "L"]},
-                {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "ENTER"}]}
-            ]),
         ),
         (
             "input-sequence",
@@ -606,10 +638,6 @@ fn direct_sequences_post_canonical_key_names() {
                     {"type": "ordered_chord", "keys": ["OPT", "ESC"]}
                 ]
             }),
-            serde_json::json!([
-                {"type": "click", "button": "button_1"},
-                {"type": "ordered_chord", "keys": ["LEFT_ALT", "ESCAPE"]}
-            ]),
         ),
     ] {
         let child = spawn_keyctl(
@@ -624,7 +652,7 @@ fn direct_sequences_post_canonical_key_names() {
         assert_no_further_contact(&listener);
         assert_eq!(line, format!("POST /v1/devices/device-1/{route} HTTP/1.1"));
         let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(posted["actions"], expected, "{command}");
+        assert_eq!(posted["actions"], input["actions"], "{command}");
         assert_eq!(code, Some(0), "{command}");
         assert_eq!(result["outcome"], "EMITTED");
     }

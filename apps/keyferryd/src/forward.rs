@@ -31,6 +31,7 @@ use keyferry_gateway::{
     OWNER_GATEWAY_CANDIDATE_PATH, OWNER_GATEWAY_CONTROL_PORT, OWNER_GATEWAY_PROBE_PORT,
     ROUTE_PROOF_RESPONSE_LEN, ROUTE_PROOF_TTL_MS,
 };
+use keyferry_layouts::{canonicalize_input_sequence_keys, canonicalize_sequence_keys};
 use rustls::pki_types::ServerName;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1408,34 +1409,47 @@ pub(crate) async fn local_forwarding(
 }
 
 /// Validates a command body like the local handler and binds the command ID the holder keeps.
+/// Sequence key aliases are sent as canonical names, so a holder that predates aliases accepts
+/// the body from any client; the route proof binds identities and a nonce, never the body.
 /// `None` leaves the request to the local handler, which returns its usual error.
 fn prepare_command_body(kind: CommandKind, body: &[u8]) -> Option<(Uuid, Vec<u8>)> {
-    let command_id = match kind {
-        CommandKind::Type => parse_payload_body::<TypeRequest>(body).ok()?.command_id,
-        CommandKind::Actions => parse_payload_body::<ActionsRequest>(body).ok()?.command_id,
-        CommandKind::Sequence => Some(
-            Uuid::parse_str(
-                &parse_payload_body::<KeyboardSequenceV1>(body)
-                    .ok()?
-                    .command_id,
-            )
-            .ok()?,
+    let (command_id, body) = match kind {
+        CommandKind::Type => (
+            parse_payload_body::<TypeRequest>(body).ok()?.command_id,
+            body.to_vec(),
         ),
+        CommandKind::Actions => (
+            parse_payload_body::<ActionsRequest>(body).ok()?.command_id,
+            body.to_vec(),
+        ),
+        CommandKind::Sequence => {
+            let mut request = parse_payload_body::<KeyboardSequenceV1>(body).ok()?;
+            canonicalize_sequence_keys(&mut request);
+            (
+                Some(Uuid::parse_str(&request.command_id).ok()?),
+                serde_json::to_vec(&request).ok()?,
+            )
+        }
         CommandKind::InputSequence => {
-            Some(Uuid::parse_str(&parse_input_sequence_json(body).ok()?.command_id).ok()?)
+            let mut request = parse_input_sequence_json(body).ok()?;
+            canonicalize_input_sequence_keys(&mut request);
+            (
+                Some(Uuid::parse_str(&request.command_id).ok()?),
+                serde_json::to_vec(&request).ok()?,
+            )
         }
     };
     match (kind, command_id) {
         (_, Some(command_id)) if command_id.get_version_num() != 7 => None,
         (CommandKind::Type | CommandKind::Actions, None) => {
             let command_id = Uuid::now_v7();
-            let mut request = serde_json::from_slice::<Value>(body).ok()?;
+            let mut request = serde_json::from_slice::<Value>(&body).ok()?;
             request
                 .as_object_mut()?
                 .insert("command_id".to_owned(), command_id.to_string().into());
             Some((command_id, serde_json::to_vec(&request).ok()?))
         }
-        (_, Some(command_id)) => Some((command_id, body.to_vec())),
+        (_, Some(command_id)) => Some((command_id, body)),
         (_, None) => None,
     }
 }
@@ -2114,7 +2128,62 @@ mod tests {
         }
     }
 
+    /// Each POST path and body the holder's owner-mTLS router received.
+    type Received = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// The holder's production owner-mTLS listener and router, behind a layer that records each
+    /// POST it receives, so a test sees exactly what crossed the tailnet.
+    async fn serve_recording_holder(
+        holder: Daemon,
+        listener: TcpListener,
+        installation: InstallationTlsSecretStore,
+        received: Received,
+    ) {
+        holder
+            .configure_owner_remote_installation(&installation)
+            .unwrap();
+        let listener = crate::OwnerTlsListener {
+            control_port: listener.local_addr().unwrap().port(),
+            listener,
+            acceptor: installation
+                .remote_tls_acceptor()
+                .map_err(|error| error.to_string())
+                .unwrap(),
+        };
+        let record = axum::middleware::from_fn(move |request: Request, next: Next| {
+            let received = Arc::clone(&received);
+            async move {
+                let (parts, body) = request.into_parts();
+                let body = to_bytes(body, DEFAULT_BODY_LIMIT).await.unwrap();
+                if parts.method == Method::POST {
+                    received
+                        .lock()
+                        .unwrap()
+                        .push((parts.uri.path().to_owned(), body.to_vec()));
+                }
+                next.run(Request::from_parts(parts, Body::from(body))).await
+            }
+        });
+        axum::serve(
+            listener,
+            holder
+                .owner_remote_router()
+                .layer(record)
+                .into_make_service_with_connect_info::<crate::RemoteTlsPeer>(),
+        )
+        .await
+        .unwrap();
+    }
+
     async fn harness(local: Option<SimulatorTransport>, proof_secret: [u8; 32]) -> Harness {
+        harness_with(local, proof_secret, None).await
+    }
+
+    async fn harness_with(
+        local: Option<SimulatorTransport>,
+        proof_secret: [u8; 32],
+        received: Option<Received>,
+    ) -> Harness {
         let root = std::env::temp_dir().join(format!("keyferry-forward-{}", Uuid::now_v7()));
         let owner = TestOwner::new(OWNER);
         let (holder_id, _) = owner.issue(&root.join("holder"), DEVICE, HOLDER_SECRET);
@@ -2151,11 +2220,23 @@ mod tests {
         .unwrap();
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_address = control.local_addr().unwrap();
-        tokio::spawn(serve_owner_mtls_listener(
-            holder.clone(),
-            control,
-            holder_store,
-        ));
+        match received {
+            None => {
+                tokio::spawn(serve_owner_mtls_listener(
+                    holder.clone(),
+                    control,
+                    holder_store,
+                ));
+            }
+            Some(received) => {
+                tokio::spawn(serve_recording_holder(
+                    holder.clone(),
+                    control,
+                    holder_store,
+                    received,
+                ));
+            }
+        }
         let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let probe_port = probe.local_addr().unwrap().port();
         tokio::spawn(serve_owner_candidate_listener(probe, holder_id));
@@ -2393,6 +2474,77 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error["error"], "text_stream.epoch");
+    }
+
+    #[tokio::test]
+    async fn forwarded_key_aliases_reach_the_holder_as_canonical_names_under_the_same_id() {
+        let received = Received::default();
+        let harness = harness_with(None, FORWARDER_SECRET, Some(Arc::clone(&received))).await;
+        let forwarder = &harness.forwarder;
+        let device = device_id();
+        let posted = |segment: &str| -> Vec<Value> {
+            let path = format!("/v1/devices/{device}/{segment}");
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(received, _)| *received == path)
+                .map(|(_, body)| serde_json::from_slice(body).unwrap())
+                .collect()
+        };
+
+        let command_id = Uuid::now_v7();
+        let mut body = sequence(command_id);
+        body["actions"] = serde_json::json!([
+            {"type": "chord", "keys": ["CMD", "A"]},
+            {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "RETURN"}]}
+        ]);
+        let uri = format!("/v1/devices/{device}/sequences");
+        let (status, response) = call(forwarder, "POST", &uri, Some(body)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        assert_eq!(response["command_id"], command_id.to_string());
+        let outcome = wait_for_outcome(forwarder, &command_id.to_string()).await;
+        assert_eq!(outcome["outcome"], "EMITTED");
+        assert_eq!(harness.holder_device.execution_count(command_id), 1);
+        let sent = posted("sequences");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["command_id"], command_id.to_string());
+        assert_eq!(
+            sent[0]["actions"],
+            serde_json::json!([
+                {"type": "chord", "keys": ["LEFT_GUI", "A"]},
+                {"type": "repeat", "count": 2, "actions": [{"type": "tap", "key": "ENTER"}]}
+            ])
+        );
+
+        let command_id = Uuid::now_v7();
+        let (status, response) = call(
+            forwarder,
+            "POST",
+            &format!("/v1/devices/{device}/input-sequences"),
+            Some(serde_json::json!({
+                "schema": "keyferry.input-sequence.v1",
+                "command_id": command_id.to_string(),
+                "keyboard_profile": "windows-us",
+                "arm": "command-scoped",
+                "start_within_ms": 5000,
+                "actions": [
+                    {"type": "click", "button": "button_1"},
+                    {"type": "ordered_chord", "keys": ["OPT", "ESC"]}
+                ],
+            })),
+        )
+        .await;
+        let sent = posted("input-sequences");
+        assert_eq!(sent.len(), 1, "{status} {response}");
+        assert_eq!(sent[0]["command_id"], command_id.to_string());
+        assert_eq!(
+            sent[0]["actions"],
+            serde_json::json!([
+                {"type": "click", "button": "button_1"},
+                {"type": "ordered_chord", "keys": ["LEFT_ALT", "ESCAPE"]}
+            ])
+        );
     }
 
     #[tokio::test]

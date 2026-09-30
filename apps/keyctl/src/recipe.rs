@@ -5,19 +5,20 @@
 //! it never writes to the library. No output carries an action body or a parameter value.
 
 use super::{
-    default_recipe_dir, emit_json_line, emit_sequence_result, parse_endpoint,
-    prepare_input_sequence, prepare_sequence, read_bounded_input, service_token,
-    submit_prepared_command, Client, SequenceOutcome,
+    default_recipe_dir, emit_json_line, emit_sequence_result, prepare_exit, prepare_input_sequence,
+    prepare_sequence, sequence_client, submit_prepared_command, SequenceOutcome,
 };
 use keyferry_layouts::recipe::{self as expander, Params, RecipeError, RecipeV1, Request, Summary};
 use keyferry_layouts::text_stream::UnsupportedTextPolicy;
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
+const HELP: &str = "keyctl recipe <subcommand>  (saved sequences on this computer)\n  list | inspect NAME | validate NAME | validate --input PATH  (local; no device contact)\n  import PATH [--replace]  (validate and save; the only library writer)\n  run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  Run `keyctl recipe --example` for a valid starting recipe.";
+const EXAMPLE: &str = r#"{"schema":"keyferry.recipe.v1","name":"type-note","parameters":[{"name":"note","type":"text","max_chars":256}],"actions":[{"type":"text","param":"note"}]}"#;
 const LIST_SCHEMA: &str = "keyferry.recipe-list.v1";
 const INSPECTION_SCHEMA: &str = "keyferry.recipe-inspection.v1";
 const VALIDATION_SCHEMA: &str = "keyferry.recipe-validation.v1";
@@ -63,6 +64,14 @@ impl From<RecipeError> for Failure {
 
 pub(super) fn run(args: &[String], url: &str, token_file: &Path) -> u8 {
     match (args.first().map(String::as_str), args.len()) {
+        (Some("--help"), 1) => {
+            println!("{HELP}");
+            0
+        }
+        (Some("--example"), 1) => {
+            println!("{EXAMPLE}");
+            0
+        }
         (Some("list"), 1) => list(),
         (Some("inspect"), 2) => inspect(&args[1]),
         (Some("validate"), 3) if args[1] == "--input" => validate(
@@ -80,21 +89,25 @@ pub(super) fn run(args: &[String], url: &str, token_file: &Path) -> u8 {
     }
 }
 
+/// Reads at most one byte past the shared JSON cap, so the parser, not the reader, reports an
+/// oversize recipe (`recipe.limit`) or parameter object (`params.limit`).
+fn read_capped(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(expander::MAX_RECIPE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn read_file(path: &Path) -> Result<Vec<u8>, Failure> {
-    let mut file = fs::File::open(path).map_err(|error| {
+    let file = fs::File::open(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             Failure::new("recipe.not_found", 20)
         } else {
             Failure::new("recipe.unreadable", 23)
         }
     })?;
-    if file
-        .metadata()
-        .is_ok_and(|metadata| metadata.len() > expander::MAX_RECIPE_BYTES as u64)
-    {
-        return Err(Failure::new("recipe.limit", 20));
-    }
-    read_bounded_input(&mut file).map_err(|()| Failure::new("recipe.unreadable", 23))
+    read_capped(file).map_err(|_| Failure::new("recipe.unreadable", 23))
 }
 
 /// Loads `<library>/<name>.json`. The name is checked before any path is built.
@@ -386,14 +399,12 @@ fn run_recipe(args: &[String], url: &str, token_file: &Path) -> u8 {
             json!({"schema": REPLACEMENTS_SCHEMA, "replacements": prepared.replacements})
         );
     }
-    let Ok(endpoint) = parse_endpoint(url) else {
-        return rejected(device, Failure::new("input.url", 20));
-    };
-    let Ok(token) = service_token(&endpoint, token_file) else {
-        return rejected(device, Failure::new("daemon.token_unavailable", 23));
+    let client = match sequence_client(url, token_file, device) {
+        Ok(client) => client,
+        Err(exit) => return exit,
     };
     submit_prepared_command(
-        &Client { endpoint, token },
+        &client,
         device,
         detach,
         prepared.route,
@@ -408,35 +419,22 @@ fn prepare_run(name: &str, unsupported: UnsupportedTextPolicy) -> Result<Prepare
     let params = if recipe.parameters().is_empty() {
         Params::default()
     } else {
-        let bytes =
-            read_bounded_input(&mut io::stdin()).map_err(|()| Failure::new("input.invalid", 20))?;
+        let bytes = read_capped(io::stdin()).map_err(|_| Failure::new("input.invalid", 20))?;
         expander::parse_params(&bytes)?
     };
     let command_id = uuid::Uuid::now_v7().to_string();
     let expanded = expander::expand(&recipe, &params, unsupported, &command_id)?;
-    let serialization = Failure::new("internal.serialization", 25);
-    let prepared = |code: &'static str| {
-        Failure::new(
-            code,
-            if code == "internal.serialization" {
-                25
-            } else {
-                20
-            },
-        )
-    };
     let (command_id, body) = match &expanded.request {
-        Request::Keyboard(request) => {
-            let raw = serde_json::to_string(request).map_err(|_| serialization)?;
-            let sequence = prepare_sequence(&raw).map_err(prepared)?;
-            (sequence.command_id, sequence.body)
-        }
-        Request::Input(request) => {
-            let raw = serde_json::to_vec(request).map_err(|_| serialization)?;
-            let sequence = prepare_input_sequence(&raw).map_err(prepared)?;
-            (sequence.command_id, sequence.body)
-        }
-    };
+        Request::Keyboard(request) => serde_json::to_string(request)
+            .map_err(|_| "internal.serialization")
+            .and_then(|raw| prepare_sequence(&raw))
+            .map(|sequence| (sequence.command_id, sequence.body)),
+        Request::Input(request) => serde_json::to_vec(request)
+            .map_err(|_| "internal.serialization")
+            .and_then(|raw| prepare_input_sequence(&raw))
+            .map(|sequence| (sequence.command_id, sequence.body)),
+    }
+    .map_err(|code| Failure::new(code, prepare_exit(code)))?;
     Ok(PreparedRun {
         route: expanded.summary.route.path(),
         command_id,
@@ -494,6 +492,38 @@ mod tests {
         assert_eq!(publish(&library, "open", b"second", true).ok(), Some(true));
         assert_eq!(mode(&library.join("open.json")), 0o600);
         fs::remove_dir_all(library.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn example_is_one_valid_recipe_and_help_lists_every_subcommand() {
+        let recipe = expander::parse(EXAMPLE.as_bytes()).unwrap();
+        let summary = expander::validate(&recipe).unwrap();
+        assert_eq!(summary.route.name(), "sequences");
+        assert_eq!(recipe.parameters().len(), 1);
+        assert_eq!(recipe.parameters()[0].kind, expander::ParameterKind::Text);
+        assert!(!EXAMPLE.contains('\n'));
+        for subcommand in [
+            "list",
+            "inspect NAME",
+            "validate NAME",
+            "validate --input PATH",
+            "import PATH [--replace]",
+            "run DEVICE NAME",
+        ] {
+            assert!(HELP.contains(subcommand), "{subcommand}");
+        }
+        let offline = Path::new("missing-token");
+        for flag in ["--help", "--example"] {
+            assert_eq!(run(&[flag.to_owned()], "http://127.0.0.1:9", offline), 0);
+        }
+        assert_eq!(
+            run(
+                &["--example".to_owned(), "extra".to_owned()],
+                "http://127.0.0.1:9",
+                offline
+            ),
+            20
+        );
     }
 
     #[test]

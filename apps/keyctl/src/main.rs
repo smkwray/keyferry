@@ -8,10 +8,9 @@ use keyferry_layouts::text_stream::{
     TEXT_STREAM_SCHEMA_V1,
 };
 use keyferry_layouts::{
-    canonicalize_input_sequence_keys, canonicalize_sequence_keys, compile_input_sequence,
-    compile_sequence, parse_input_sequence_json_with_command_id, KeyClass, KeyPortability,
-    KeyboardSequenceV1, SequenceAction, SequenceArmPolicy, TypingTiming, KEYBOARD_KEYS,
-    LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
+    compile_input_sequence, compile_sequence, parse_input_sequence_json_with_command_id, KeyClass,
+    KeyPortability, KeyboardSequenceV1, SequenceAction, SequenceArmPolicy, TypingTiming,
+    KEYBOARD_KEYS, KEY_ALIASES, LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,77 +168,18 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|command| command == "recipe") {
         return ExitCode::from(recipe::run(&args[1..], &url, &token_file));
     }
-    if args
-        .first()
-        .is_some_and(|command| command == "input-sequence")
-    {
+    let submit: Option<fn(&Client, &[String]) -> u8> = match args.first().map(String::as_str) {
+        Some("input-sequence") => Some(run_input_sequence),
+        Some("sequence") => Some(run_sequence),
+        Some("type") => Some(run_type),
+        _ => None,
+    };
+    if let Some(submit) = submit {
         let device = args.get(1).map_or("", String::as_str);
-        let endpoint = match parse_endpoint(&url) {
-            Ok(endpoint) => endpoint,
-            Err(_) => {
-                emit_sequence_result(device, None, SequenceOutcome::Rejected, Some("input.url"));
-                return ExitCode::from(20);
-            }
-        };
-        let token = match service_token(&endpoint, &token_file) {
-            Ok(token) => token,
-            Err(_) => {
-                emit_sequence_result(
-                    device,
-                    None,
-                    SequenceOutcome::Rejected,
-                    Some("daemon.token_unavailable"),
-                );
-                return ExitCode::from(23);
-            }
-        };
-        return ExitCode::from(run_input_sequence(&Client { endpoint, token }, &args));
-    }
-    if args.first().is_some_and(|command| command == "sequence") {
-        let device = args.get(1).map_or("", String::as_str);
-        let endpoint = match parse_endpoint(&url) {
-            Ok(endpoint) => endpoint,
-            Err(_) => {
-                emit_sequence_result(device, None, SequenceOutcome::Rejected, Some("input.url"));
-                return ExitCode::from(20);
-            }
-        };
-        let token = match service_token(&endpoint, &token_file) {
-            Ok(token) => token,
-            Err(_) => {
-                emit_sequence_result(
-                    device,
-                    None,
-                    SequenceOutcome::Rejected,
-                    Some("daemon.token_unavailable"),
-                );
-                return ExitCode::from(23);
-            }
-        };
-        return ExitCode::from(run_sequence(&Client { endpoint, token }, &args));
-    }
-    if args.first().is_some_and(|command| command == "type") {
-        let device = args.get(1).map_or("", String::as_str);
-        let endpoint = match parse_endpoint(&url) {
-            Ok(endpoint) => endpoint,
-            Err(_) => {
-                emit_sequence_result(device, None, SequenceOutcome::Rejected, Some("input.url"));
-                return ExitCode::from(20);
-            }
-        };
-        let token = match service_token(&endpoint, &token_file) {
-            Ok(token) => token,
-            Err(_) => {
-                emit_sequence_result(
-                    device,
-                    None,
-                    SequenceOutcome::Rejected,
-                    Some("daemon.token_unavailable"),
-                );
-                return ExitCode::from(23);
-            }
-        };
-        return ExitCode::from(run_type(&Client { endpoint, token }, &args));
+        return ExitCode::from(match sequence_client(&url, &token_file, device) {
+            Ok(client) => submit(&client, &args),
+            Err(exit) => exit,
+        });
     }
     let result = parse_endpoint(&url)
         .and_then(|endpoint| {
@@ -462,6 +402,25 @@ fn service_token(endpoint: &Endpoint, token_file: &Path) -> Result<String, Clien
             Err(error)
         }
     })
+}
+
+/// The local client for a command that reports one command-result line, or that line's
+/// rejection already emitted and the exit status.
+fn sequence_client(url: &str, token_file: &Path, device: &str) -> Result<Client, u8> {
+    let Ok(endpoint) = parse_endpoint(url) else {
+        emit_sequence_result(device, None, SequenceOutcome::Rejected, Some("input.url"));
+        return Err(20);
+    };
+    let Ok(token) = service_token(&endpoint, token_file) else {
+        emit_sequence_result(
+            device,
+            None,
+            SequenceOutcome::Rejected,
+            Some("daemon.token_unavailable"),
+        );
+        return Err(23);
+    };
+    Ok(Client { endpoint, token })
 }
 
 fn load_token(path: &Path) -> Result<String, ClientError> {
@@ -1176,7 +1135,7 @@ fn default_recipe_dir() -> PathBuf {
 }
 
 fn help_text() -> &'static str {
-    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
+    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
 }
 
 fn run_local_helper(args: &[String]) -> u8 {
@@ -1274,11 +1233,11 @@ fn local_helper_path() -> Result<PathBuf, &'static str> {
 }
 
 fn type_help_text() -> &'static str {
-    "keyctl type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  Reads literal text from stdin and submits one command-scoped keyboard sequence.\n  --key-down-ms N         hold each key for 5..100 ms (default 12)\n  --key-gap-ms N          release gap between keys, 5..100 ms (default 40)\n  --send-after-seconds N  wait 0..10 seconds with all keys released before typing\n  --detach                return after the daemon accepts the command\n  Output is one compact keyferry.command-result.v2 JSON object with output transport and release evidence.\n  Text is never accepted on argv and commands are never automatically retried.\n  One command accepts at most 4096 supported windows-us characters and 60 seconds planned time."
+    "keyctl type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  Reads literal text from stdin and submits one command-scoped keyboard sequence.\n  --key-down-ms N         hold each key for 5..100 ms (default 12)\n  --key-gap-ms N          release gap between keys, 5..100 ms (default 40)\n  --send-after-seconds N  wait 0..10 seconds with all keys released before typing\n  --detach                return after the daemon accepts the command\n  Output is one compact keyferry.command-result.v2 JSON object with output transport and release evidence.\n  Text is never accepted on argv and commands are never automatically retried.\n  Accepts US-ASCII text (legacy mapping id windows-us; valid for Windows US and for a Mac identified as ANSI with the U.S. or ABC input source).\n  One command accepts at most 4096 supported characters and 60 seconds planned time."
 }
 
 fn stream_help_text() -> &'static str {
-    "keyctl stream DEVICE --input FILE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--unsupported reject|replace] [--validate]\n  Streams windows-us text as bounded child commands with no configured total-length limit.\n  The file is preflighted using bounded memory before any device contact.\n  --unsupported reject is the default and emits nothing when any character is unsupported.\n  --unsupported replace explicitly replaces each unsupported character with one visible '?'.\n  --validate performs the preflight only.\n  Each child is submitted once; interruption or uncertain delivery stops the parent and is never retried.\n  Output is compact JSONL metadata and never includes source text.\n  Directly supported plain text is printable ASCII, TAB, LF, and CR."
+    "keyctl stream DEVICE --input FILE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--unsupported reject|replace] [--validate]\n  Streams US-ASCII text (legacy mapping id windows-us; valid for Windows US and for a Mac identified as ANSI with the U.S. or ABC input source)\n  as bounded child commands with no configured total-length limit.\n  The file is preflighted using bounded memory before any device contact.\n  --unsupported reject is the default and emits nothing when any character is unsupported.\n  --unsupported replace explicitly replaces each unsupported character with one visible '?'.\n  --validate performs the preflight only.\n  Each child is submitted once; interruption or uncertain delivery stops the parent and is never retried.\n  Output is compact JSONL metadata and never includes source text.\n  Directly supported plain text is printable ASCII, TAB, LF, and CR."
 }
 
 #[derive(Clone, Debug)]
@@ -2118,12 +2077,19 @@ fn input_sequence_description_json() -> String {
     .expect("input sequence description serialization is infallible")
 }
 
-/// Key aliases are posted as canonical names, so holders that predate aliases accept the body.
+/// Exit status for a command rejected while it is prepared, before any device contact.
+fn prepare_exit(code: &str) -> u8 {
+    if code == "internal.serialization" {
+        25
+    } else {
+        20
+    }
+}
+
 fn prepare_input_sequence(bytes: &[u8]) -> Result<PreparedInputSequence, &'static str> {
     let generated = uuid::Uuid::now_v7().to_string();
-    let mut request = parse_input_sequence_json_with_command_id(bytes, &generated)
+    let request = parse_input_sequence_json_with_command_id(bytes, &generated)
         .map_err(|error| error.code())?;
-    canonicalize_input_sequence_keys(&mut request);
     compile_input_sequence(&request).map_err(|error| error.code())?;
     let body = serde_json::to_string(&request).map_err(|_| "internal.serialization")?;
     if body.len() > MAX_SEQUENCE_BODY {
@@ -2179,11 +2145,7 @@ fn run_input_sequence(client: &Client, args: &[String]) -> u8 {
         Ok(prepared) => prepared,
         Err(code) => {
             emit_sequence_result(device, None, SequenceOutcome::Rejected, Some(code));
-            return if code == "internal.serialization" {
-                25
-            } else {
-                20
-            };
+            return prepare_exit(code);
         }
     };
     submit_prepared_command(
@@ -2208,10 +2170,14 @@ fn input_sequence_validation_error_json(code: &str) -> String {
 const SEQUENCE_EXAMPLE: &str = r#"{"schema":"keyferry.keyboard-sequence.v1","profile":"windows-us","arm":"command-scoped","start_within_ms":5000,"actions":[{"type":"tap","key":"A"}]}"#;
 
 fn sequence_help_text() -> &'static str {
-    "keyctl sequence DEVICE [--input json] [--detach]\n  Reads one keyferry.keyboard-sequence.v1 JSON object from stdin.\n  Run `keyctl sequence --example` for a valid starting document.\n  Run `keyctl sequence --validate` with JSON on stdin for a no-contact compilation check.\n  Run `keyctl keys` for the canonical, case-sensitive physical key names.\n  Actions are strict: text(value), tap(key), chord(keys), ordered_chord(keys), wait(ms), repeat(count, actions).\n  `text` types profile-mapped characters; tap/chord use physical key names.\n  `chord` presses together; `ordered_chord` holds keys in listed order and releases in reverse (2-6 keys).\n  Duplicate or unknown keys reject locally. Raw usages and unrestricted key_down/key_up are not accepted.\n  No command is retried after possible start."
+    "keyctl sequence DEVICE [--input json] [--detach]\n  Reads one keyferry.keyboard-sequence.v1 JSON object from stdin.\n  Run `keyctl sequence --example` for a valid starting document.\n  Run `keyctl sequence --validate` with JSON on stdin for a no-contact compilation check.\n  Run `keyctl keys` for the canonical, case-sensitive physical key names and their aliases\n  (e.g. COMMAND/CMD for LEFT_GUI, OPTION/OPT for LEFT_ALT, RETURN for ENTER).\n  Actions are strict: text(value), tap(key), chord(keys), ordered_chord(keys), wait(ms), repeat(count, actions).\n  `text` types profile-mapped characters; tap/chord use physical key names.\n  `chord` presses together; `ordered_chord` holds keys in listed order and releases in reverse (2-6 keys).\n  Duplicate or unknown keys reject locally. Raw usages and unrestricted key_down/key_up are not accepted.\n  No command is retried after possible start."
 }
 
 fn key_registry_json() -> String {
+    let aliases = KEY_ALIASES
+        .iter()
+        .map(|(alias, key)| serde_json::json!({"alias": alias, "key": key}))
+        .collect::<Vec<_>>();
     let keys = KEYBOARD_KEYS
         .iter()
         .map(|key| {
@@ -2233,6 +2199,7 @@ fn key_registry_json() -> String {
         "max_modifiers": 8,
         "max_non_modifiers": 6,
         "keys": keys,
+        "aliases": aliases,
     }))
     .expect("keyboard registry serialization is infallible")
 }
@@ -2249,7 +2216,6 @@ fn read_bounded_sequence_stdin() -> Result<String, ClientError> {
     String::from_utf8(bytes).map_err(|_| ClientError("sequence input is not UTF-8".to_owned()))
 }
 
-/// Key aliases are posted as canonical names, so holders that predate aliases accept the body.
 fn prepare_sequence(raw: &str) -> Result<PreparedSequence, &'static str> {
     let mut value: Value = serde_json::from_str(raw).map_err(|_| "input.invalid_json")?;
     let object = value.as_object_mut().ok_or("input.not_object")?;
@@ -2259,9 +2225,7 @@ fn prepare_sequence(raw: &str) -> Result<PreparedSequence, &'static str> {
             Value::String(uuid::Uuid::now_v7().to_string()),
         );
     }
-    let mut request: KeyboardSequenceV1 =
-        serde_json::from_value(value).map_err(|_| "input.schema")?;
-    canonicalize_sequence_keys(&mut request);
+    let request: KeyboardSequenceV1 = serde_json::from_value(value).map_err(|_| "input.schema")?;
     let command_id = uuid::Uuid::parse_str(&request.command_id).map_err(|_| "input.command_id")?;
     if command_id.get_version_num() != 7 {
         return Err("input.command_id");
@@ -2296,11 +2260,7 @@ fn run_sequence_validate() -> u8 {
         }
         Err(code) => {
             println!("{}", sequence_validation_error_json(code));
-            if code == "internal.serialization" {
-                25
-            } else {
-                20
-            }
+            prepare_exit(code)
         }
     }
 }
@@ -2418,19 +2378,10 @@ fn run_type(client: &Client, args: &[String]) -> u8 {
         }),
         actions,
     };
-    let raw = match serde_json::to_string(&request) {
-        Ok(raw) => raw,
-        Err(_) => {
-            emit_sequence_result(
-                device,
-                Some(&request.command_id),
-                SequenceOutcome::Rejected,
-                Some("internal.serialization"),
-            );
-            return 25;
-        }
-    };
-    let prepared = match prepare_sequence(&raw) {
+    let prepared = serde_json::to_string(&request)
+        .map_err(|_| "internal.serialization")
+        .and_then(|raw| prepare_sequence(&raw));
+    let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(code) => {
             emit_sequence_result(
@@ -2439,11 +2390,7 @@ fn run_type(client: &Client, args: &[String]) -> u8 {
                 SequenceOutcome::Rejected,
                 Some(code),
             );
-            return if code == "internal.serialization" {
-                25
-            } else {
-                20
-            };
+            return prepare_exit(code);
         }
     };
     submit_prepared_command(
@@ -2499,11 +2446,7 @@ fn run_sequence(client: &Client, args: &[String]) -> u8 {
         Ok(prepared) => prepared,
         Err(code) => {
             emit_sequence_result(device, None, SequenceOutcome::Rejected, Some(code));
-            return if code == "internal.serialization" {
-                25
-            } else {
-                20
-            };
+            return prepare_exit(code);
         }
     };
     submit_prepared_command(
@@ -3385,6 +3328,22 @@ mod tests {
                 && entry.get("portability").is_some()
                 && entry.get("code").is_none()
         }));
+        let aliases = registry["aliases"].as_array().unwrap();
+        assert_eq!(aliases.len(), KEY_ALIASES.len());
+        for entry in aliases {
+            let key = entry["key"].as_str().unwrap();
+            assert!(keyferry_layouts::keyboard_key(key).is_some(), "{entry}");
+            assert_eq!(
+                keyferry_layouts::resolve_key_name(entry["alias"].as_str().unwrap())
+                    .map(|resolved| resolved.name),
+                Some(key)
+            );
+        }
+        for (alias, key) in [("COMMAND", "LEFT_GUI"), ("OPT", "LEFT_ALT")] {
+            assert!(aliases.contains(&serde_json::json!({"alias": alias, "key": key})));
+        }
+        assert!(sequence_help_text().contains("COMMAND/CMD for LEFT_GUI"));
+        assert!(help_text().contains("aliases such as COMMAND/CMD, OPTION/OPT"));
         assert!(sequence_help_text().contains("case-sensitive physical key names"));
         assert!(sequence_help_text().contains("Duplicate or unknown keys reject locally"));
         assert!(sequence_help_text().contains("no-contact compilation check"));
@@ -3435,6 +3394,13 @@ mod tests {
         assert!(type_help_text().contains("release gap between keys"));
         assert!(type_help_text().contains("5..100 ms (default 40)"));
         assert!(type_help_text().contains("never automatically retried"));
+        for help in [type_help_text(), stream_help_text()] {
+            assert!(help.contains(
+                "US-ASCII text (legacy mapping id windows-us; valid for Windows US and for a Mac \
+                 identified as ANSI with the U.S. or ABC input source)"
+            ));
+            assert!(!help.contains("windows-us characters") && !help.contains("windows-us text"));
+        }
     }
 
     #[test]

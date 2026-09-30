@@ -26,8 +26,8 @@ use keyferry::{
     },
 };
 use keyferry_layouts::{
-    compile_sequence, is_wire_mapping, text_stream::UnsupportedTextPolicy, KeyboardSequenceV1,
-    SequenceAction, SequenceArmPolicy, TypingTiming, SEQUENCE_SCHEMA_V1,
+    compile_sequence, text_stream::UnsupportedTextPolicy, KeyboardSequenceV1, SequenceAction,
+    SequenceArmPolicy, TypingTiming, LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::{
@@ -1508,22 +1508,18 @@ fn edit_sequence_in_window(
     }
 }
 
-fn ui_sequence(
-    profile: String,
-    actions: Vec<SequenceAction>,
-) -> Result<KeyboardSequenceV1, &'static str> {
-    ui_sequence_with_timing(profile, actions, TypingTiming::DESKTOP_SAFE)
+fn ui_sequence(actions: Vec<SequenceAction>) -> Result<KeyboardSequenceV1, &'static str> {
+    ui_sequence_with_timing(actions, TypingTiming::DESKTOP_SAFE)
 }
 
 fn ui_sequence_with_timing(
-    profile: String,
     actions: Vec<SequenceAction>,
     timing: TypingTiming,
 ) -> Result<KeyboardSequenceV1, &'static str> {
     let request = KeyboardSequenceV1 {
         schema: SEQUENCE_SCHEMA_V1.to_owned(),
         command_id: uuid::Uuid::now_v7().to_string(),
-        profile,
+        profile: LEGACY_WIRE_MAPPING.to_owned(),
         arm: SequenceArmPolicy::CommandScoped,
         start_within_ms: 5000,
         timing: Some(timing),
@@ -1647,11 +1643,6 @@ fn update_text_preview(weak: &Weak<ui::MainWindow>) {
             return;
         }
     };
-    if !is_wire_mapping(window.get_selected_profile().as_str()) {
-        window.set_preview_status("Rejected: unsupported target profile.".into());
-        window.set_text_send_enabled(false);
-        return;
-    }
     let options = TextValueOptions {
         timing,
         send_after_seconds,
@@ -2167,10 +2158,6 @@ fn install_api_actions(
             return;
         };
         let Some(window) = weak.upgrade() else { return };
-        if !is_wire_mapping(window.get_selected_profile().as_str()) {
-            set_status(&weak, "Text rejected: unsupported target profile.");
-            return;
-        }
         let (timing, send_after_seconds) = match text_options(&window) {
             Ok(options) => options,
             Err(error) => {
@@ -2357,10 +2344,9 @@ fn install_api_actions(
             return;
         };
         let Some(window) = weak.upgrade() else { return };
-        let mut request = match hotkey_action(window.get_hotkey().as_str()).and_then(|action| {
-            ui_sequence(window.get_selected_profile().to_string(), vec![action])
-                .map_err(str::to_owned)
-        }) {
+        let mut request = match hotkey_action(window.get_hotkey().as_str())
+            .and_then(|action| ui_sequence(vec![action]).map_err(str::to_owned))
+        {
             Ok(request) => request,
             Err(error) => {
                 set_status(&weak, &format!("Keys rejected: {error}"));
@@ -4382,7 +4368,6 @@ mod tests {
         assert!(parse_text_options("8", "11").is_err());
 
         let request = ui_sequence_with_timing(
-            "windows-us".to_owned(),
             vec![
                 SequenceAction::Wait { ms: 3000 },
                 SequenceAction::Text {
@@ -4581,13 +4566,10 @@ mod tests {
 
     #[test]
     fn ui_sequences_auto_arm_or_use_an_existing_explicit_arm_and_clear_payloads() {
-        let mut request = ui_sequence(
-            "windows-us".to_owned(),
-            vec![SequenceAction::Text {
-                value: "private password".to_owned(),
-                timing: None,
-            }],
-        )
+        let mut request = ui_sequence(vec![SequenceAction::Text {
+            value: "private password".to_owned(),
+            timing: None,
+        }])
         .unwrap();
         assert_eq!(request.arm, SequenceArmPolicy::CommandScoped);
 
@@ -4618,13 +4600,10 @@ mod tests {
         assert!(value.is_empty());
 
         device.armed = false;
-        let mut next = ui_sequence(
-            "windows-us".to_owned(),
-            vec![SequenceAction::Tap {
-                key: "ENTER".to_owned(),
-                timing: None,
-            }],
-        )
+        let mut next = ui_sequence(vec![SequenceAction::Tap {
+            key: "ENTER".to_owned(),
+            timing: None,
+        }])
         .unwrap();
         use_existing_arm_if_needed(&mut next, &device);
         assert_eq!(next.arm, SequenceArmPolicy::CommandScoped);

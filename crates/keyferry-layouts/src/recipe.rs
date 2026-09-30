@@ -18,15 +18,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
 
-pub const RECIPE_SCHEMA_V1: &str = "keyferry.recipe.v1";
+/// The recipe and parameter-object size cap; a reader needs one byte more to let [`parse`] and
+/// [`parse_params`] report an oversize input.
 pub const MAX_RECIPE_BYTES: usize = MAX_INPUT_BYTES;
-pub const MAX_RECIPE_NAME_CHARS: usize = 63;
-pub const MAX_DESCRIPTION_CHARS: usize = 200;
-pub const MAX_PARAMETERS: usize = 16;
-pub const MAX_PARAMETER_NAME_CHARS: usize = 32;
-pub const MAX_PARAMETER_CHARS: u64 = 4096;
-pub const DEFAULT_PARAMETER_CHARS: u64 = 256;
-pub const DEFAULT_START_WITHIN_MS: u64 = 5000;
+const RECIPE_SCHEMA_V1: &str = "keyferry.recipe.v1";
+const MAX_RECIPE_NAME_CHARS: usize = 63;
+const MAX_DESCRIPTION_CHARS: usize = 200;
+const MAX_PARAMETERS: usize = 16;
+const MAX_PARAMETER_NAME_CHARS: usize = 32;
+const MAX_PARAMETER_CHARS: u64 = 4096;
+const DEFAULT_PARAMETER_CHARS: u64 = 256;
+const DEFAULT_START_WITHIN_MS: u64 = 5000;
 /// The expanded request body shares the hand-written request cap.
 const MAX_EXPANDED_BODY_BYTES: usize = MAX_INPUT_BYTES;
 /// Validation's parameter placeholder. Every supported parameter character costs one keystroke,
@@ -90,7 +92,7 @@ pub struct RecipeParameter {
     #[serde(rename = "type")]
     pub kind: ParameterKind,
     #[serde(default)]
-    pub max_chars: Option<u64>,
+    max_chars: Option<u64>,
 }
 
 impl RecipeParameter {
@@ -1402,5 +1404,32 @@ mod tests {
         let input_leaves = reused(&input["$defs"]["non_repeat_action"]["oneOf"], "");
         assert_eq!(recipe_leaves, input_leaves);
         assert!(input["$defs"]["keyboard_timing"].is_object());
+
+        // Nodes the recipe restates rather than references stay equal to Input Sequence v1;
+        // only the item references differ, because recipe items admit `param` text.
+        let without_items = |node: &Value, pointer: &str| {
+            let mut node = node.clone();
+            let items = node.pointer_mut(pointer).and_then(Value::as_object_mut);
+            items.unwrap().remove("items").unwrap();
+            node
+        };
+        assert_eq!(
+            without_items(&schema["$defs"]["repeat_action"], "/properties/actions"),
+            without_items(&input["$defs"]["repeat_action"], "/properties/actions")
+        );
+        assert_eq!(
+            without_items(&properties["actions"], ""),
+            without_items(&input["properties"]["actions"], "")
+        );
+        for bound in ["minimum", "maximum"] {
+            assert_eq!(
+                properties["start_within_ms"][bound], input["properties"]["start_within_ms"][bound],
+                "{bound}"
+            );
+        }
+        assert_eq!(
+            schema["$defs"]["text_action"]["properties"]["value"],
+            input["$defs"]["text_action"]["properties"]["value"]
+        );
     }
 }
