@@ -45,9 +45,10 @@ A key in `tap`, `chord`, or `ordered_chord` of this schema or `keyferry.keyboard
 canonical name from `keyboard-key-registry-v1.csv` or an alias below. Names are case-sensitive
 uppercase. An alias is never a registry row; it resolves to exactly its canonical key, so the
 compiled chunks and fingerprint are identical to the canonical form. Chord duplicates are detected
-on the resolved key: `["LEFT_GUI","COMMAND"]` rejects with `chord.duplicate_key`. Clients may
-rewrite aliases to canonical names before submission; keyctl always does, so a body forwarded to a
-holder that predates aliases stays acceptable.
+on the resolved key: `["LEFT_GUI","COMMAND"]` rejects with `chord.duplicate_key`. The daemon
+rewrites aliases to canonical names, keeping the command ID, before forwarding a sequence to the
+holding controller, so a holder that predates aliases still accepts it. Canonical names are longer:
+a forwarded body near the size limit can exceed it and is rejected before any input.
 
 | Aliases | Canonical key |
 | --- | --- |

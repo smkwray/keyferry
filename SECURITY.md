@@ -13,6 +13,7 @@ boot, or recovery screens. The system is deny-by-default and must fail closed.
 - The administrative recovery secret.
 - Host TLS private keys and local API token.
 - Accurate transient command outcomes and explicitly enabled diagnostic metadata.
+- Recipe files a user explicitly imports on a controller computer; they may hold literal text.
 
 ## Public artifact boundary
 

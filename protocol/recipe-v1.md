@@ -32,7 +32,8 @@ Validation parses the document, then compiles it with every parameter at its `ma
 through the same compiler the run uses, and requires the expanded request body to fit 65,536 bytes.
 Every supported parameter character costs one keystroke and `"` has the largest JSON encoding among
 them, so a valid recipe cannot exceed a command limit or the body limit with any allowed parameter
-value. Import and run both require validation to pass.
+value. Import and run both require validation to pass. The planned time that `validate` and
+`inspect` report is this worst case, not the time of a particular run.
 
 ## Run
 
@@ -64,7 +65,9 @@ nothing: no parameter values, expansion, compiled plan, or last-run state.
 The library is `KEYFERRY_RECIPE_DIR` if set, otherwise `recipes` under the per-user Keyferry state
 directory. Import is its only writer: it validates the source first. Without replacement it creates
 `<name>.json` exclusively, which fails if the name exists, so concurrent imports never overwrite
-each other; with replacement it writes a complete temporary file and renames it over the entry. A recipe is explicitly saved user content and may hold literal text: on
+each other; with replacement it writes a complete temporary file and renames it over the entry. A new entry is
+written in place, so an interrupted import can leave an entry that fails validation; listing
+reports it and `--replace` repairs it. A recipe is explicitly saved user content and may hold literal text: on
 Unix the library directory is created owner-only (0700) and each entry is written owner-only
 (0600). Listing and inspection report metadata and validation results only, never an action body.
 

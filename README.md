@@ -151,10 +151,11 @@ keyctl screen-power DEVICE off                   # turn off the screen; use on t
 keyctl screen-power DEVICE                       # read active and saved screen settings
 keyctl sequence DEVICE < hotkey.json            # run a key sequence (JSON on stdin)
 keyctl sequence --example                       # a valid starting sequence
-keyctl keys                                     # physical key names
+keyctl keys                                     # physical key names and aliases (COMMAND, OPTION, ...)
 keyctl recipe list                              # saved sequences on this computer (local)
+keyctl recipe --example                         # a valid starting recipe
 keyctl recipe import open-url.json              # validate and save a recipe (the only writer)
-keyctl recipe inspect open-url                  # metadata, route and planned time; never actions
+keyctl recipe inspect open-url                  # metadata, route and worst-case time; never actions
 keyctl recipe run DEVICE open-url < params.json # run once; parameters as a JSON object on stdin
 keyctl cancel DEVICE                            # stop the running command
 ```
@@ -165,16 +166,13 @@ firmware capability flags and `link_path`/`via` showing whether another computer
 Check command exit status and its JSON result. A missing response, `UNKNOWN`, or a lost connection
 after submission means the action may have happened: read status to reconcile it, never resend it
 automatically. Sends use command-scoped arming; ordinary agents do not need a separate `arm` call.
+`status DEVICE` reports `firmware.keyboard_lock_state`; it is `unsupported` on current firmware,
+so Keyferry cannot see whether Caps Lock is on. Make sure it is off before sending text.
 
-Saved sequences (recipes, `protocol/recipe-v1.md`) live in this computer's library:
-`KEYFERRY_RECIPE_DIR`, or `recipes` in the per-user Keyferry state directory. `recipe list`,
-`inspect` and `validate` are local. Only `recipe import` writes the library, after validating the
-recipe with every parameter at its maximum length; it will not overwrite an existing name without
-`--replace`. `recipe run DEVICE NAME` expands the recipe on this computer into one ordinary sequence,
-posts it once and prints the usual `keyferry.command-result.v2` line. Keyboard-only recipes use
-`/sequences`; recipes with pointer actions use `/input-sequences` and need USB keyboard output.
-Parameter values come only from stdin. Unsupported characters are rejected unless that run passes
-`--unsupported replace`, which reports the replacement count on stderr. A run saves nothing.
+Saved sequences (recipes) are defined in `protocol/recipe-v1.md`. Only `recipe import` writes this
+computer's library (`KEYFERRY_RECIPE_DIR`, or `recipes` in the per-user Keyferry state directory);
+`recipe run DEVICE NAME` expands the recipe here, reads parameter values only from stdin, posts
+one ordinary sequence and prints the usual `keyferry.command-result.v2` line. A run saves nothing.
 
 | Control | CLI | Effect and connection required |
 | --- | --- | --- |
@@ -230,7 +228,19 @@ A hotkey pressed in order:
 ```
 
 `chord` presses its keys together in one report; `ordered_chord` presses them one after another.
-Both end with every key released.
+Both end with every key released. Key names are the registry names from `keyctl keys` or its
+aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_`/`RIGHT_` forms.
+
+### Mac targets
+
+The profile `windows-us` is the wire name of the US-ASCII key mapping. It types correctly on a Mac
+that identifies the stick as an ANSI keyboard and uses the U.S. or ABC input source; `windows-us`
+does not claim that the target runs Windows. When Keyboard Setup Assistant appears after you plug in
+the stick, choose ANSI or send the keys it asks for yourself; Keyferry never types into it on its
+own. If the Mac treats the stick as ISO, `` ` `` and `~` come out as `§` and `±`: change the type in
+System Settings > Keyboard > Change Keyboard Type. Caps Lock must be off. Smart quotes, automatic
+capitalization and autocorrect can change typed text inside some apps. Mac typing is not yet
+physically qualified.
 
 The desktop's **Save as USB file** also publishes `MESSAGE.TXT` on the stick's read-only `KEYFERRY`
 drive, replacing its previous contents. With multi-file firmware, **Choose USB files…** reviews a
@@ -254,7 +264,7 @@ application on the target received them. Commands that may have started are neve
   access-point fallback. Knowing the Wi-Fi password grants no ability to type.
 - Wi-Fi settings change only through an authenticated USB connection to the stick, never remotely.
 - Text the target keyboard layout cannot type is rejected before sending, unless you choose to
-  replace it with `?`.
+  replace it with `?`. Keyferry cannot see Caps Lock; keep it off when sending text.
 
 ## Privacy
 
@@ -269,6 +279,9 @@ cleared or the power or controller session is lost; the target may save its own 
   keystrokes. USB file contents stay in RAM.
 - On macOS the background service writes a connection log (link events and errors, no content) to
   `~/Library/Application Support/keyferry/logs/`.
+- Saved sequences are the exception to not persisting: `keyctl recipe import` stores the recipe as
+  written (owner-only on macOS) until you delete it. Put secrets in a parameter supplied at run
+  time instead of literal recipe text. Runs and parameter values are never saved.
 - Choosing a file with **Send a file…** may add its name to the operating system's recent-files
   list; pasting the path instead avoids that.
 
