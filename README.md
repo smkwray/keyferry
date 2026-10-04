@@ -67,6 +67,28 @@ has no inbound network command listener; it opens one pinned, mutually authentic
 session to an authorized controller. Each controller holds its own credential, issued from the
 owner's encrypted owner kit, so one computer can be revoked without affecting the others.
 
+## Secure text requested by an agent
+
+Current source adds `keyctl secure-text DEVICE_UUID`. Run it on the computer where the human will
+enter the text, in its logged-in desktop session with the local controller running. It opens a
+separate masked dialog for that exact stick. The human confirms the target and password field,
+enters text, and chooses **Send once**; **Press Enter after the text** is optional. The command's
+`REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
+
+The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
+clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
+files. Use U.S./ABC input and Caps Lock off. Do not put the secret into chat, arguments or stdin,
+and do not let an agent inspect the dialog while entering it. Toolkit and OS transient memory is
+outside the application's wiping guarantee. An uncertain send is never automatically retried.
+
+An agent can also use `keyctl screen-power DEVICE_UUID off` (or `on`). Current source forwards
+that exact setting through the authenticated holder when needed. It requires capable firmware and
+an idle, disarmed device, persists the setting, and does not affect keyboard authority. After a
+lost response, inspect `keyctl screen-power DEVICE_UUID` before deciding what to do next.
+
+These additions are in source; the published preview packages do not include them yet. Software
+checks do not verify physical target focus, macOS unlock, or preboot/FileVault input.
+
 ## Hardware
 
 | Board | Display | Status |

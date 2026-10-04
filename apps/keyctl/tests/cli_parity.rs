@@ -16,7 +16,9 @@ fn main() {
         let args = env::args().skip(1).collect::<Vec<_>>();
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input).unwrap();
-        let record = serde_json::json!({ "args": args, "stdin_ok": input == PASSWORD });
+        let record = serde_json::json!({ "args": args, "stdin_ok": input == PASSWORD,
+            "stdin_empty": input.is_empty(), "url": env::var("KEYFERRY_URL").ok(),
+            "token_file": env::var("KEYFERRY_TOKEN_FILE").ok() });
         let mut capture = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -141,6 +143,89 @@ fn run_tests() {
     recipe_library_is_local_and_import_is_the_only_writer();
     recipe_run_posts_once_to_the_expanded_route();
     direct_sequences_pass_key_aliases_to_the_daemon();
+    secure_text_launch_contains_only_the_destination_and_discards_stdin();
+}
+
+fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .join(format!("secure-text-cli-{}", uuid::Uuid::now_v7()));
+    fs::create_dir_all(&root).unwrap();
+    let program = root.join(if cfg!(windows) {
+        "keyctl.exe"
+    } else {
+        "keyctl"
+    });
+    let prompt = root.join(if cfg!(windows) {
+        "keyferry.exe"
+    } else {
+        "keyferry"
+    });
+    fs::copy(env!("CARGO_BIN_EXE_keyctl"), &program).unwrap();
+    fs::copy(env::current_exe().unwrap(), &prompt).unwrap();
+    let token = root.join("token");
+    fs::write(&token, "test-token-123456\n").unwrap();
+    let capture = root.join("request.json");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let mut child = Command::new(&program)
+        .args([
+            "--url",
+            &url,
+            "--token-file",
+            token.to_str().unwrap(),
+            "secure-text",
+            DEVICE,
+        ])
+        .env("KEYCTL_TEST_CAPTURE", &capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(PASSWORD.as_bytes())
+        .unwrap();
+    let (line, body) = serve_once(&listener, true);
+    assert_eq!(line, format!("GET /v1/devices/{DEVICE} HTTP/1.1"));
+    assert!(body.is_empty());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["outcome"], "REQUESTED");
+    assert_eq!(response["input_sent"], false);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(PASSWORD.trim()));
+    let limit = Instant::now() + Duration::from_secs(5);
+    while !capture.exists() {
+        assert!(Instant::now() < limit);
+        thread::sleep(Duration::from_millis(10));
+    }
+    let record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&capture).unwrap()).unwrap();
+    assert_eq!(record["args"], serde_json::json!(["--secure-text", DEVICE]));
+    assert_eq!(record["stdin_empty"], true);
+    assert_eq!(record["url"], url);
+    assert_eq!(record["token_file"], token.to_str().unwrap());
+    for args in [
+        vec!["secure-text"],
+        vec!["secure-text", "invalid"],
+        vec!["secure-text", DEVICE, "--text", "private-fixture"],
+    ] {
+        let output = Command::new(&program).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(20));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-fixture"));
+    }
+    assert_no_further_contact(&listener);
+    // The detached helper can still be exiting after it writes the capture on Windows.
+    let limit = Instant::now() + Duration::from_secs(5);
+    while fs::remove_dir_all(&root).is_err() {
+        assert!(Instant::now() < limit);
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 const SECRET: &str = "Hunter2-recipe-secret";
@@ -406,7 +491,11 @@ fn serve_once(listener: &TcpListener, terminal: bool) -> (String, Vec<u8>) {
         .unwrap();
     let mut body = vec![0_u8; length];
     stream.read_exact(&mut body).unwrap();
-    let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let posted: serde_json::Value = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
     let response = serde_json::json!({
         "command_id": posted["command_id"], "device_id": "device-1",
         "outcome": if terminal { "EMITTED" } else { "QUEUED" },

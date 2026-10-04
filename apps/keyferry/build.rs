@@ -8,6 +8,8 @@ fn main() {
             .expect("failed to embed the Windows application icon");
     }
 
-    let config = slint_build::CompilerConfiguration::new().with_style("fluent-dark".into());
+    let config = slint_build::CompilerConfiguration::new()
+        .with_style("fluent-dark".into())
+        .with_debug_info(cfg!(debug_assertions));
     slint_build::compile_with_config("ui/main.slint", config).expect("failed to compile Slint UI");
 }

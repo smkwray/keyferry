@@ -1,4 +1,69 @@
-import { ComboBox, LineEdit, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+
+export component SecureTextWindow inherits Window {
+    title: "Keyferry — secure text";
+    width: 560px;
+    height: 480px;
+    background: Theme.app-background;
+    in property <string> destination;
+    in-out property <string> secret;
+    in-out property <bool> confirmed: false;
+    in-out property <bool> append-enter: false;
+    in-out property <bool> accepting: true;
+    in-out property <bool> ready: false;
+    in-out property <bool> sending: false;
+    in-out property <string> status: "Checking the authenticated route…";
+    callback send();
+    callback dismiss();
+    VerticalLayout {
+        padding: 24px;
+        spacing: 14px;
+        Text { text: "Send secure text once"; color: Theme.text-primary; font-size: 21px; font-weight: 600; }
+        Text { text: root.destination; color: Theme.text-secondary; wrap: word-wrap; }
+        Text {
+            text: "Confirm the stick is plugged into the intended computer and its password field has focus. Use U.S./ABC input with Caps Lock off. Keyferry cannot verify focus or successful unlock.";
+            color: Theme.text-secondary;
+            wrap: word-wrap;
+        }
+        if root.accepting: Rectangle {
+            height: 42px;
+            background: Theme.inset-background;
+            border-width: 1px;
+            border-color: Theme.text-secondary;
+            border-radius: 6px;
+            input := TextInput {
+                x: 10px; y: 6px;
+                width: parent.width - 20px; height: parent.height - 12px;
+                text <=> root.secret;
+                input-type: InputType.password;
+                accessible-value: "";
+                single-line: true;
+                enabled: root.ready;
+                color: Theme.text-primary;
+            }
+        }
+        if root.accepting: CheckBox {
+            text: "I checked the target and password field";
+            checked <=> root.confirmed;
+        }
+        if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
+        Text {
+            text: root.status;
+            color: Theme.text-secondary;
+            wrap: word-wrap;
+            vertical-stretch: 1;
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            if root.accepting: Button {
+                text: "Send once";
+                enabled: root.ready && root.confirmed && root.secret != "";
+                clicked => { root.send(); }
+            }
+            Button { text: root.accepting || root.sending ? "Cancel" : "Close"; clicked => { root.dismiss(); } }
+        }
+    }
+}
 
 export struct DeviceListItem {
     id: string,

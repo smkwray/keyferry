@@ -6,6 +6,7 @@ mod ui {
 }
 
 mod provisioning;
+mod secure_text;
 
 use keyferry::{
     api::{
@@ -135,6 +136,10 @@ type SharedApiClient = Arc<ActiveApiClient>;
 type SharedRefreshClock = Arc<Mutex<Instant>>;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if !arguments.is_empty() {
+        return secure_text::run(&arguments);
+    }
     // Winit 0.30 windows default to transparent, which leaves the macOS title bar see-through.
     // The app paints an opaque background, so request an opaque window everywhere.
     slint::BackendSelector::new()

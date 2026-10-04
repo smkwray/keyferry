@@ -381,4 +381,46 @@ fn every_page_renders_at_supported_sizes() {
             render(&app, size, name);
         }
     }
+
+    let prompt = ui::SecureTextWindow::new().unwrap();
+    prompt.set_destination(
+        "Test stick\nStick: 019d1234-5678-7abc-8123-456789abcdef\nRoute: tailnet via controller-a"
+            .into(),
+    );
+    prompt.set_ready(true);
+    prompt.set_status("Enter text here. It is not sent to the requesting agent, logged, or saved. This request expires after two minutes.".into());
+    prompt.show().unwrap();
+    let empty = prompt.window().take_snapshot().unwrap();
+    prompt.set_secret("private-fixture".into());
+    let masked = prompt.window().take_snapshot().unwrap();
+    prompt.set_secret("another-fixture".into());
+    let other = prompt.window().take_snapshot().unwrap();
+    assert_ne!(empty.as_bytes(), masked.as_bytes());
+    assert_eq!(
+        masked.as_bytes(),
+        other.as_bytes(),
+        "equal-length secrets must render identically masked"
+    );
+    use i_slint_backend_testing::ElementRoot;
+    let inputs = prompt
+        .root_element()
+        .query_descendants()
+        .match_accessible_role(i_slint_backend_testing::AccessibleRole::TextInput)
+        .find_all();
+    assert!(!inputs.is_empty());
+    for input in inputs {
+        assert!(input
+            .accessible_value()
+            .is_none_or(|value| value.is_empty()));
+    }
+    if let Some(directory) = std::env::var_os("KEYFERRY_UI_SNAPSHOT_DIR") {
+        image::save_buffer(
+            std::path::Path::new(&directory).join("secure-text.png"),
+            masked.as_bytes(),
+            masked.width(),
+            masked.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
 }

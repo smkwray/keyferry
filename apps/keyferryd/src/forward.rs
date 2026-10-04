@@ -719,11 +719,8 @@ impl Forwarder {
             Op::Control {
                 device,
                 segment,
-                needs_proof,
-            } => {
-                self.control(daemon, &device, segment, needs_proof, body)
-                    .await
-            }
+                method,
+            } => self.control(daemon, &device, segment, &method, body).await,
             Op::Cancel { device } => self.cancel(daemon, &device, body).await,
             Op::Outcome { device, command } => self.outcome(daemon, &device, command).await,
         }
@@ -881,14 +878,14 @@ impl Forwarder {
         daemon: &Daemon,
         device: &str,
         segment: &'static str,
-        needs_proof: bool,
+        method: &Method,
         body: &[u8],
     ) -> Option<Response> {
         if daemon.local_link_authenticated(device) {
             return None;
         }
         // Disarm needs no proof on the holder and must work while a command runs there.
-        let route = if needs_proof {
+        let route = if segment != "disarm" {
             match self.prove_holder(device).await {
                 Proven::Route(route) => route,
                 Proven::Local => return None,
@@ -901,7 +898,7 @@ impl Forwarder {
         let body = (!body.is_empty()).then_some(body);
         Some(
             match self
-                .exchange(&route, "POST", &path, body, CONTROL_TIMEOUT)
+                .exchange(&route, method.as_str(), &path, body, CONTROL_TIMEOUT)
                 .await
             {
                 OwnerExchange::Response {
@@ -932,6 +929,7 @@ impl Forwarder {
                     body,
                 } => passthrough(status, content_type, body),
                 OwnerExchange::NotSent => route_unavailable(),
+                OwnerExchange::Uncertain if method == Method::GET => route_unavailable(),
                 OwnerExchange::Uncertain => route_uncertain(None),
             },
         )
@@ -1261,7 +1259,7 @@ enum Op {
     Control {
         device: String,
         segment: &'static str,
-        needs_proof: bool,
+        method: Method,
     },
     Cancel {
         device: String,
@@ -1273,8 +1271,8 @@ enum Op {
 }
 
 impl Op {
-    /// Recognizes only the device-state and command routes. Configuration, maintenance,
-    /// handoff, and event routes are never forwarded.
+    /// Recognizes device-state, command, and screen-power routes. Other configuration,
+    /// maintenance, handoff, and event routes are never forwarded.
     fn classify(method: &Method, path: &str) -> Option<Self> {
         let rest = path.strip_prefix("/v1/devices")?;
         if rest.is_empty() {
@@ -1303,11 +1301,11 @@ impl Op {
                 kind,
             })
         };
-        let control = |segment, needs_proof| {
+        let control = |segment| {
             Some(Self::Control {
                 device: device.clone(),
                 segment,
-                needs_proof,
+                method: method.clone(),
             })
         };
         match &segments[1..] {
@@ -1315,6 +1313,7 @@ impl Op {
                 device: device.clone(),
             }),
             ["type"] if post => command(CommandKind::Type),
+            ["screen-power"] if get || post => control("screen-power"),
             ["file"] if get || post || method == Method::DELETE => Some(Self::File {
                 device: device.clone(),
                 method: method.clone(),
@@ -1338,9 +1337,9 @@ impl Op {
             ["text-streams", job, "finish"] if post => stream(job, StreamAction::Finish),
             ["text-streams", job, "lease"] if post => stream(job, StreamAction::Lease),
             ["text-streams", job, "cancel"] if post => stream(job, StreamAction::Cancel),
-            ["arm"] if post => control("arm", true),
-            ["arm", "renew"] if post => control("arm/renew", true),
-            ["disarm"] if post => control("disarm", false),
+            ["arm"] if post => control("arm"),
+            ["arm", "renew"] if post => control("arm/renew"),
+            ["disarm"] if post => control("disarm"),
             ["cancel"] if post => Some(Self::Cancel {
                 device: device.clone(),
             }),
@@ -1961,6 +1960,17 @@ mod tests {
             self.inner.supports_output_mode()
         }
 
+        fn supports_screen_power(&self) -> bool {
+            self.inner.supports_screen_power()
+        }
+
+        fn screen_power<'a>(
+            &'a self,
+            requested: Option<crate::ScreenPower>,
+        ) -> BoxFuture<'a, Result<crate::TransportScreenPowerStatus, TransportError>> {
+            self.inner.screen_power(requested)
+        }
+
         fn output_mode<'a>(
             &'a self,
             requested: Option<OutputMode>,
@@ -2192,7 +2202,9 @@ mod tests {
         let forwarder_set = InstallationTlsSecretSet::load(root.join("forwarder")).unwrap();
         let holder_store = holder_set.iter().next().unwrap().clone();
 
-        let holder_device = SimulatorTransport::default().with_output_mode(OutputMode::UsbHid);
+        let holder_device = SimulatorTransport::default()
+            .with_output_mode(OutputMode::UsbHid)
+            .with_screen_power(crate::ScreenPower::On);
         let file = Arc::new(Mutex::new(TestFile::default()));
         let gateway = TlsTransport::from_installation_store(&holder_store).unwrap();
         gateway.set_test_session_snapshot(TlsSessionSnapshot {
@@ -2544,6 +2556,74 @@ mod tests {
                 {"type": "click", "button": "button_1"},
                 {"type": "ordered_chord", "keys": ["LEFT_ALT", "ESCAPE"]}
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn screen_power_follows_verified_holder_without_arming_or_replaying() {
+        let harness = harness(None, FORWARDER_SECRET).await;
+        let path = format!("/v1/devices/{}/screen-power", device_id());
+        let (status, state) = call(&harness.forwarder, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state["active"], "on");
+        let (status, state) = call(
+            &harness.forwarder,
+            "POST",
+            &path,
+            Some(serde_json::json!({"power":"off"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state["active"], "off");
+        assert_eq!(state["stored"], "off");
+        assert!(!harness.holder.device_view(&device_id()).unwrap().armed);
+        let (status, _) = call(
+            &harness.forwarder,
+            "POST",
+            &path,
+            Some(serde_json::json!({"power":"invalid"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Fresh route proof passes; the on request arrives but its response is lost.
+        harness.proxy.arm(2);
+        let (status, _) = call(
+            &harness.forwarder,
+            "POST",
+            &path,
+            Some(serde_json::json!({"power":"on"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let connections = harness.proxy.connections.load(Ordering::SeqCst);
+        time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            harness.proxy.connections.load(Ordering::SeqCst),
+            connections
+        );
+        *harness.proxy.drop_at.lock().unwrap() = None;
+        let (_, state) = call(&harness.forwarder, "GET", &path, None).await;
+        assert_eq!(state["active"], "on");
+        assert!(!harness.holder.device_view(&device_id()).unwrap().armed);
+
+        let untrusted = self::harness(None, [0x99; 32]).await;
+        let (status, _) = call(
+            &untrusted.forwarder,
+            "POST",
+            &path,
+            Some(serde_json::json!({"power":"off"})),
+        )
+        .await;
+        assert!(!status.is_success());
+        assert_eq!(
+            untrusted
+                .holder
+                .screen_power(&device_id(), None)
+                .await
+                .unwrap()
+                .active,
+            crate::ScreenPower::On
         );
     }
 
@@ -2900,6 +2980,8 @@ mod tests {
         }
         for (method, path) in [
             (Method::GET, "/v1/devices".to_owned()),
+            (Method::GET, format!("/v1/devices/{device}/screen-power")),
+            (Method::POST, format!("/v1/devices/{device}/screen-power")),
             (Method::POST, format!("/v1/devices/{device}/sequences")),
             (Method::POST, format!("/v1/devices/{device}/arm/renew")),
             (

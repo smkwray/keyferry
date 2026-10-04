@@ -99,7 +99,7 @@ phrases, or a general-purpose secret vault on the dongle.
    controller that holds that device, as that holder's owner-mTLS client under its own installation
    identity. It uses a holder only after that endpoint's fresh route proof, bound to this
    installation, the device, and the holder, verifies under this installation's own secret, and
-   repeats the proof before every request that can start input. Configuration, maintenance,
+   repeats the proof before every request that can start input. Configuration other than screen power, maintenance,
    handoff, and requests that themselves arrived remotely are never forwarded; nothing is retried
    after possible start. Trust boundary: the loopback bearer now carries that installation's
    owner-mTLS authority for its configured devices across the tailnet, which only a holder of the
@@ -224,6 +224,41 @@ not a security proof.
   and a capability-gated result with separately correlated keyboard/mouse neutral evidence. Pointer
   paths, coordinates, button/key lists, and low-entropy plan hashes are payload and never logged.
 - Crash reports and diagnostics must be scrubbed before export.
+
+## Agent-requested secure text
+
+An agent may run `keyctl secure-text DEVICE_UUID` in the human controller's logged-in desktop
+session. The command carries only the exact destination and requests a separate, two-minute masked
+prompt; its `REQUESTED` receipt proves process creation only. The dialog does not own the normal
+app's service lifecycle. A local process that can run the command already operates within the
+existing loopback-controller trust boundary; no remote popup endpoint or new listener is added.
+The requesting agent must never inspect the dialog's secret property, memory, keyboard events, or
+clipboard, or ask the human to enter the secret in chat, stdin, or arguments.
+
+Only a deliberate human confirmation and Send once can submit one command-scoped keyboard sequence.
+The destination cannot be changed inside the prompt. The exact device must report an authenticated,
+idle, disarmed keyboard route initially and immediately before submission. Text is restricted to
+1–256 printable ASCII bytes with no normalization; Enter is optional and off initially. Expiry and
+pre-submission cancellation clear the editor without a POST. After submission, cancellation uses the
+existing exact-command route once; uncertain results are UNKNOWN and the sequence is never replayed.
+Responses are reduced to correlated IDs and fixed outcome text; reflected peer messages/errors
+never enter the dialog. Secret buffers are transient, Rust-owned text is zeroized, and the editor
+and its undo state are discarded on send, close, cancellation, or expiry. No prompt body, recipe,
+file, clipboard copy, transcript, or disk receipt is created by this flow. The secret accessibility
+value is blank. The UI toolkit/TLS/OS may retain transient allocations; this is not a guarantee
+against process-memory inspection, swap, OS crash dumps, or a compromised authorized controller.
+The standard editor allows a human's explicit clipboard operations; users should type secrets when
+clipboard history/synchronization is a concern. Masking alone is not a memory-security boundary.
+
+Screen-power GET/POST is the sole additional setting allowed through automatic tailnet forwarding.
+Both require the existing owner-mTLS holder and fresh exact-device proof. Only the holder performs
+the capability, idle/disarmed, maintenance and strict on/off checks; local links still win. No new
+hardware privilege, HID arm or typing is granted. A lost POST result remains uncertain, never
+replayed; GET can reconcile the active/stored state after connectivity returns. Other settings,
+maintenance, handoff and events remain excluded. See ADR 0017.
+
+HID emission cannot establish the connected target, focus, layout, lock state, or successful unlock.
+Secure-text software tests and rendering never close a target unlock or preboot/FileVault gate.
 
 ## Security-relevant changes
 

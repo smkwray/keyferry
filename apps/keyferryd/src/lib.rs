@@ -8262,6 +8262,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn secure_text_sequence_outcomes_and_diagnostics_exclude_the_entered_text() {
+        let daemon = daemon();
+        let command_id = Uuid::now_v7();
+        let mut router = daemon.router();
+        let body = serde_json::json!({
+            "schema": keyferry_layouts::SEQUENCE_SCHEMA_V1,
+            "command_id": command_id.to_string(),
+            "profile": "windows-us", "arm": "command-scoped", "start_within_ms": 5000,
+            "actions": [{"type":"text","value":"private-fixture"},{"type":"tap","key":"ENTER"}]
+        });
+        let (status, response) = call_json(
+            &mut router,
+            "POST",
+            format!("/v1/devices/{SIMULATOR_DEVICE_ID}/sequences"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(!response.to_string().contains("private-fixture"));
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Emitted)
+        );
+        let metadata = serde_json::to_string(&daemon.metadata()).unwrap();
+        assert!(!daemon.metadata().is_empty());
+        assert!(!metadata.contains("private-fixture"));
+        let (_, outcome) = call_json(
+            &mut router,
+            "GET",
+            format!("/v1/devices/{SIMULATOR_DEVICE_ID}/commands/{command_id}"),
+            None,
+        )
+        .await;
+        assert!(!outcome.to_string().contains("private-fixture"));
+        assert!(outcome["terminal_zero_confirmed"].as_bool().unwrap());
+        assert!(outcome["terminal_release_completed"].as_bool().unwrap());
+        assert!(!daemon.device_view(SIMULATOR_DEVICE_ID).unwrap().armed);
+    }
+
+    #[tokio::test]
     async fn payload_route_parse_errors_do_not_echo_the_body() {
         let daemon = daemon();
         let mut router = daemon.router();
