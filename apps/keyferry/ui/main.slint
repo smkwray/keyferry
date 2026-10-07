@@ -696,6 +696,7 @@ export component MainWindow inherits Window {
     callback select-device(string);
     callback refresh();
     callback send-text();
+    callback open-secure-text();
     callback choose-text-file();
     callback load-text-file-path();
     callback text-file-path-changed();
@@ -1119,6 +1120,11 @@ export component MainWindow inherits Window {
                                             root.choose-text-file();
                                         }
                                     }
+                                }
+                                if !root.file-mode: AppButton {
+                                    label: "Secure text…";
+                                    enabled: root.control-online && !root.text-file-busy;
+                                    clicked => { root.open-secure-text(); }
                                 }
                                 AppButton {
                                     label: "Typing options";

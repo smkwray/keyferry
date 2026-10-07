@@ -67,12 +67,14 @@ has no inbound network command listener; it opens one pinned, mutually authentic
 session to an authorized controller. Each controller holds its own credential, issued from the
 owner's encrypted owner kit, so one computer can be revoked without affecting the others.
 
-## Secure text requested by an agent
+## Secure text
 
-Current source adds `keyctl secure-text DEVICE_UUID`. Run it on the computer where the human will
+For passwords, use **Secure text…** on the Send page instead of the plain text box: it opens the
+same masked dialog for the selected stick. An agent can request that dialog with
+`keyctl secure-text DEVICE_UUID`. Run it on the computer where the human will
 enter the text, in its logged-in desktop session with the local controller running. It opens a
-separate masked dialog for that exact stick. The human confirms the target and password field,
-enters text, and chooses **Send once**; **Press Enter after the text** is optional. The command's
+separate masked dialog for that exact stick. With the target's password field focused, the human
+enters text and chooses **Send once**; **Press Enter after the text** is optional. The command's
 `REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
 
 The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,

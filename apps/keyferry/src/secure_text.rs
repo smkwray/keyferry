@@ -172,7 +172,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         format!("{}\nStick: {id}\nRoute: {route} via {via}", device.label).into(),
                     );
                     window.set_ready(true);
-                    window.set_status("Enter text here. It is not sent to the requesting agent, logged, or saved. This request expires after two minutes.".into());
+                    window.set_status("Enter text here. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
                 } else {
                     clear(&window);
                     window.set_status("The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());

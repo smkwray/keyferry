@@ -388,7 +388,7 @@ fn every_page_renders_at_supported_sizes() {
             .into(),
     );
     prompt.set_ready(true);
-    prompt.set_status("Enter text here. It is not sent to the requesting agent, logged, or saved. This request expires after two minutes.".into());
+    prompt.set_status("Enter text here. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
     prompt.show().unwrap();
     let empty = prompt.window().take_snapshot().unwrap();
     prompt.set_secret("private-fixture".into());

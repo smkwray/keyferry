@@ -2149,6 +2149,32 @@ fn install_api_actions(
     });
 
     let weak = window.as_weak();
+    let selected_for_secure_text = Arc::clone(&selected_device);
+    window.on_open_secure_text(move || {
+        let Some(device_id) = selected_for_secure_text
+            .lock()
+            .expect("selected device lock")
+            .clone()
+        else {
+            set_status(&weak, "Select a device before sending secure text.");
+            return;
+        };
+        // The masked prompt is the same separate process `keyctl secure-text` starts; the
+        // secret never enters this window, its status text, or the clipboard.
+        let launched = std::env::current_exe().and_then(|program| {
+            std::process::Command::new(program)
+                .args(["--secure-text", &device_id])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        });
+        if launched.is_err() {
+            set_status(&weak, "The secure text window could not be opened.");
+        }
+    });
+
+    let weak = window.as_weak();
     let client_for_text = Arc::clone(&client);
     let selected_for_text = Arc::clone(&selected_device);
     let busy_for_text = Arc::clone(&text_file_busy);
