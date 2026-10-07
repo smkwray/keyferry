@@ -188,7 +188,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if !window.get_accepting() || !window.get_ready() || !window.get_confirmed() {
+        if !window.get_accepting() || !window.get_ready() {
             return;
         }
         if send_consumed.swap(true, Ordering::AcqRel) {
