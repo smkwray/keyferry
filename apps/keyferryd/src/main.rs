@@ -426,6 +426,15 @@ fn parse_options(args: &[String]) -> Result<Options, keyferryd::DaemonError> {
                         "--lan-interface must be nonempty and unique".to_owned(),
                     ));
                 }
+                if options.lan_interfaces.len() > 1
+                    && options
+                        .lan_interfaces
+                        .contains(keyferryd::AUTO_LAN_INTERFACE)
+                {
+                    return Err(keyferryd::DaemonError::Tls(
+                        "--lan-interface auto cannot be combined with named interfaces".to_owned(),
+                    ));
+                }
                 index += 2;
             }
             "--tailnet-address" if options.tailnet_address.is_none() => {
@@ -537,6 +546,22 @@ mod tests {
     #[test]
     fn bluetooth_requires_paired_runtime_configuration() {
         assert!(parse_options(&["--ble".to_owned()]).is_err());
+        assert!(parse_options(&[
+            "--installation".to_owned(),
+            "private/installation".to_owned(),
+            "--lan-interface".to_owned(),
+            "auto".to_owned(),
+            "--lan-interface".to_owned(),
+            "en0".to_owned(),
+        ])
+        .is_err());
+        assert!(parse_options(&[
+            "--installation".to_owned(),
+            "private/installation".to_owned(),
+            "--lan-interface".to_owned(),
+            "auto".to_owned(),
+        ])
+        .is_ok());
         let options = parse_options(&[
             "--config".to_owned(),
             "private/runtime.json".to_owned(),

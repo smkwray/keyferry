@@ -32,6 +32,15 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$controller" ] || usage
+# Default: listen for sticks on every active private home/office network the computer joins.
+if [ -z "$lan_interfaces" ]; then
+    lan_interfaces=auto
+    lan_arguments=" --lan-interface auto"
+fi
+case " $lan_interfaces " in
+    " auto ") ;;
+    *" auto "*) echo "LAN interface auto cannot be combined with named interfaces" >&2; exit 2 ;;
+esac
 case "$mode" in Plan|Apply|Verify) ;; *) usage ;; esac
 [ "$(uname -s)" = Darwin ] || {
     echo "this milestone installs only the macOS desktop bundle" >&2
@@ -408,6 +417,14 @@ done
 }
 [ "$authorized" = true ] || lan_interfaces=
 for name in $lan_interfaces; do
+    if [ "$name" = auto ]; then
+        "$lsof_command" -nP -a -p "$daemon_pid" -iTCP:7443 -sTCP:LISTEN 2>/dev/null |
+            grep -Eq 'TCP (10|172\.(1[6-9]|2[0-9]|3[01])|192\.168)\.[0-9.]+:7443 \(LISTEN\)' || {
+                echo "automatic LAN selection opened no private-network device listener" >&2
+                exit 1
+            }
+        continue
+    fi
     interface_address=$(ipconfig getifaddr "$name" 2>/dev/null || true)
     [ -n "$interface_address" ] || {
         echo "selected LAN interface is not active: $name" >&2

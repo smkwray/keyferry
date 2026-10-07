@@ -142,11 +142,18 @@ impl BeaconPlan {
     }
 }
 
+/// `--lan-interface auto` selects every active private IPv4 broadcast interface, so a controller
+/// follows whatever home or office network it is on without naming an adapter.
+pub const AUTO_LAN_INTERFACE: &str = "auto";
+
 fn selected_interface_name<'a>(
     interface_names: &'a BTreeSet<String>,
     internal_name: &str,
     description: &str,
 ) -> Option<&'a String> {
+    if let Some(auto) = interface_names.get(AUTO_LAN_INTERFACE) {
+        return Some(auto);
+    }
     #[cfg(windows)]
     {
         interface_names.iter().find(|selected| {
@@ -400,6 +407,14 @@ impl HostBeacon {
                                 }
                             }
                             interfaces = refreshed;
+                            eprintln!(
+                                "LAN listeners: {}",
+                                interfaces
+                                    .iter()
+                                    .map(|interface| interface.plan.bind.ip().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
                             listener_registry.replace(
                                 &interfaces
                                     .iter()
@@ -566,6 +581,28 @@ mod tests {
                 .expect("send directed discovery beacon");
             sockets.push((listener, beacon));
         }
+    }
+
+    #[test]
+    fn auto_selects_every_active_private_broadcast_interface() {
+        let auto = BTreeSet::from([AUTO_LAN_INTERFACE.to_owned()]);
+        assert_eq!(
+            selected_interface_name(&auto, "en0", "Ethernet"),
+            Some(&AUTO_LAN_INTERFACE.to_owned())
+        );
+        let (plans, matched) = BeaconPlan::selected_with_matches(&auto).unwrap();
+        let expected = getifaddrs::getifaddrs()
+            .unwrap()
+            .filter(|interface| is_usable_broadcast_interface(interface.flags))
+            .filter_map(|interface| match interface.address {
+                Address::V4(address) if address.address.is_private() => address
+                    .netmask
+                    .and_then(|netmask| BeaconPlan::new(address.address, netmask).ok()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(plans.iter().copied().collect::<BTreeSet<_>>(), expected);
+        assert_eq!(matched.is_empty(), plans.is_empty());
     }
 
     #[test]

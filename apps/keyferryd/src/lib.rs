@@ -59,7 +59,7 @@ mod forward;
 mod tailnet;
 mod tls;
 pub use ble::{run_ble_gateway, run_ble_gateways, BleGatewayError};
-pub use discovery::{BeaconPlan, GatewayListenerRegistry, HostBeacon};
+pub use discovery::{BeaconPlan, GatewayListenerRegistry, HostBeacon, AUTO_LAN_INTERFACE};
 pub use keyferry_gateway::{
     is_tailscale_ip, sign_gateway_proof, verify_gateway_proof, GatewayArmMode,
     GatewayDeviceSummary, GatewayLinkPath, GatewayProofError, GatewayProofPayload,

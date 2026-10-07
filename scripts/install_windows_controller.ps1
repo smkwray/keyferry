@@ -39,6 +39,12 @@ foreach ($name in @($LanInterface)) {
     }
     $selectedLanInterfaces.Add($name)
 }
+# Default: listen for sticks on every active private home/office network the computer joins.
+if ($selectedLanInterfaces.Count -eq 0) {
+    $selectedLanInterfaces.Add('auto')
+} elseif ($selectedLanInterfaces.Count -gt 1 -and $selectedLanInterfaces.Contains('auto')) {
+    throw 'LAN interface auto cannot be combined with named interfaces.'
+}
 $lanArguments = @($selectedLanInterfaces | ForEach-Object { "--lan-interface `"$_`"" }) -join ' '
 $expectedArguments = "--installation `"$installedInstallation`""
 if ($lanArguments.Length -gt 0) {
@@ -511,7 +517,17 @@ if ($null -eq $daemonProcessId) {
     throw 'The scheduled task did not run the installed daemon with its expected arguments.'
 }
 if ($authorized) {
-    foreach ($name in $selectedLanInterfaces) {
+    if ($selectedLanInterfaces.Contains('auto')) {
+        $autoListener = Get-NetTCPConnection -State Listen -LocalPort 7443 `
+            -ErrorAction SilentlyContinue | Where-Object {
+                $_.OwningProcess -eq $daemonProcessId -and
+                (Test-PrivateIPv4 ([Net.IPAddress]$_.LocalAddress))
+            }
+        if ($null -eq $autoListener) {
+            throw 'Automatic LAN selection opened no private-network device listener.'
+        }
+    }
+    foreach ($name in @($selectedLanInterfaces | Where-Object { $_ -ne 'auto' })) {
         $interfaceAddresses = @(Get-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 `
             -AddressState Preferred -ErrorAction SilentlyContinue | Where-Object {
                 $_.PrefixLength -ge 1 -and $_.PrefixLength -le 30 -and

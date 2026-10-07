@@ -115,7 +115,9 @@ and recovery guidance.
    package from [Releases](https://github.com/smkwray/keyferry/releases). The Windows ZIP contains
    `keyferry.exe` and its required helpers; the macOS ZIP contains `Keyferry.app`. Extract the whole
    package and follow its `README.txt` to run `install.ps1` or `install.sh`. The installer sets up
-   Keyferry's background service but does not leave it running. You can also
+   Keyferry's background service but does not leave it running. By default the service listens for
+   sticks on every active private home or office network (`--lan-interface auto`, never Tailscale or
+   other point-to-point links); name an interface instead to restrict it. You can also
    [build from source](#building-from-source).
 3. **Open Keyferry and choose Authorize this computer.** Pick the owner-kit file, enter the owner
    password, and choose which stick this computer will control. The computer receives its own
