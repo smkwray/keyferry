@@ -1814,6 +1814,37 @@ impl Read for BodyReader {
     }
 }
 
+/// Whether the secure-text dialog starts with "Press Enter after the text" ticked. Stored as one
+/// word beside the daemon token; missing or unreadable means the default, on.
+pub fn secure_text_enter_default() -> bool {
+    read_enter_default(&secure_text_enter_path())
+}
+
+pub fn set_secure_text_enter_default(enabled: bool) -> std::io::Result<()> {
+    write_enter_default(&secure_text_enter_path(), enabled)
+}
+
+fn secure_text_enter_path() -> PathBuf {
+    default_token_path().with_file_name("secure-text-enter")
+}
+
+fn read_enter_default(path: &Path) -> bool {
+    fs::read_to_string(path).map_or(true, |value| value.trim() != "off")
+}
+
+fn write_enter_default(path: &Path, enabled: bool) -> std::io::Result<()> {
+    fs::write(
+        path,
+        if enabled {
+            "on
+"
+        } else {
+            "off
+"
+        },
+    )
+}
+
 fn default_token_path() -> PathBuf {
     if let Ok(path) = env::var("KEYFERRY_TOKEN_FILE") {
         return PathBuf::from(path);
@@ -2175,6 +2206,19 @@ mod tests {
         worker.join().unwrap();
         assert!(device.armed);
         assert_eq!(device.arm_policy, "command-scoped");
+    }
+
+    #[test]
+    fn secure_text_enter_default_is_on_unless_saved_off() {
+        let path =
+            env::temp_dir().join(format!("keyferry-secure-text-enter-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        assert!(read_enter_default(&path));
+        write_enter_default(&path, false).unwrap();
+        assert!(!read_enter_default(&path));
+        write_enter_default(&path, true).unwrap();
+        assert!(read_enter_default(&path));
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]

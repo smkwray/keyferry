@@ -17,6 +17,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const PROMPT_LIFETIME: Duration = Duration::from_secs(120);
+const SUCCESS_CLOSE_DELAY: Duration = Duration::from_secs(3);
 const MAX_SECRET_BYTES: usize = 256;
 
 fn sequence(text: &str, enter: bool) -> Result<KeyboardSequenceV1, &'static str> {
@@ -79,7 +80,17 @@ fn finish(weak: slint::Weak<ui::SecureTextWindow>, message: String) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = weak.upgrade() {
             window.set_sending(false);
+            let emitted = message.starts_with("EMITTED:");
             window.set_status(message.into());
+            // A clean result needs no further reading; failures and UNKNOWN stay until closed.
+            if emitted {
+                let weak = window.as_weak();
+                slint::Timer::single_shot(SUCCESS_CLOSE_DELAY, move || {
+                    if let Some(window) = weak.upgrade() {
+                        let _ = window.hide();
+                    }
+                });
+            }
         }
     });
 }
@@ -151,6 +162,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .select()?;
     let window = ui::SecureTextWindow::new()?;
     window.set_destination(format!("Stick: {device_id}").into());
+    window.set_append_enter(keyferry::api::secure_text_enter_default());
     let consumed = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + PROMPT_LIFETIME;
@@ -172,7 +184,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         format!("{}\nStick: {id}\nRoute: {route} via {via}", device.label).into(),
                     );
                     window.set_ready(true);
-                    window.set_status("Enter text here. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
+                    window.set_status("Type the text, then press Enter to send or Esc to cancel. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
                 } else {
                     clear(&window);
                     window.set_status("The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());

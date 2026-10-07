@@ -7,55 +7,72 @@ export component SecureTextWindow inherits Window {
     background: Theme.app-background;
     in property <string> destination;
     in-out property <string> secret;
-    in-out property <bool> append-enter: false;
+    in-out property <bool> append-enter: true;
     in-out property <bool> accepting: true;
     in-out property <bool> ready: false;
     in-out property <bool> sending: false;
     in-out property <string> status: "Checking the authenticated route…";
     callback send();
     callback dismiss();
-    VerticalLayout {
-        padding: 24px;
-        spacing: 14px;
-        Text { text: "Send secure text once"; color: Theme.text-primary; font-size: 21px; font-weight: 600; }
-        Text { text: root.destination; color: Theme.text-secondary; wrap: word-wrap; }
-        Text {
-            text: "Before sending, make sure the stick is plugged into the intended computer and its password field has focus. Use U.S./ABC input with Caps Lock off. Keyferry cannot verify focus or successful unlock.";
-            color: Theme.text-secondary;
-            wrap: word-wrap;
-        }
-        if root.accepting: Rectangle {
-            height: 42px;
-            background: Theme.inset-background;
-            border-width: 1px;
-            border-color: Theme.text-secondary;
-            border-radius: 6px;
-            input := TextInput {
-                x: 10px; y: 6px;
-                width: parent.width - 20px; height: parent.height - 12px;
-                text <=> root.secret;
-                input-type: InputType.password;
-                accessible-value: "";
-                single-line: true;
-                enabled: root.ready;
-                color: Theme.text-primary;
+    // Escape cancels before sending and closes afterwards; Enter sends once text is entered.
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.dismiss();
+                return accept;
             }
-        }
-        if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
-        Text {
-            text: root.status;
-            color: Theme.text-secondary;
-            wrap: word-wrap;
-            vertical-stretch: 1;
-        }
-        HorizontalLayout {
-            spacing: 12px;
-            if root.accepting: Button {
-                text: "Send once";
-                enabled: root.ready && root.secret != "";
-                clicked => { root.send(); }
+            if (event.text == Key.Return && root.accepting && root.ready && root.secret != "") {
+                root.send();
+                return accept;
             }
-            Button { text: root.accepting || root.sending ? "Cancel" : "Close"; clicked => { root.dismiss(); } }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 24px;
+            spacing: 14px;
+            Text { text: "Send secure text once"; color: Theme.text-primary; font-size: 21px; font-weight: 600; }
+            Text { text: root.destination; color: Theme.text-secondary; wrap: word-wrap; }
+            Text {
+                text: "Before sending, make sure the stick is plugged into the intended computer and its password field has focus. Use U.S./ABC input with Caps Lock off. Keyferry cannot verify focus or successful unlock.";
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+            if root.accepting: Rectangle {
+                height: 42px;
+                background: Theme.inset-background;
+                border-width: 1px;
+                border-color: Theme.text-secondary;
+                border-radius: 6px;
+                input := TextInput {
+                    x: 10px; y: 6px;
+                    width: parent.width - 20px; height: parent.height - 12px;
+                    text <=> root.secret;
+                    input-type: InputType.password;
+                    accessible-value: "";
+                    single-line: true;
+                    enabled: root.ready;
+                    color: Theme.text-primary;
+                    // Keyboard-only: the field takes focus once the route is ready; Enter sends.
+                    changed enabled => { if (self.enabled) { self.focus(); } }
+                    accepted => { if (root.secret != "") { root.send(); } }
+                }
+            }
+            if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
+            Text {
+                text: root.status;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+                vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                if root.accepting: Button {
+                    text: "Send once";
+                    enabled: root.ready && root.secret != "";
+                    clicked => { root.send(); }
+                }
+                Button { text: root.accepting || root.sending ? "Cancel" : "Close"; clicked => { root.dismiss(); } }
+            }
         }
     }
 }
@@ -697,6 +714,8 @@ export component MainWindow inherits Window {
     callback refresh();
     callback send-text();
     callback open-secure-text();
+    in-out property <bool> secure-text-enter-default: true;
+    callback secure-text-enter-default-changed(bool);
     callback choose-text-file();
     callback load-text-file-path();
     callback text-file-path-changed();
@@ -1616,6 +1635,11 @@ export component MainWindow inherits Window {
                                             current-value <=> root.text-unsupported;
                                         }
                                     }
+                                }
+                                CheckBox {
+                                    text: "Secure text: press Enter after the text by default";
+                                    checked <=> root.secure-text-enter-default;
+                                    toggled => { root.secure-text-enter-default-changed(self.checked); }
                                 }
                                 Divider { }
                                 Text {

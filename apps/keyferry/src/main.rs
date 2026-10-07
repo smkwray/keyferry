@@ -2148,6 +2148,13 @@ fn install_api_actions(
         }
     });
 
+    window.set_secure_text_enter_default(keyferry::api::secure_text_enter_default());
+    let weak = window.as_weak();
+    window.on_secure_text_enter_default_changed(move |enabled| {
+        if keyferry::api::set_secure_text_enter_default(enabled).is_err() {
+            set_status(&weak, "The secure text Enter default could not be saved.");
+        }
+    });
     let weak = window.as_weak();
     let selected_for_secure_text = Arc::clone(&selected_device);
     window.on_open_secure_text(move || {

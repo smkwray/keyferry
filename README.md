@@ -74,7 +74,8 @@ same masked dialog for the selected stick. An agent can request that dialog with
 `keyctl secure-text DEVICE_UUID`. Run it on the computer where the human will
 enter the text, in its logged-in desktop session with the local controller running. It opens a
 separate masked dialog for that exact stick. With the target's password field focused, the human
-enters text and chooses **Send once**; **Press Enter after the text** is optional. The command's
+enters text and presses Enter (or chooses **Send once**); Esc cancels, and a successful send closes
+the dialog. **Press Enter after the text** is ticked by default; change that default under Typing. The command's
 `REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
 
 The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
