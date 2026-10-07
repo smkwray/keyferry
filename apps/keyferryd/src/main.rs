@@ -183,15 +183,12 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
                 daemon.gateway_listener_registry(),
             ));
         }
-        let ble_multi = if cfg!(target_os = "macos") && secret_stores.len() > 1 {
-            eprintln!(
-                "multi-device Bluetooth gateway disabled on macOS; Wi-Fi control remains available"
-            );
-            None
-        } else {
-            Some((secret_stores, transports))
-        };
-        (daemon, None, ble_multi, Some(remote_installation))
+        (
+            daemon,
+            None,
+            Some((secret_stores, transports)),
+            Some(remote_installation),
+        )
     } else {
         (
             keyferryd::Daemon::new(keyferryd::FileTokenStore::default())?,

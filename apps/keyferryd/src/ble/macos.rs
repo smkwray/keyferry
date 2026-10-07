@@ -26,15 +26,42 @@ const MIN_FRAGMENT_BYTES: u16 = 20;
 const MAX_FRAGMENT_BYTES: u16 = 244;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-pub(super) async fn run(
-    transport: crate::TlsTransport,
-    single_shot: bool,
-) -> Result<(), BleGatewayError> {
+/// One helper candidate at a time; a multi-device router admits whichever
+/// granted stick the TLS server name selects.
+pub(super) enum Admission {
+    Single(crate::TlsTransport),
+    Multi(crate::MultiTlsRouter, Vec<crate::TlsTransport>),
+}
+
+impl Admission {
+    fn acquisition_enabled(&self) -> bool {
+        match self {
+            Self::Single(transport) => super::gateway_acquisition_enabled(transport),
+            Self::Multi(_, transports) => transports.iter().any(super::gateway_acquisition_enabled),
+        }
+    }
+
+    async fn accept(&self, stream: HelperStream) -> Result<(), crate::TlsTransportError> {
+        match self {
+            Self::Single(transport) => {
+                transport
+                    .accept_stream_on(stream, crate::TlsLinkPath::Bluetooth)
+                    .await
+            }
+            Self::Multi(router, _) => router
+                .accept_stream_on(stream, crate::TlsLinkPath::Bluetooth)
+                .await
+                .map(|_| ()),
+        }
+    }
+}
+
+pub(super) async fn run(admission: Admission, single_shot: bool) -> Result<(), BleGatewayError> {
     loop {
         // A gateway-yield lease must stop this Mac from spawning another
         // CoreBluetooth candidate while the receiving computer acquires the
         // stick. The admitted stream below is already closed by maintenance.
-        if !super::gateway_acquisition_enabled(&transport) {
+        if !admission.acquisition_enabled() {
             time::sleep(RETRY_DELAY).await;
             continue;
         }
@@ -48,8 +75,8 @@ pub(super) async fn run(
             Err(error) => return Err(error),
         };
 
-        let result = transport
-            .accept_stream_on(stream, crate::TlsLinkPath::Bluetooth)
+        let result = admission
+            .accept(stream)
             .await
             .map_err(|error| BleGatewayError::runtime(error.to_string()));
         if result.is_ok() && diagnostics_enabled() {

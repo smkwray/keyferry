@@ -60,7 +60,7 @@ pub async fn run_ble_gateway(
 
     #[cfg(target_os = "macos")]
     {
-        macos::run(transport, single_shot).await
+        macos::run(macos::Admission::Single(transport), single_shot).await
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -87,17 +87,9 @@ pub async fn run_ble_gateways(
 
     #[cfg(target_os = "macos")]
     {
-        if transports.len() == 1 {
-            return macos::run(
-                transports.into_iter().next().expect("one transport"),
-                single_shot,
-            )
-            .await;
-        }
-        let _ = stores;
-        Err(BleGatewayError::runtime(
-            "simultaneous multi-device Bluetooth discovery is not yet available on macOS",
-        ))
+        let router = crate::MultiTlsRouter::new(&stores, transports.clone())
+            .map_err(|error| BleGatewayError::runtime(error.to_string()))?;
+        macos::run(macos::Admission::Multi(router, transports), single_shot).await
     }
 
     #[cfg(not(any(windows, target_os = "macos")))]
