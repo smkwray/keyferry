@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "usage: install_unix_controller.sh --controller Keyferry.app [--installation DIRECTORY] [--lan-interface NAME]... --mode Plan|Apply|Verify" >&2
+    echo "usage: install_unix_controller.sh --controller Keyferry.app [--installation DIRECTORY] [--lan-interface NAME|auto]... [--bluetooth off|auto] --mode Plan|Apply|Verify" >&2
     exit 2
 }
 
@@ -11,6 +11,9 @@ installation=
 mode=Plan
 lan_interfaces=
 lan_arguments=
+# Default: Wi-Fi/Tailscale only. Bluetooth acquisition competes with the stick's Wi-Fi attempt and
+# needs a per-build macOS permission; enable it only for a deliberate local-only controller.
+bluetooth=off
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --controller) [ "$#" -ge 2 ] || usage; controller=$2; shift 2 ;;
@@ -25,6 +28,11 @@ while [ "$#" -gt 0 ]; do
             esac
             lan_interfaces="${lan_interfaces}${lan_interfaces:+ }$name"
             lan_arguments="$lan_arguments --lan-interface $name"
+            shift 2
+            ;;
+        --bluetooth)
+            [ "$#" -ge 2 ] || usage
+            case "$2" in off|auto) bluetooth=$2 ;; *) usage ;; esac
             shift 2
             ;;
         --mode) [ "$#" -ge 2 ] || usage; mode=$2; shift 2 ;;
@@ -224,6 +232,7 @@ if [ "$mode" = Plan ]; then
         "installation=$installed_installation" \
         "installation_tree_sha256=$installation_hash" \
         "lan_interfaces=${lan_interfaces:-none}" \
+        "bluetooth=$bluetooth" \
         "launch_agent=$launch_agent" \
         'daemon_runs=only-while-keyferry-is-open'
     exit 0
@@ -343,6 +352,9 @@ if [ "$mode" = Apply ]; then
         /usr/libexec/PlistBuddy -c "Add :ProgramArguments:$argument_index string $name" "$plist_stage"
         argument_index=$((argument_index + 1))
     done
+    /usr/libexec/PlistBuddy -c "Add :ProgramArguments:$argument_index string --bluetooth" "$plist_stage"
+    argument_index=$((argument_index + 1))
+    /usr/libexec/PlistBuddy -c "Add :ProgramArguments:$argument_index string $bluetooth" "$plist_stage"
     # The agent defines the daemon's verified command but never starts on its own: the Keyferry
     # app kickstarts it on launch and signals it on exit. It stays loaded between launches.
     plutil -insert RunAtLoad -bool false "$plist_stage"
@@ -372,7 +384,7 @@ codesign --verify --deep --strict "$installed_app"
 authorized=false
 [ -d "$installed_installation" ] && authorized=true
 plutil -lint "$launch_agent" >/dev/null
-expected_command="$installed_daemon --installation $installed_installation$lan_arguments"
+expected_command="$installed_daemon --installation $installed_installation$lan_arguments --bluetooth $bluetooth"
 [ "$(plutil -extract StandardOutPath raw "$launch_agent")" = "$daemon_stdout" ] || exit 1
 [ "$(plutil -extract StandardErrorPath raw "$launch_agent")" = "$daemon_stderr" ] || exit 1
 [ "$(plutil -extract RunAtLoad raw "$launch_agent")" = false ] &&

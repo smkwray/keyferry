@@ -90,7 +90,7 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
-            "keyferryd service\n  keyferryd [--port PORT]\n  keyferryd --config PATH [--port PORT] [--ble [--ble-single-shot]] [--tailnet-address IP] [--tailnet-port PORT]\n  keyferryd --installation DIRECTORY [--port PORT] [--ble-single-shot] [--lan-interface NAME]... [--tailnet-address IP] [--tailnet-port PROBE_PORT]\n\nAn issued installation enables nearby Bluetooth and follows the local Tailscale IPv4 address automatically unless --tailnet-address is supplied. Each explicit --lan-interface enables owner-authorized device TLS and directed discovery on that interface only."
+            "keyferryd service\n  keyferryd [--port PORT]\n  keyferryd --config PATH [--port PORT] [--ble [--ble-single-shot]] [--tailnet-address IP] [--tailnet-port PORT]\n  keyferryd --installation DIRECTORY [--port PORT] [--ble-single-shot | --bluetooth off|auto] [--lan-interface NAME|auto]... [--tailnet-address IP] [--tailnet-port PROBE_PORT]\n\nAn issued installation enables nearby Bluetooth (unless --bluetooth off) and follows the local Tailscale IPv4 address automatically unless --tailnet-address is supplied. Each explicit --lan-interface enables owner-authorized device TLS and directed discovery on that interface only."
         );
         return Ok(());
     }
@@ -183,12 +183,13 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
                 daemon.gateway_listener_registry(),
             ));
         }
-        (
-            daemon,
-            None,
-            Some((secret_stores, transports)),
-            Some(remote_installation),
-        )
+        let ble_multi = if options.bluetooth_off {
+            println!("keyferryd Bluetooth gateway off");
+            None
+        } else {
+            Some((secret_stores, transports))
+        };
+        (daemon, None, ble_multi, Some(remote_installation))
     } else {
         (
             keyferryd::Daemon::new(keyferryd::FileTokenStore::default())?,
@@ -345,6 +346,9 @@ struct Options {
     installation: Option<PathBuf>,
     ble: bool,
     ble_single_shot: bool,
+    /// `--bluetooth off` keeps an issued installation Wi-Fi/Tailscale-only: Bluetooth acquisition
+    /// competes with the stick's Wi-Fi attempt on its shared radio and needs OS permission.
+    bluetooth_off: bool,
     lan_interfaces: BTreeSet<String>,
     tailnet_address: Option<IpAddr>,
     tailnet_port: Option<u16>,
@@ -357,6 +361,7 @@ fn parse_options(args: &[String]) -> Result<Options, keyferryd::DaemonError> {
         installation: None,
         ble: false,
         ble_single_shot: false,
+        bluetooth_off: false,
         lan_interfaces: BTreeSet::new(),
         tailnet_address: None,
         tailnet_port: None,
@@ -412,6 +417,18 @@ fn parse_options(args: &[String]) -> Result<Options, keyferryd::DaemonError> {
             "--ble" if !options.ble => {
                 options.ble = true;
                 index += 1;
+            }
+            "--bluetooth" => {
+                options.bluetooth_off = match args.get(index + 1).map(String::as_str) {
+                    Some("off") => true,
+                    Some("auto") => false,
+                    _ => {
+                        return Err(keyferryd::DaemonError::Tls(
+                            "--bluetooth requires off or auto".to_owned(),
+                        ))
+                    }
+                };
+                index += 2;
             }
             "--ble-single-shot" if !options.ble_single_shot => {
                 options.ble_single_shot = true;
@@ -489,6 +506,11 @@ fn parse_options(args: &[String]) -> Result<Options, keyferryd::DaemonError> {
             "--ble requires --config or --installation".to_owned(),
         ));
     }
+    if options.bluetooth_off && (options.installation.is_none() || options.ble_single_shot) {
+        return Err(keyferryd::DaemonError::Tls(
+            "--bluetooth applies only to --installation without --ble-single-shot".to_owned(),
+        ));
+    }
     if options.ble_single_shot && !options.ble && options.installation.is_none() {
         return Err(keyferryd::DaemonError::Tls(
             "--ble-single-shot requires --ble or --installation".to_owned(),
@@ -546,6 +568,22 @@ mod tests {
     #[test]
     fn bluetooth_requires_paired_runtime_configuration() {
         assert!(parse_options(&["--ble".to_owned()]).is_err());
+        let off = parse_options(&[
+            "--installation".to_owned(),
+            "private/installation".to_owned(),
+            "--bluetooth".to_owned(),
+            "off".to_owned(),
+        ])
+        .expect("parse Bluetooth off");
+        assert!(off.bluetooth_off);
+        assert!(parse_options(&["--bluetooth".to_owned(), "off".to_owned()]).is_err());
+        assert!(parse_options(&[
+            "--installation".to_owned(),
+            "private/installation".to_owned(),
+            "--bluetooth".to_owned(),
+            "on".to_owned(),
+        ])
+        .is_err());
         assert!(parse_options(&[
             "--installation".to_owned(),
             "private/installation".to_owned(),

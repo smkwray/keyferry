@@ -10,6 +10,9 @@ param(
     # Omit to install the programs only; the app then authorizes this computer.
     [string]$InstallationDirectory,
     [string[]]$LanInterface = @(),
+    # Default: Wi-Fi/Tailscale only; Bluetooth acquisition competes with the stick's Wi-Fi attempt.
+    [ValidateSet('off', 'auto')]
+    [string]$Bluetooth = 'off',
     [ValidateSet('Plan', 'Apply', 'Verify')]
     [string]$Mode = 'Plan'
 )
@@ -50,6 +53,7 @@ $expectedArguments = "--installation `"$installedInstallation`""
 if ($lanArguments.Length -gt 0) {
     $expectedArguments += " $lanArguments"
 }
+$expectedArguments += " --bluetooth $Bluetooth"
 
 function Get-AccountSid {
     param([string]$Account)
