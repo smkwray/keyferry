@@ -11,9 +11,9 @@ installation=
 mode=Plan
 lan_interfaces=
 lan_arguments=
-# Default: Wi-Fi/Tailscale only. Bluetooth acquisition competes with the stick's Wi-Fi attempt and
-# needs a per-build macOS permission; enable it only for a deliberate local-only controller.
-bluetooth=off
+# Bluetooth stays on by default while stick Wi-Fi authentication is unreliable (firmware defect
+# under diagnosis); --bluetooth off makes a controller Wi-Fi/Tailscale-only.
+bluetooth=auto
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --controller) [ "$#" -ge 2 ] || usage; controller=$2; shift 2 ;;

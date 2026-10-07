@@ -10,9 +10,9 @@ param(
     # Omit to install the programs only; the app then authorizes this computer.
     [string]$InstallationDirectory,
     [string[]]$LanInterface = @(),
-    # Default: Wi-Fi/Tailscale only; Bluetooth acquisition competes with the stick's Wi-Fi attempt.
+    # On by default while stick Wi-Fi authentication is unreliable; off makes Wi-Fi/Tailscale-only.
     [ValidateSet('off', 'auto')]
-    [string]$Bluetooth = 'off',
+    [string]$Bluetooth = 'auto',
     [ValidateSet('Plan', 'Apply', 'Verify')]
     [string]$Mode = 'Plan'
 )
