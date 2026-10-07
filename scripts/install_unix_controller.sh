@@ -62,6 +62,8 @@ stage=
 transaction_rollback=
 launch_agent_backup=
 credential_stage=
+credential_backup=
+credential_upgrade=false
 plist_stage=
 install_lock=
 lock_owned=false
@@ -105,7 +107,7 @@ tree_hash() {
     files=$(find "$root" -type f | LC_ALL=C sort)
     [ -n "$files" ] || return 1
     count=$(printf '%s\n' "$files" | wc -l | tr -d ' ')
-    [ "$count" -le 16 ] || return 1
+    [ "$count" -le 64 ] || return 1
     total=$(find "$root" -type f -exec stat -f '%z' {} \; | awk '{sum += $1} END {print sum + 0}')
     [ "$total" -le 32768 ] || return 1
     (
@@ -144,6 +146,11 @@ cleanup() {
         if [ "$had_installed_installation" != true ] && [ -d "$installed_installation" ]; then
             [ "$installed_installation" = "$HOME/Library/Application Support/keyferry/installation" ] || exit 90
             rm -rf -- "$installed_installation"
+        fi
+        if [ -n "$credential_backup" ] && [ -d "$credential_backup" ]; then
+            [ "$installed_installation" = "$HOME/Library/Application Support/keyferry/installation" ] || exit 90
+            rm -rf -- "$installed_installation"
+            mv -- "$credential_backup" "$installed_installation"
         fi
         if [ "$launch_agent_was_loaded" = true ] && [ -f "$launch_agent" ]; then
             if ! launchctl bootstrap "$launch_domain" "$launch_agent" 2>/dev/null; then
@@ -230,8 +237,12 @@ lsof_command=$(command -v lsof || true)
 if [ "$mode" = Apply ]; then
     if [ -n "$installation" ] && [ -d "$installed_installation" ] &&
        [ "$(tree_hash "$installed_installation")" != "$installation_hash" ]; then
-        echo "installed identity differs; refusing to replace this computer's authority" >&2
-        exit 1
+        # Only a validated expansion of this computer's own identity may replace it.
+        "$source_pairing" validate-installation-upgrade             --existing "$installed_installation" --candidate "$installation" >/dev/null || {
+            echo "installed identity differs; refusing to replace this computer's authority" >&2
+            exit 1
+        }
+        credential_upgrade=true
     fi
 
     install_parent="$HOME/Applications"
@@ -295,6 +306,14 @@ if [ "$mode" = Apply ]; then
     if [ -n "$installation" ] && [ ! -d "$installed_installation" ]; then
         credential_stage=$(mktemp -d "$state_root/.installation.XXXXXX")
         ditto "$installation" "$credential_stage/installation"
+        mv -- "$credential_stage/installation" "$installed_installation"
+        rmdir -- "$credential_stage"
+        credential_stage=
+    elif [ "$credential_upgrade" = true ]; then
+        credential_stage=$(mktemp -d "$state_root/.installation.XXXXXX")
+        ditto "$installation" "$credential_stage/installation"
+        credential_backup="$state_root/.installation.previous.$$"
+        mv -- "$installed_installation" "$credential_backup"
         mv -- "$credential_stage/installation" "$installed_installation"
         rmdir -- "$credential_stage"
         credential_stage=
@@ -462,6 +481,10 @@ if [ "$mode" = Apply ]; then
         [ "$rollback" = "$HOME/Applications/.Keyferry.app.previous" ] || exit 90
         rm -rf -- "$rollback"
         mv -- "$transaction_rollback" "$rollback"
+    fi
+    if [ -n "$credential_backup" ]; then
+        case "$credential_backup" in "$state_root"/.installation.previous.*) rm -rf -- "$credential_backup" ;; *) exit 90 ;; esac
+        credential_backup=
     fi
     apply_succeeded=true
 fi
