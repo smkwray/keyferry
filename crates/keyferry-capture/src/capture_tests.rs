@@ -44,7 +44,7 @@ fn arguments_are_strict_and_bounded() {
 fn real_listing_shapes_exclude_audio_and_desktop_sources() {
     let devices = parse_devices(
         Backend::Dshow,
-        include_str!("../tests/fixtures/dshow-devices.txt"),
+        include_str!("../../../apps/keyctl/tests/fixtures/dshow-devices.txt"),
     )
     .unwrap();
     assert_eq!(devices.len(), 2);
@@ -52,7 +52,7 @@ fn real_listing_shapes_exclude_audio_and_desktop_sources() {
     assert!(devices[1].id.starts_with("@device_pnp_"));
     let devices = parse_devices(
         Backend::Avfoundation,
-        include_str!("../tests/fixtures/avfoundation-devices.txt"),
+        include_str!("../../../apps/keyctl/tests/fixtures/avfoundation-devices.txt"),
     )
     .unwrap();
     assert_eq!(
@@ -70,7 +70,7 @@ fn real_listing_shapes_exclude_audio_and_desktop_sources() {
     );
     let devices = parse_devices(
         Backend::V4l2,
-        include_str!("../tests/fixtures/v4l2-devices.txt"),
+        include_str!("../../../apps/keyctl/tests/fixtures/v4l2-devices.txt"),
     )
     .unwrap();
     assert_eq!(devices.len(), 2);
@@ -105,7 +105,7 @@ fn real_listing_shapes_exclude_audio_and_desktop_sources() {
 fn default_selection_needs_one_recognized_non_webcam() {
     let mut devices = parse_devices(
         Backend::Dshow,
-        include_str!("../tests/fixtures/dshow-devices.txt"),
+        include_str!("../../../apps/keyctl/tests/fixtures/dshow-devices.txt"),
     )
     .unwrap();
     assert_eq!(select_source(&devices, None).unwrap().name, "Hagibis");

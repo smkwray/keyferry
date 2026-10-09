@@ -1,10 +1,8 @@
 #![forbid(unsafe_code)]
 
-mod capture;
-mod frames;
+use keyferry_capture::{capture, frames, ocr};
 mod geometry;
 mod mcp;
-mod ocr;
 mod recipe;
 
 use keyferry_core::TransportDiagnostic;

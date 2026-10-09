@@ -1,8 +1,8 @@
 //! Latest-frame capture only. No disk, frame queue, FFmpeg report, or frame logging.
 use serde::{Deserialize, Serialize};
-pub(super) const MAX_SIDE: u32 = 1280;
+pub const MAX_SIDE: u32 = 1280;
 
-pub(super) fn scaled_size(native: (u32, u32)) -> (u32, u32) {
+pub fn scaled_size(native: (u32, u32)) -> (u32, u32) {
     let ratio = (f64::from(MAX_SIDE) / f64::from(native.0))
         .min(f64::from(MAX_SIDE) / f64::from(native.1))
         .min(1.0);
@@ -24,7 +24,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-pub(super) struct Frame {
+pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub native: (u32, u32),
@@ -52,7 +52,7 @@ impl Frame {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct Region {
+pub struct Region {
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -74,11 +74,7 @@ impl Region {
     }
 }
 
-pub(super) fn difference(
-    a: &Frame,
-    b: &Frame,
-    region: Option<Region>,
-) -> Result<f64, &'static str> {
+pub fn difference(a: &Frame, b: &Frame, region: Option<Region>) -> Result<f64, &'static str> {
     if (a.width, a.height, a.native, a.generation) != (b.width, b.height, b.native, b.generation) {
         return Err("capture.geometry_changed");
     }
@@ -104,7 +100,22 @@ pub(super) fn difference(
     Ok(total as f64 / (f64::from(r.width) * f64::from(r.height) * 3.0 * 255.0))
 }
 
-pub(super) trait FrameSource {
+pub trait FrameSource {
+    fn device(&mut self, _: &str) {}
+    fn sources(&mut self) -> Result<serde_json::Value, &'static str> {
+        Ok(self.status())
+    }
+    fn select(&mut self, _: &str) -> Result<(), &'static str> {
+        Err("capture.select_unsupported")
+    }
+    fn resolve(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn request_ocr(&mut self, _: bool) {}
+    fn ocr_result(&mut self) -> Option<Vec<super::ocr::TextBox>> {
+        None
+    }
+
     fn latest(
         &mut self,
         after: Option<u64>,
@@ -125,7 +136,7 @@ struct State {
     serial: u64,
 }
 
-pub(super) struct Capture {
+pub struct Capture {
     state: Arc<Mutex<State>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,

@@ -2672,6 +2672,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "ctrlc",
+ "keyferry-capture",
  "keyferry-core",
  "keyferry-layouts",
  "keyferry-protocol",
@@ -2683,8 +2684,6 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
- "windows",
- "windows-future",
 ]
 
 [[package]]
@@ -2711,6 +2710,18 @@ dependencies = [
  "ureq",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "keyferry-capture"
+version = "0.0.0"
+dependencies = [
+ "png",
+ "serde",
+ "serde_json",
+ "time",
+ "windows",
+ "windows-future",
 ]
 
 [[package]]
@@ -2823,12 +2834,14 @@ name = "keyferryd"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
  "getifaddrs",
  "getrandom 0.4.3",
  "hmac",
  "hyper",
  "keyferry",
+ "keyferry-capture",
  "keyferry-core",
  "keyferry-gateway",
  "keyferry-layouts",
