@@ -65,7 +65,7 @@ def load_profile(path: Path) -> dict[str, Any]:
             "display",
             "capabilities",
             "pins",
-        },
+        } | ({"indicators"} if "indicators" in profile else set()),
         "profile",
     )
     if profile["schema"] != SCHEMA:
@@ -78,6 +78,16 @@ def load_profile(path: Path) -> dict[str, Any]:
     flash = exact_fields(profile["flash"], {"size_mb"}, "flash")
     integer(flash["size_mb"], 2, 32, "flash.size_mb")
 
+    if profile["display"] == {"present": False}:
+        if "indicators" not in profile:
+            raise ValueError("a displayless profile requires indicators")
+        # No LCD hardware is initialized. Keep the C++ layout compatible.
+        profile["display"] = dict(present=False, controller="st7735",
+            presentation="normal", dc_gpio=0, cs_gpio=0, clk_gpio=0,
+            mosi_gpio=0, reset_gpio=0, backlight_gpio=0, width=1, height=1,
+            x_gap=0, y_gap=0, madctl=0, invert_colors=False,
+            swap_color_bytes=False, backlight_active_high=True,
+            backlight_percent=1, pixel_clock_hz=1000000)
     display = exact_fields(
         profile["display"],
         {
@@ -140,6 +150,17 @@ def load_profile(path: Path) -> dict[str, Any]:
     )
     for field, value in pins.items():
         integer(value, 0, 48, f"pins.{field}")
+    if "indicators" in profile:
+        indicators = exact_fields(profile["indicators"],
+            {"rgb_gpio", "button_gpio", "ir_gpio", "max_channel"}, "indicators")
+        for field in ("rgb_gpio", "button_gpio", "ir_gpio"):
+            integer(indicators[field], 0, 48, f"indicators.{field}")
+        integer(indicators["max_channel"], 1, 16, "indicators.max_channel")
+        used = list(indicators[field] for field in ("rgb_gpio", "button_gpio", "ir_gpio"))
+        if len(set(used)) != 3 or set(used) & {pins["usb_dm_gpio"], pins["usb_dp_gpio"], pins["boot_gpio"]}:
+            raise ValueError("indicator pins overlap each other, USB, or ROM BOOT")
+        if display["present"] or not capabilities["led"] or not capabilities["button"]:
+            raise ValueError("indicators require displayless LED/button capabilities")
     return profile
 
 
@@ -167,6 +188,12 @@ def render(profile: dict[str, Any], source: Path) -> str:
             f"{display['backlight_percent']}, {display['pixel_clock_hz']}U",
         ]
     )
+    extra = ""
+    if "indicators" in profile:
+        indicators = profile["indicators"]
+        extra = "\n#define KEYFERRY_BOARD_RGB_STATUS 1\n"
+        for name, value in indicators.items():
+            extra += f"inline constexpr std::int32_t {name} = {value};\n"
     return f"""// Generated from {source.name}; do not edit.
 #pragma once
 
@@ -227,7 +254,7 @@ inline constexpr std::int32_t usb_dm_gpio = {pins['usb_dm_gpio']};
 inline constexpr std::int32_t usb_dp_gpio = {pins['usb_dp_gpio']};
 inline constexpr std::int32_t boot_gpio = {pins['boot_gpio']};
 inline constexpr std::int32_t uart0_rx_gpio = {pins['uart0_rx_gpio']};
-inline constexpr std::int32_t uart0_tx_gpio = {pins['uart0_tx_gpio']};
+inline constexpr std::int32_t uart0_tx_gpio = {pins['uart0_tx_gpio']};{extra.rstrip()}
 
 }}  // namespace keyferry::board
 """

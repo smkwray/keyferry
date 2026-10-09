@@ -669,13 +669,22 @@ def build_checks(build: Path) -> None:
             fail(f"unsafe flash token: {forbidden}")
 
     app = build / "keyferry_hil_endpoint.bin"
-    app_partition_size = 0x100000
+    import struct
+    table = (build / "partition_table/partition-table.bin").read_bytes()
+    app_slots = []
+    for offset in range(0, len(table) - 31, 32):
+        magic, kind, subtype, address, size, _, _ = struct.unpack_from("<HBBII16sI", table, offset)
+        if magic == 0x50AA and kind == 0 and subtype == 0:
+            app_slots.append((address, size))
+    if len(app_slots) != 1:
+        fail("build must contain exactly one factory application slot")
+    _, app_partition_size = app_slots[0]
     minimum_headroom = 0x8000
     if not app.is_file():
         fail("application binary is missing")
     if app.stat().st_size > app_partition_size - minimum_headroom:
         fail(
-            "application leaves less than 32 KiB in its 1 MiB partition: "
+            "application leaves less than 32 KiB in its measured partition: "
             f"{app.stat().st_size} bytes"
         )
 

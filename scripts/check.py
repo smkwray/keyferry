@@ -410,6 +410,12 @@ def run_cpp_check(compiler: str) -> None:
                 ],
             ),
         ]
+        checks.append((
+            "status-led-test",
+            [ROOT / "firmware/esp32s3/components/kf_status/include",
+             ROOT / "firmware/esp32s3/components/kf_esp_status_display/include"],
+            [ROOT / "firmware/esp32s3/components/kf_status/test/status_led_test.cpp"],
+        ))
         for name, includes, sources in checks:
             executable = tmp / (f"{name}.exe" if sys.platform == "win32" else name)
             if Path(compiler).name.lower() in {"cl", "cl.exe"}:
@@ -460,13 +466,16 @@ def run_cpp_check(compiler: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--strict", action="store_true", help="require Rust and C++ toolchains")
+    parser.add_argument("--firmware-only", action="store_true", help="run source, Python and native firmware gates without Rust builds")
     args = parser.parse_args()
 
-    run([sys.executable, "scripts/check_public_tree.py", "--history"])
+    run([sys.executable, "scripts/check_public_tree.py",
+         *([] if args.firmware_only else ["--history"])])
     run([sys.executable, "scripts/check_seed.py"])
     run([sys.executable, "scripts/check_usb_executor.py"])
     run([sys.executable, "scripts/check_secure_endpoint.py"])
     run([sys.executable, "scripts/check_esp_transport.py"])
+    run([sys.executable, "-m", "unittest", "tests.test_board_profiles", "tests.test_flash_backup", "tests.test_first_install_freeze", "tests.test_hil_pointer"])
     run([sys.executable, "scripts/check_hil_mouse.py"])
     run([sys.executable, "scripts/check_hil_pointer.py"])
     run([sys.executable, "scripts/check_provisioning.py"])
@@ -477,7 +486,9 @@ def main() -> None:
     run([sys.executable, "-m", "unittest", "tests.test_esptool_summary_contract"])
 
     cargo = shutil.which("cargo")
-    if cargo:
+    if args.firmware_only:
+        print("NOT APPLICABLE: Rust builds (firmware-only selection)")
+    elif cargo:
         cargo_env = os.environ.copy()
         cargo_env["CARGO_INCREMENTAL"] = "0"
         print(f"build concurrency: {BUILD_JOBS} jobs (60% CPU ceiling; CARGO_BUILD_JOBS honored)", flush=True)

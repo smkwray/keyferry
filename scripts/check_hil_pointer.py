@@ -74,24 +74,58 @@ def descriptor():
     return data
 
 
+def atom_usb_descriptors(image, report):
+    # Exact three-interface USB personality, including unchanged IF0/IF1.
+    config = bytes.fromhex(
+        "09025b000301008032"
+        "0904000001030101040921110100012241000705810308000a"
+        "0904010002030000050921110100012222000705020340000a0705820340000a"
+        "09040200010300000609211101000122"
+    ) + len(report).to_bytes(2, "little") + bytes.fromhex("0705830308000a")
+    require(config in image, "Atom IF0/IF1/IF2 descriptor differs or MSC is present")
+    require(bytes.fromhex("12010002000000403a300440020101020301") in image,
+            "Atom VID/PID or bcdDevice 0102 differs")
+
+
+def inspect_build(build, data):
+    cache = (build / "CMakeCache.txt").read_text()
+    require("KEYFERRY_POINTER_EXTENDED:BOOL=ON" in cache, "extended pointer disabled")
+    match = re.search(r"^KEYFERRY_BOARD:STRING=([a-z0-9_]+)$", cache, re.M)
+    require(match is not None, "missing board selection")
+    board = match[1]
+    config = (build / "sdkconfig").read_text()
+    require("CONFIG_TINYUSB_HID_COUNT=3" in config, "USB HID count differs")
+    image = (build / "keyferry_hil_endpoint.bin").read_bytes()
+    require(data in image, "exact pointer descriptor is absent from image")
+    flash = json.loads((build / "flasher_args.json").read_text())["flash_files"]
+    if board == "waveshare_geek_v1_1_reference":
+        require("KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache, "Waveshare file handoff disabled")
+        require("CONFIG_TINYUSB_MSC_ENABLED=y" in config, "Waveshare MSC disabled")
+        from check_msc_size_probe import inspect_file_handoff
+        inspect_file_handoff(build)
+        require(flash.get("0x120000") == "keyferry_hil_endpoint.bin", "app-only offset differs")
+    elif board == "m5stack_atoms3_lite":
+        for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
+            require(token in cache, "Atom storage build enabled")
+        for token in ("# CONFIG_TINYUSB_MSC_ENABLED is not set", "# CONFIG_SPIRAM is not set",
+                      "# CONFIG_TINYUSB_CDC_ENABLED is not set"):
+            require(token in config, "Atom storage/PSRAM/CDC differs")
+        atom_usb_descriptors(image, data)
+        require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Atom first-install offset differs")
+        from check_esp_transport import build_checks
+        build_checks(build)
+    else:
+        require(False, "unsupported extended-pointer board: " + board)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path)
     args = parser.parse_args()
     data = descriptor()
     if args.build_dir:
-        build = args.build_dir
-        cache = (build / "CMakeCache.txt").read_text()
-        for token in ("KEYFERRY_POINTER_EXTENDED:BOOL=ON", "KEYFERRY_FILE_HANDOFF:BOOL=ON", "KEYFERRY_BOARD:STRING=waveshare_geek_v1_1_reference"):
-            require(token in cache, "candidate build differs: " + token)
-        config = (build / "sdkconfig").read_text()
-        for token in ("CONFIG_TINYUSB_HID_COUNT=3", "CONFIG_TINYUSB_MSC_ENABLED=y"):
-            require(token in config, "USB classes differ")
-        image = (build / "keyferry_hil_endpoint.bin").read_bytes()
-        require(data in image, "exact pointer descriptor is absent from image")
-        from check_msc_size_probe import inspect_file_handoff
-        inspect_file_handoff(build)
-        require(json.loads((build / "flasher_args.json").read_text())["flash_files"].get("0x120000") == "keyferry_hil_endpoint.bin", "app-only offset differs")
+        inspect_build(args.build_dir, data)
+
     print("check_hil_pointer: ok; physical_gate=OPEN")
 
 

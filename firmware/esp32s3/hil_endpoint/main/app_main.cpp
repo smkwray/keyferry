@@ -34,6 +34,9 @@
 #include "keyferry/esp_transport.h"
 #include "keyferry/esp_provisioning.h"
 #include "keyferry/esp_status_display.h"
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+#include "keyferry/esp_status_led.h"
+#endif
 #include "keyferry/hid_executor.h"
 #include "keyferry/idf_held_key_watchdog.h"
 #include "keyferry/idf_config_storage.h"
@@ -65,6 +68,11 @@ using keyferry::hid::BootKeyboardReport;
 using keyferry::hid::PointerReport;
 
 constexpr char kTag[] = "keyferry_hil";
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+constexpr auto kRecoveryButtonGpio = keyferry::board::button_gpio;
+#else
+constexpr auto kRecoveryButtonGpio = keyferry::board::boot_gpio;
+#endif
 constexpr std::uint8_t kKeyboardInterface = 0;
 constexpr std::uint8_t kProvisioningInterface = 1;
 constexpr std::uint8_t kMouseInterface = 2;
@@ -1574,7 +1582,11 @@ class HilRuntime final : public keyferry::transport::Delegate,
 
   keyferry::status::Snapshot StatusSnapshot(
       const bool transport_allowed, const keyferry::status::LinkPath link,
-      const std::uint64_t config_generation) {
+      const std::uint64_t config_generation
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+      , bool* armed = nullptr
+#endif
+  ) {
     keyferry::status::Snapshot snapshot{};
     snapshot.link = link;
     snapshot.config_generation = config_generation;
@@ -1582,6 +1594,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
       snapshot.activity = keyferry::status::Activity::kFault;
       return snapshot;
     }
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+    if (armed != nullptr) *armed = hid_.armed();
+#endif
     snapshot.usb_mounted =
         output_mode_ == keyferry::protocol::OutputMode::kUsbHid && usb_mounted_;
     snapshot.ble_hid_mode =
@@ -2609,6 +2624,41 @@ struct StatusTaskContext {
 };
 
 void StatusTask(void* context) {
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+  const auto* led_status = static_cast<const StatusTaskContext*>(context);
+  keyferry::status::EspStatusLed led;
+  if (led_status == nullptr || led_status->runtime == nullptr || !led.Initialize()) {
+    vTaskDelete(nullptr);
+    return;
+  }
+  while (true) {
+    auto link = keyferry::status::LinkPath::kOffline;
+    auto connection = keyferry::status::ConnectionProgress::kSearching;
+    if (led_status->transport != nullptr) {
+      const auto path = led_status->transport->active_path();
+      if (path == keyferry::transport::Path::kWifi) link = keyferry::status::LinkPath::kWifi;
+      if (path == keyferry::transport::Path::kBluetooth) link = keyferry::status::LinkPath::kBluetooth;
+      const auto diagnostics = led_status->transport->diagnostics();
+      if (diagnostics.wifi_stage == keyferry::transport::WifiStage::kConnecting ||
+          diagnostics.wifi_stage == keyferry::transport::WifiStage::kGotIp ||
+          diagnostics.wifi_stage == keyferry::transport::WifiStage::kTls) {
+        connection = keyferry::status::ConnectionProgress::kWifiAuthenticating;
+      } else if (diagnostics.ble.advertising ||
+                 diagnostics.ble.stage == keyferry::ble::PeripheralStage::kConnected) {
+        connection = keyferry::status::ConnectionProgress::kBluetoothAuthenticating;
+      }
+    }
+    bool armed{};
+    auto snapshot = led_status->runtime->StatusSnapshot(
+        led_status->transport_allowed, link, led_status->config_generation, &armed);
+    snapshot.connection = connection;
+    if (!led.Show(snapshot, static_cast<std::uint64_t>(esp_timer_get_time()) / 1000U, armed)) {
+      vTaskDelete(nullptr);
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+#endif
   if constexpr (!keyferry::board::capabilities.display) {
     vTaskDelete(nullptr);
     return;
@@ -2753,13 +2803,13 @@ bool UsbRecoveryRequested(
     return false;
   }
   if constexpr (!keyferry::board::capabilities.button ||
-                keyferry::board::boot_gpio < 0 ||
-                keyferry::board::boot_gpio >= GPIO_NUM_MAX) {
+                kRecoveryButtonGpio < 0 ||
+                kRecoveryButtonGpio >= GPIO_NUM_MAX) {
     ESP_LOGE(kTag, "BLE output has no usable recovery button; using USB for this boot");
     return true;
   }
   gpio_config_t config{};
-  config.pin_bit_mask = 1ULL << keyferry::board::boot_gpio;
+  config.pin_bit_mask = 1ULL << kRecoveryButtonGpio;
   config.mode = GPIO_MODE_INPUT;
   config.pull_up_en = GPIO_PULLUP_ENABLE;
   config.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -2774,7 +2824,7 @@ bool UsbRecoveryRequested(
   constexpr std::uint32_t kDebounceSamples = 3;
   std::uint32_t pressed_samples = 0;
   for (std::uint32_t elapsed = 0; elapsed < kWindowMs; elapsed += kPollMs) {
-    if (gpio_get_level(static_cast<gpio_num_t>(keyferry::board::boot_gpio)) == 0) {
+    if (gpio_get_level(static_cast<gpio_num_t>(kRecoveryButtonGpio)) == 0) {
       ++pressed_samples;
       if (pressed_samples >= kDebounceSamples) {
         ESP_LOGW(kTag, "BOOT pressed; using USB output for this boot only");
@@ -3021,6 +3071,16 @@ extern "C" void tud_resume_cb() {
 #endif
 
 extern "C" void app_main() {
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+  gpio_config_t ir{};
+  ir.pin_bit_mask = 1ULL << keyferry::board::ir_gpio;
+  ir.mode = GPIO_MODE_OUTPUT;
+  if (gpio_set_level(static_cast<gpio_num_t>(keyferry::board::ir_gpio), 0) != ESP_OK ||
+      gpio_config(&ir) != ESP_OK) {
+    ESP_LOGE(kTag, "unused IR output could not be disabled");
+    return;
+  }
+#endif
 #if defined(KEYFERRY_BLE_HID_COMPILE_ONLY_SPIKE)
   // This branch exists only to retain the proposed BLE HID service and output
   // adapter in an off-device size build. The anchor is defined false and the
@@ -3273,7 +3333,11 @@ extern "C" void app_main() {
   }
 #endif
 
-  if constexpr (keyferry::board::capabilities.display) {
+  if constexpr (keyferry::board::capabilities.display
+#if defined(KEYFERRY_BOARD_RGB_STATUS)
+                || true
+#endif
+  ) {
     static StatusTaskContext status_context{
         &runtime, transport_allowed, transport ? &*transport : nullptr,
         selection.generation, static_cast<std::int32_t>(nvs_result),
