@@ -16,7 +16,7 @@ const MAX_SPKI_BYTES: usize = 256;
 const MAX_CERTIFICATE_BYTES: usize = 2048;
 const MAX_INSTALLATION_MANIFEST_BYTES: usize = 16 * 1024;
 const MAX_GRANT_BYTES: usize = 8 * 1024;
-const MAX_INSTALLATION_DEVICES: usize = 8;
+pub const MAX_INSTALLATION_DEVICES: usize = 8;
 const INSTALLATION_SCHEMA_V3: u8 = 3;
 const DEVICE_GRANT_SCHEMA_V1: u8 = 1;
 const DEVICE_GRANT_DOMAIN: &str = "keyferry-device-installation-grant-v1";
@@ -170,6 +170,7 @@ pub struct InstallationCredentials {
     desktop_client_certificate_der: Vec<u8>,
     device_link_secret: [u8; 32],
     route_proof_secret: [u8; 32],
+    device_grant_json: Option<Vec<u8>>,
     device_server_name: String,
     desktop_server_name: String,
 }
@@ -247,6 +248,7 @@ impl InstallationCredentials {
             desktop_client_certificate_der,
             device_link_secret,
             route_proof_secret,
+            device_grant_json: None,
             device_server_name: device_gateway_name(&device_id)
                 .map_err(|_| invalid_error("device identity is invalid"))?,
             desktop_server_name: installation_gateway_name(&installation_id)
@@ -287,6 +289,11 @@ impl InstallationCredentials {
     pub fn route_proof_secret(&self) -> [u8; 32] {
         self.route_proof_secret
     }
+    /// Original authenticated schema-3 grant bytes; absent for the singleton layout.
+    pub fn device_grant_json(&self) -> Option<&[u8]> {
+        self.device_grant_json.as_deref()
+    }
+
     pub fn device_server_name(&self) -> &str {
         &self.device_server_name
     }
@@ -416,6 +423,7 @@ fn load_v3(root: &Path, marker: &Path) -> io::Result<InstallationCredentialSet> 
             desktop_client_certificate_der: desktop_client_certificate_der.clone(),
             device_link_secret,
             route_proof_secret,
+            device_grant_json: Some(grant_bytes),
             device_server_name: device_gateway_name(&device_id)
                 .map_err(|_| invalid_error("device identity is invalid"))?,
             desktop_server_name: desktop_server_name.clone(),

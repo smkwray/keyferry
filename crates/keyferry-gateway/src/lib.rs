@@ -15,7 +15,7 @@ pub mod roaming;
 pub mod tailnet;
 pub use installation::{
     DeviceGrantV1, InstallationCredentialSet, InstallationCredentials, InstallationDeviceV3,
-    InstallationManifestV3,
+    InstallationManifestV3, MAX_INSTALLATION_DEVICES,
 };
 pub use roaming::*;
 
