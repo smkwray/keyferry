@@ -144,14 +144,14 @@ def _strict_json(line: bytes, duplicate_code: str):
     return json.loads(line, object_pairs_hook=object_no_duplicates)
 
 
-def _open_rom(port: str):
+def _open_rom(port: str, connect_mode: str = "no-reset"):
     if esptool.__version__ != PINNED_ESPTOOL_VERSION:
         raise _ProbeError("firmware.rom_probe_tool")
     try:
         esp = cmds.detect_chip(
             port=port,
             baud=115_200,
-            connect_mode="no-reset",
+            connect_mode=connect_mode,
             trace_enabled=False,
             connect_attempts=1,
         )

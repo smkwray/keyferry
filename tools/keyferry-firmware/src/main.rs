@@ -1513,7 +1513,9 @@ mod tests {
     #[test]
     fn python_backend_has_one_locked_application_write_and_requires_manual_rom_entry() {
         let source = include_str!("../esptool_backend.py");
-        assert!(source.contains("connect_mode=\"no-reset\""));
+        assert!(source.contains("def _open_rom(port: str, connect_mode: str = \"no-reset\")"));
+        assert!(source.contains("esp = _open_rom(args.port)"));
+        assert!(source.contains("connect_mode=connect_mode"));
         assert!(source.contains("if esp.IS_STUB"));
         assert!(source.contains("cmds.attach_flash("));
         assert_eq!(source.matches("cmds.write_flash(").count(), 1);

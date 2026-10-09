@@ -439,6 +439,21 @@ fn run(
             writeln!(output, "device grant added to existing installation identity")
                 .map_err(|_| "could not write status")
         }
+        Some("prepare-stick")
+            if args.len() == 9
+                && args[1] == "--owner-kit"
+                && args[3] == "--installation"
+                && args[5] == "--network-bundle"
+                && args[7] == "--output" =>
+        {
+            prepare_stick(
+                Path::new(&args[2]),
+                Path::new(&args[4]),
+                Path::new(&args[6]),
+                Path::new(&args[8]),
+                input,
+            )
+        }
         Some("materialize-device-bootstrap")
             if args.len() == 11
                 && args[1] == "--owner-kit"
@@ -493,7 +508,7 @@ fn run(
         }
         Some("--help" | "-h" | "help") => writeln!(
             output,
-            "keyferry-pairing [--bundle PATH] COMMAND\n  create --host-address IP --host-port PORT\n  set-wifi [--replace]  (reads one JSON object from stdin)\n  initialize-recovery\n  validate\n  materialize  (output directory from KEYFERRY_PAIRING_OUTPUT_DIR)\n  status\n  provision\n  migrate-roaming --owner-kit PATH  (reads a passphrase on stdin)\n  update-roaming --owner-kit PATH [--device UUID] --policy PATH  (reads a passphrase on stdin)\n  recover-initial-roaming-policy --owner-kit PATH [--device UUID] --output PATH  (reads a passphrase on stdin)\n  save-roaming-policy --output PATH [--replace]  (reads complete policy JSON)\n  create-owner-kit --output PATH  (reads and confirms a passphrase on stdin)\n  add-owner-device --owner-kit PATH  (reads a passphrase; adds one generated authority)\n  list-owner-devices --owner-kit PATH  (reads a passphrase; returns device identifiers only)\n  issue-installation --owner-kit PATH [--device UUID] --output DIRECTORY  (reads a passphrase on stdin)\n  grant-device-to-installation --owner-kit PATH --device UUID --installation DIR --output DIR\n  materialize-device-bootstrap --owner-kit PATH --device UUID --installation DIR --network-bundle DIR --output DIR\n  change-owner-kit-passphrase --owner-kit PATH  (reads current, new, confirmation)\n  validate-installation --input DIRECTORY\n  validate-installation-upgrade --existing DIR --candidate DIR\n  export-gateway-credential --bundle PATH --port PORT --remote-token-file PATH --output PATH\n  validate-gateway-credential --input PATH\n  install-gateway-credential --input PATH\n  local-status --owner-kit PATH  (reads one passphrase; daemon/network independent)\n  local-status --owner-kit PATH --device UUID  (required for multi-device kits)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH ACTION  (restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot)\n  local-recover --owner-kit PATH --device UUID ACTION  (required for multi-device kits)\n  bootstrap-status --private-header PATH  (read-only exact-device policy status)\n  bootstrap-roaming --private-header PATH --installation DIR --network-bundle DIR --journal-dir DIR\n  local-status-bootstrap --private-header PATH\n  local-recover-bootstrap --private-header PATH ACTION"
+            "keyferry-pairing [--bundle PATH] COMMAND\n  create --host-address IP --host-port PORT\n  set-wifi [--replace]  (reads one JSON object from stdin)\n  initialize-recovery\n  validate\n  materialize  (output directory from KEYFERRY_PAIRING_OUTPUT_DIR)\n  status\n  provision\n  migrate-roaming --owner-kit PATH  (reads a passphrase on stdin)\n  update-roaming --owner-kit PATH [--device UUID] --policy PATH  (reads a passphrase on stdin)\n  recover-initial-roaming-policy --owner-kit PATH [--device UUID] --output PATH  (reads a passphrase on stdin)\n  save-roaming-policy --output PATH [--replace]  (reads complete policy JSON)\n  create-owner-kit --output PATH  (reads and confirms a passphrase on stdin)\n  add-owner-device --owner-kit PATH  (reads a passphrase; adds one generated authority)\n  list-owner-devices --owner-kit PATH  (reads a passphrase; returns device identifiers only)\n  issue-installation --owner-kit PATH [--device UUID] --output DIRECTORY  (reads a passphrase on stdin)\n  prepare-stick --owner-kit PATH --installation DIR --network-bundle DIR --output DIR  (one stdin passphrase; offline mint+grant+header)\n  grant-device-to-installation --owner-kit PATH --device UUID --installation DIR --output DIR\n  materialize-device-bootstrap --owner-kit PATH --device UUID --installation DIR --network-bundle DIR --output DIR\n  change-owner-kit-passphrase --owner-kit PATH  (reads current, new, confirmation)\n  validate-installation --input DIRECTORY\n  validate-installation-upgrade --existing DIR --candidate DIR\n  export-gateway-credential --bundle PATH --port PORT --remote-token-file PATH --output PATH\n  validate-gateway-credential --input PATH\n  install-gateway-credential --input PATH\n  local-status --owner-kit PATH  (reads one passphrase; daemon/network independent)\n  local-status --owner-kit PATH --device UUID  (required for multi-device kits)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH ACTION  (restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot)\n  local-recover --owner-kit PATH --device UUID ACTION  (required for multi-device kits)\n  bootstrap-status --private-header PATH  (read-only exact-device policy status)\n  bootstrap-roaming --private-header PATH --installation DIR --network-bundle DIR --journal-dir DIR\n  local-status-bootstrap --private-header PATH\n  local-recover-bootstrap --private-header PATH ACTION"
         )
         .map_err(|_| "could not write help"),
         _ => Err("use --help for the supported commands"),
@@ -1336,6 +1351,81 @@ fn grant_device_to_installation(
         let _ = fs::remove_dir_all(&temporary);
     }
     result
+}
+
+/// One stdin delivery, existing mint/grant/header producers, no hardware access.
+/// A partial directory is an explicit recovery stop, never a second mint.
+fn prepare_stick(
+    owner_kit_path: &Path,
+    installation: &Path,
+    network: &Path,
+    destination: &Path,
+    input: &mut dyn Read,
+) -> Result<(), &'static str> {
+    let passphrases = read_secret_lines(input, 1)?;
+    let original = read_bounded(owner_kit_path, OWNER_KIT_MAX_BYTES)
+        .map_err(|_| "owner-kit file is absent or invalid")?;
+    owner_kit::device_ids(&original, passphrases[0].as_slice())
+        .map_err(|_| "owner-kit authentication failed")?;
+    let existing = InstallationCredentialSet::load(installation)
+        .map_err(|_| "existing installation credential directory is invalid")?;
+    if existing.len() >= keyferry_gateway::MAX_INSTALLATION_DEVICES {
+        return Err("installation device limit of eight would be exceeded");
+    }
+    if fs::symlink_metadata(destination).is_ok() {
+        return Err("preparation already exists; reconcile it without minting again");
+    }
+    let lock = owner_kit_path.with_extension("add-device.lock");
+    write_new_owner_only(&lock, b"locked\n")
+        .map_err(|_| "another owner-kit update is active or needs recovery")?;
+    let result = (|| {
+        create_private_dir(destination)?;
+        let staged_kit = destination.join("owner-kit.staged.json");
+        write_new_owner_only(&staged_kit, &original)?;
+        let secret_line = Zeroizing::new([passphrases[0].as_slice(), b"\n"].concat());
+        let device = add_owner_device(&staged_kit, &mut secret_line.as_slice())?;
+        // Record identity before touching the live owner kit; retain staged ciphertext
+        // for reconciliation after interruption. Never recover by generating a UUID.
+        let changed = read_bounded(&staged_kit, OWNER_KIT_MAX_BYTES)
+            .map_err(|_| "staged owner kit is invalid")?;
+        let transaction = serde_json::json!({
+            "schema": "keyferry.stick-preparation.v1",
+            "device_id": format_uuid(&device),
+            "owner_kit_before_sha256": hex(&Sha256::digest(&original)),
+            "owner_kit_after_sha256": hex(&Sha256::digest(&changed)),
+        });
+        write_new_owner_only(
+            &destination.join("transaction.json"),
+            &serde_json::to_vec(&transaction).map_err(|_| "could not encode preparation")?,
+        )?;
+        let expanded = destination.join("installation");
+        grant_device_to_installation(
+            &staged_kit,
+            device,
+            installation,
+            &expanded,
+            &mut secret_line.as_slice(),
+        )?;
+        materialize_device_bootstrap(
+            &staged_kit,
+            device,
+            &expanded,
+            network,
+            &destination.join("bootstrap"),
+            &mut secret_line.as_slice(),
+            &mut io::sink(),
+        )?;
+        if read_bounded(owner_kit_path, OWNER_KIT_MAX_BYTES)? != original {
+            return Err("owner kit changed during preparation");
+        }
+        replace_private_durable(owner_kit_path, &changed)?;
+        write_new_owner_only(
+            &destination.join("prepared.json"),
+            &serde_json::to_vec(&transaction).map_err(|_| "could not encode preparation")?,
+        )
+    })();
+    let unlocked = remove_private_durable(&lock);
+    result.and(unlocked)
 }
 
 #[cfg(windows)]
@@ -3064,6 +3154,83 @@ mod tests {
         assert!(!visible.contains(passphrase));
         assert!(!visible.contains(&hex(&recovery)));
         assert!(!visible.contains(&manifest.installation_id_hex));
+    }
+
+    #[test]
+    fn prepare_stick_dispatch_uses_one_secret_and_never_repeats_partial_mint() {
+        let root = TestRoot::new();
+        fs::create_dir_all(&root.0).unwrap();
+        let bundle = root.0.join("bundle");
+        complete_bundle(&bundle);
+        let kit = root.0.join("owner-kit.json");
+        let secret = "synthetic preparation secret";
+        create_owner_kit(
+            &bundle,
+            &kit,
+            &mut Cursor::new(format!("{secret}\n{secret}\n")),
+        )
+        .unwrap();
+        let installation = root.0.join("installation");
+        issue_installation(&kit, &installation, &mut Cursor::new(format!("{secret}\n"))).unwrap();
+        let destination = root.0.join("prepared");
+        let args = vec![
+            "prepare-stick".into(),
+            "--owner-kit".into(),
+            kit.to_str().unwrap().into(),
+            "--installation".into(),
+            installation.to_str().unwrap().into(),
+            "--network-bundle".into(),
+            bundle.to_str().unwrap().into(),
+            "--output".into(),
+            destination.to_str().unwrap().into(),
+        ];
+        let before = fs::read(&kit).unwrap();
+        let mut output = Vec::new();
+        assert!(run(&args, &bundle, &mut Cursor::new("wrong\n"), &mut output).is_err());
+        assert_eq!(fs::read(&kit).unwrap(), before);
+        assert!(!destination.exists());
+        run(
+            &args,
+            &bundle,
+            &mut Cursor::new(format!("{secret}\n")),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.is_empty());
+        let receipt: serde_json::Value =
+            read_json_private(&destination.join("prepared.json")).unwrap();
+        let id = parse_uuid(receipt["device_id"].as_str().unwrap()).unwrap();
+        let header =
+            load_private_header_authority(&destination.join("bootstrap").join(GENERATED_HEADER))
+                .unwrap();
+        assert_eq!(header.device_id, id);
+        validate_installation_upgrade(&installation, &destination.join("installation")).unwrap();
+        let changed = fs::read(&kit).unwrap();
+        assert_eq!(
+            owner_kit::device_ids(&changed, secret.as_bytes())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!receipt.to_string().contains(secret));
+        assert!(!receipt.to_string().contains(&hex(&*header.recovery_secret)));
+        assert!(run(
+            &args,
+            &bundle,
+            &mut Cursor::new(format!("{secret}\n")),
+            &mut output
+        )
+        .is_err());
+        assert_eq!(fs::read(&kit).unwrap(), changed);
+        fs::remove_file(destination.join("prepared.json")).unwrap();
+        assert!(run(
+            &args,
+            &bundle,
+            &mut Cursor::new(format!("{secret}\n")),
+            &mut output
+        )
+        .is_err());
+        assert_eq!(fs::read(&kit).unwrap(), changed);
     }
 
     #[test]
