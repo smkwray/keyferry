@@ -15,6 +15,7 @@
 #include "host/ble_store.h"
 #include "host/util/util.h"
 #include "keyferry/ble_hid_release.h"
+#include "keyferry/usb_identity.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
@@ -478,7 +479,7 @@ bool IdfBleHidPeripheral::Initialize() {
 
   ble_svc_gap_init();
   ble_svc_gatt_init();
-  rc = ble_svc_gap_device_name_set("Keyferry Keyboard");
+  rc = ble_svc_gap_device_name_set(keyferry::usb_identity::kProduct);
   ble_svc_hid_params params{};
   params.proto_mode_present = 1;
   params.kbd_inp_present = 1;

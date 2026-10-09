@@ -38,6 +38,7 @@
 #include "keyferry/esp_status_led.h"
 #endif
 #include "keyferry/hid_executor.h"
+#include "keyferry/usb_identity.h"
 #include "keyferry/idf_held_key_watchdog.h"
 #include "keyferry/idf_config_storage.h"
 #include "keyferry/idf_recovery_anchor_storage.h"
@@ -407,20 +408,14 @@ static char kEnglishLanguage[] = {0x09, 0x04};
 static std::array<char, 33> kSerialDescriptor{};
 static const char* kStringDescriptors[] = {
     kEnglishLanguage,
-    "keyferry",
-    "keyferry owner device",
+    keyferry::usb_identity::kManufacturer,
+    keyferry::usb_identity::kProduct,
     kSerialDescriptor.data(),
-    "Boot keyboard",
-    "Authenticated provisioning",
-#if defined(KEYFERRY_POINTER_EXTENDED)
-    "Extended pointer",
-#else
-    "Relative mouse",
-#endif
-#if defined(KEYFERRY_MSC_SIZE_PROBE)
-    "Empty MSC size probe",
-#elif defined(KEYFERRY_FILE_HANDOFF)
-    "KEYFERRY file handoff",
+    keyferry::usb_identity::kKeyboard,
+    keyferry::usb_identity::kManagement,
+    keyferry::usb_identity::kMouse,
+#if defined(KEYFERRY_MSC_SIZE_PROBE) || defined(KEYFERRY_FILE_HANDOFF)
+    keyferry::usb_identity::kDrive,
 #endif
 };
 
@@ -2849,8 +2844,8 @@ extern "C" void msc_storage_mount_to_app(void) {}
 extern "C" void tud_msc_inquiry_cb(std::uint8_t, std::uint8_t vendor[8],
                                     std::uint8_t product[16],
                                     std::uint8_t revision[4]) {
-  std::memcpy(vendor, "KEYFERRY", 8);
-  std::memcpy(product, "EMPTY SIZE PROBE", 16);
+  std::memcpy(vendor, keyferry::usb_identity::kInquiryVendor, 8);
+  std::memcpy(product, keyferry::usb_identity::kInquiryProduct, 16);
   std::memcpy(revision, "0.0 ", 4);
 }
 extern "C" bool tud_msc_test_unit_ready_cb(std::uint8_t lun) {
@@ -2890,8 +2885,8 @@ extern "C" void msc_storage_mount_to_app(void) {}
 extern "C" void tud_msc_inquiry_cb(std::uint8_t, std::uint8_t vendor[8],
                                      std::uint8_t product[16],
                                      std::uint8_t revision[4]) {
-  std::memcpy(vendor, "KEYFERRY", 8);
-  std::memcpy(product, "MESSAGE TXT     ", 16);
+  std::memcpy(vendor, keyferry::usb_identity::kInquiryVendor, 8);
+  std::memcpy(product, keyferry::usb_identity::kInquiryProduct, 16);
   std::memcpy(revision, "0.2 ", 4);
 }
 extern "C" bool tud_msc_test_unit_ready_cb(std::uint8_t lun) {

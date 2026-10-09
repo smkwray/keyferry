@@ -102,6 +102,10 @@ def validate_source() -> None:
 
     source = APP_SOURCE.read_text(encoding="utf-8")
     required = {
+        "keyferry::usb_identity::kManufacturer,",
+        "keyferry::usb_identity::kProduct,",
+        '"OFFLINE-NOAUTH",',
+        "keyferry::usb_identity::kKeyboard,",
         "TUD_HID_REPORT_DESC_KEYBOARD()",
         "HID_ITF_PROTOCOL_KEYBOARD",
         "tinyusb_driver_install",

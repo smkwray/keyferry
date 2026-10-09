@@ -13,6 +13,59 @@ ADAPTER = ROOT / "firmware/esp32s3/hil_endpoint/main/provisioning_adapter.h"
 DEFAULTS = ROOT / "firmware/esp32s3/hil_endpoint/sdkconfig.defaults"
 SECURE_HEADER = ROOT / "firmware/esp32s3/components/kf_secure_endpoint/include/keyferry/secure_endpoint.h"
 SECURE_SOURCE = ROOT / "firmware/esp32s3/components/kf_secure_endpoint/src/secure_endpoint.cpp"
+USB_IDENTITY = ROOT / "firmware/common/include/keyferry/usb_identity.h"
+
+
+def check_usb_identity(app: str, image: bytes | None = None) -> None:
+    identity = USB_IDENTITY.read_text(encoding="utf-8")
+    names = {
+        "kManufacturer": "Generic", "kProduct": "USB Input Device",
+        "kKeyboard": "Keyboard", "kManagement": "USB Interface",
+        "kMouse": "Mouse", "kDrive": "USB Drive",
+        "kInquiryVendor": "Generic ", "kInquiryProduct": "USB Drive       ",
+        "kVolumeLabel": "USB DRIVE  ", "kFatOem": "Generic ",
+    }
+    for name, value in names.items():
+        require(identity, (f'inline constexpr char {name}[] = "{value}";',), "USB names")
+    ble_hid = (ROOT / "firmware/esp32s3/components/kf_ble_hid/src/idf_ble_hid_peripheral.cpp").read_text()
+    require(ble_hid, ("ble_svc_gap_device_name_set(keyferry::usb_identity::kProduct);",),
+            "target BLE HID name")
+    table = re.search(r"kStringDescriptors\[\]\s*=\s*\{(.*?)\};", app, re.S)
+    if table is None:
+        fail("USB string table missing")
+    entries = re.sub(r"^#.*$", "", table[1], flags=re.M).split(",")
+    if [entry.strip() for entry in entries if entry.strip()] != [
+        "kEnglishLanguage", "keyferry::usb_identity::kManufacturer",
+        "keyferry::usb_identity::kProduct", "kSerialDescriptor.data()",
+        "keyferry::usb_identity::kKeyboard", "keyferry::usb_identity::kManagement",
+        "keyferry::usb_identity::kMouse", "keyferry::usb_identity::kDrive",
+    ]:
+        fail("USB string indices/names or serial selection changed")
+    serial = re.search(r"void BuildSerialDescriptor\(.*?\n\}", app, re.S)
+    expected = r'''void BuildSerialDescriptor(const std::array<std::uint8_t, 16>& device_id) {
+      constexpr char kHex[] = "0123456789ABCDEF";
+      for (std::size_t index = 0; index < device_id.size(); ++index) {
+        kSerialDescriptor[index * 2] = kHex[device_id[index] >> 4];
+        kSerialDescriptor[index * 2 + 1] = kHex[device_id[index] & 0x0F];
+      }
+      kSerialDescriptor.back() = '\0';
+    }'''
+    if serial is None or re.sub(r"\s+", "", serial[0]) != re.sub(r"\s+", "", expected):
+        fail("USB serial must remain the 32 uppercase hex digits of the device ID")
+    require(app, (
+        "static std::array<char, 33> kSerialDescriptor{};",
+        "BuildSerialDescriptor(keyferry::hil_private::kDeviceId);",
+        "constexpr std::uint16_t kInputDeviceRevision = 0x0101;",
+        "std::memcpy(vendor, keyferry::usb_identity::kInquiryVendor, 8);",
+        "std::memcpy(product, keyferry::usb_identity::kInquiryProduct, 16);",
+    ), "USB identity")
+    if image is not None:
+        for name in ("kManufacturer", "kProduct", "kKeyboard", "kManagement", "kMouse"):
+            if names[name].encode() + b"\0" not in image:
+                fail(f"compiled generic USB string absent: {name}")
+        for old in (b"keyferry owner device\0", b"KEYFERRY file handoff\0"):
+            if old in image:
+                fail("compiled image retains a branded USB name")
 
 
 def fail(message: str) -> None:
@@ -28,6 +81,7 @@ def require(text: str, tokens: tuple[str, ...], surface: str) -> None:
 
 def main() -> int:
     app = APP.read_text(encoding="utf-8")
+    check_usb_identity(app)
     adapter = ADAPTER.read_text(encoding="utf-8")
     defaults = DEFAULTS.read_text(encoding="utf-8")
     secure_header = SECURE_HEADER.read_text(encoding="utf-8")
@@ -67,9 +121,6 @@ def main() -> int:
             "TUD_CONFIG_DESCRIPTOR(1, 1, 0, kBleControlConfigurationLength",
             "TUD_CONFIG_DESCRIPTOR(1, 2, 0, kBleControlConfigurationLength",
             "g_ble_control_usb.store(ble_control_usb",
-            '"Boot keyboard"',
-            '"Authenticated provisioning"',
-            '"Relative mouse"',
         ),
         "HIL descriptors",
     )

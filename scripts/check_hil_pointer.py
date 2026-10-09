@@ -15,6 +15,8 @@ def require(condition, message):
 
 def descriptor():
     source = (ROOT / "firmware/esp32s3/hil_endpoint/main/app_main.cpp").read_text()
+    from check_hil_mouse import check_usb_identity
+    check_usb_identity(source)
     body = re.search(r"kPointerReportDescriptor\[\]\s*=\s*\{(.*?)\};", source, re.S)
     require(body is not None, "missing closed pointer descriptor")
     data = bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", body[1]))
@@ -96,9 +98,13 @@ def inspect_build(build, data):
     config = (build / "sdkconfig").read_text()
     require("CONFIG_TINYUSB_HID_COUNT=3" in config, "USB HID count differs")
     image = (build / "keyferry_hil_endpoint.bin").read_bytes()
+    from check_hil_mouse import check_usb_identity
+    check_usb_identity((ROOT / "firmware/esp32s3/hil_endpoint/main/app_main.cpp").read_text(), image)
     require(data in image, "exact pointer descriptor is absent from image")
     flash = json.loads((build / "flasher_args.json").read_text())["flash_files"]
     if board == "waveshare_geek_v1_1_reference":
+        require(bytes.fromhex("12010002000000403a300840020101020301") in image,
+                "Waveshare VID/PID or bcdDevice 0102 differs")
         require("KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache, "Waveshare file handoff disabled")
         require("CONFIG_TINYUSB_MSC_ENABLED=y" in config, "Waveshare MSC disabled")
         from check_msc_size_probe import inspect_file_handoff
@@ -126,7 +132,7 @@ def main():
     if args.build_dir:
         inspect_build(args.build_dir, data)
 
-    print("check_hil_pointer: ok; physical_gate=OPEN")
+    print("check_hil_pointer: ok; USB=Generic / USB Input Device; serial=unchanged device-ID uppercase hex; physical_gate=OPEN")
 
 
 if __name__ == "__main__":

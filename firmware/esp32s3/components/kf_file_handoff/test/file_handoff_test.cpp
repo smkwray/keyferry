@@ -68,12 +68,13 @@ void CheckPublished(file::Volume& volume, const std::vector<std::uint8_t>& expec
          Le16(boot.data() + 19) == file::kBlockCount &&
          boot[21] == 0xF8 &&
          Le16(boot.data() + 22) == file::kFatSectors);
-  assert(std::memcmp(boot.data() + 43, "KEYFERRY   ", 11) == 0);
+  assert(std::memcmp(boot.data() + 3, "Generic ", 8) == 0);
+  assert(std::memcmp(boot.data() + 43, "USB DRIVE  ", 11) == 0);
   assert(std::memcmp(boot.data() + 54, "FAT12   ", 8) == 0);
   assert(fat1 == fat2);
   assert(fat1[0] == 0xF8 && FatEntry(fat1.data(), 0) == 0xFF8 &&
          FatEntry(fat1.data(), 1) == 0xFFF);
-  assert(std::memcmp(root.data(), "KEYFERRY   ", 11) == 0 && root[11] == 0x08);
+  assert(std::memcmp(root.data(), "USB DRIVE  ", 11) == 0 && root[11] == 0x08);
   assert(std::memcmp(root.data() + 32, "MESSAGE TXT", 11) == 0 && root[43] == 0x20);
   assert(Le32(root.data() + 60) == expected.size());
   const std::size_t clusters = (expected.size() + 511) / 512;

@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "keyferry/hid_executor.h"
+#include "keyferry/usb_identity.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 
@@ -40,10 +41,10 @@ static const std::uint8_t kConfigurationDescriptor[] = {
 static char kEnglishLanguage[] = {0x09, 0x04};
 static const char* kStringDescriptors[] = {
     kEnglishLanguage,
-    "keyferry",
-    "keyferry offline executor",
+    keyferry::usb_identity::kManufacturer,
+    keyferry::usb_identity::kProduct,
     "OFFLINE-NOAUTH",
-    "Boot keyboard",
+    keyferry::usb_identity::kKeyboard,
 };
 
 ExecutorState g_executor;

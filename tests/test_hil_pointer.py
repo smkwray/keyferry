@@ -1,9 +1,11 @@
 """Reject an Atom image with the wrong compiled USB personality."""
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("pointer", ROOT / "scripts/check_hil_pointer.py")
 pointer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pointer)
@@ -42,6 +44,35 @@ class AtomPointerDescriptorTests(unittest.TestCase):
         bad[12] = 1
         with self.assertRaises(SystemExit):
             pointer.atom_usb_descriptors(self.config + bytes(bad), self.report)
+
+
+class UsbIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.source = (ROOT / "firmware/esp32s3/hil_endpoint/main/app_main.cpp").read_text()
+
+    def test_generic_names_and_unchanged_serial(self):
+        from check_hil_mouse import check_usb_identity
+        check_usb_identity(self.source)
+
+    def test_old_product_or_changed_serial_is_rejected(self):
+        from check_hil_mouse import check_usb_identity
+        for old, new in (
+            ("keyferry::usb_identity::kProduct,", '"keyferry owner device",'),
+            ("kSerialDescriptor.data(),", '"GENERIC-SERIAL",'),
+            ("0123456789ABCDEF", "0123456789abcdef"),
+            ("BuildSerialDescriptor(keyferry::hil_private::kDeviceId);", "BuildSerialDescriptor({});"),
+        ):
+            with self.subTest(old=old), self.assertRaises(SystemExit):
+                check_usb_identity(self.source.replace(old, new))
+
+    def test_compiled_names_are_required(self):
+        from check_hil_mouse import check_usb_identity
+        strings = b"Generic\0USB Input Device\0Keyboard\0USB Interface\0Mouse\0"
+        check_usb_identity(self.source, strings)
+        for bad in (strings.replace(b"Generic", b"keyferry"),
+                    strings + b"keyferry owner device\0"):
+            with self.assertRaises(SystemExit):
+                check_usb_identity(self.source, bad)
 
 
 if __name__ == "__main__":

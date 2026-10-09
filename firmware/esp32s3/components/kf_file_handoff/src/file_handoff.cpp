@@ -1,4 +1,5 @@
 #include "keyferry/file_handoff.h"
+#include "keyferry/usb_identity.h"
 
 #include <algorithm>
 #include <array>
@@ -278,7 +279,7 @@ std::uint16_t Volume::FatValue(std::uint32_t cluster) const {
 void Volume::RootEntry(std::uint32_t index, std::uint8_t output[32]) const {
   std::memset(output, 0, 32);
   if (index == 0) {
-    std::memcpy(output, "KEYFERRY   ", 11);
+    std::memcpy(output, keyferry::usb_identity::kVolumeLabel, 11);
     output[11] = 0x08;
     return;
   }
@@ -323,7 +324,7 @@ void Volume::Sector(std::uint32_t lba, std::uint8_t output[kBlockBytes]) const {
   std::memset(output, 0, kBlockBytes);
   if (lba == 0) {
     output[0] = 0xEB; output[1] = 0x3C; output[2] = 0x90;
-    std::memcpy(output + 3, "KEYFERRY", 8);
+    std::memcpy(output + 3, keyferry::usb_identity::kFatOem, 8);
     Put16(output + 11, kBlockBytes);
     output[13] = 1;  // One sector per cluster.
     Put16(output + 14, 1);  // Reserved sectors.
@@ -336,7 +337,7 @@ void Volume::Sector(std::uint32_t lba, std::uint8_t output[kBlockBytes]) const {
     Put16(output + 26, 1);
     output[36] = 0x80; output[38] = 0x29;
     Put32(output + 39, 0x4B465259);
-    std::memcpy(output + 43, "KEYFERRY   ", 11);
+    std::memcpy(output + 43, keyferry::usb_identity::kVolumeLabel, 11);
     std::memcpy(output + 54, "FAT12   ", 8);
     output[510] = 0x55; output[511] = 0xAA;
   } else if (lba >= 1 && lba < kRootSector) {
