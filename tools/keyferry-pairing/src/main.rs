@@ -514,6 +514,9 @@ fn validate_installation_upgrade(existing: &Path, candidate: &Path) -> Result<()
     if candidate.len() < existing.len() {
         return Err("candidate installation removes a device grant");
     }
+    if candidate.len() != existing.len() + 1 {
+        return Err("candidate installation must add exactly one device grant");
+    }
     for before in existing.iter() {
         let after = candidate
             .get(before.device_id())
@@ -528,6 +531,9 @@ fn validate_installation_upgrade(existing: &Path, candidate: &Path) -> Result<()
             || after.desktop_client_certificate_der() != before.desktop_client_certificate_der()
             || after.device_link_secret() != before.device_link_secret()
             || after.route_proof_secret() != before.route_proof_secret()
+            || before
+                .device_grant_json()
+                .is_some_and(|grant| after.device_grant_json() != Some(grant))
         {
             return Err("candidate installation changes existing authority material");
         }
@@ -1278,8 +1284,14 @@ fn grant_device_to_installation(
     let passphrases = read_secret_lines(input, 1)?;
     let kit = read_bounded(owner_kit_path, OWNER_KIT_MAX_BYTES)
         .map_err(|_| "owner-kit file is absent or invalid")?;
-    let existing = keyferry_gateway::InstallationCredentials::load(existing_path)
-        .map_err(|_| "existing singleton installation is invalid")?;
+    let existing = InstallationCredentialSet::load(existing_path)
+        .map_err(|_| "existing installation credential directory is invalid")?;
+    if existing.get(device_id).is_some() {
+        return Err("device is already granted to this installation");
+    }
+    if existing.len() >= keyferry_gateway::MAX_INSTALLATION_DEVICES {
+        return Err("installation device limit of eight would be exceeded");
+    }
     let expanded = owner_kit::expand_installation_with_device(
         &kit,
         passphrases[0].as_slice(),
@@ -1287,7 +1299,7 @@ fn grant_device_to_installation(
         device_id,
     )
     .map_err(|_| "owner-kit authentication, device grant, or installation match failed")?;
-    if output.exists() {
+    if fs::symlink_metadata(output).is_ok() {
         return Err("expanded installation output already exists");
     }
     let parent = output
@@ -1302,17 +1314,68 @@ fn grant_device_to_installation(
     if temporary.exists() {
         return Err("could not allocate expanded installation directory");
     }
-    create_private_dir(&temporary)?;
-    let result = write_expanded_installation(&temporary, &expanded).and_then(|()| {
-        keyferry_gateway::InstallationCredentialSet::load(&temporary)
-            .map_err(|_| "expanded installation failed validation")?;
-        fs::rename(&temporary, output)
-            .map_err(|_| "could not publish expanded installation directory")
-    });
+    fs::create_dir(&temporary).map_err(|_| "could not allocate expanded installation directory")?;
+    let result = create_private_dir(&temporary)
+        .and_then(|()| write_expanded_installation(&temporary, &expanded))
+        .and_then(|()| {
+            validate_installation_upgrade(existing_path, &temporary)?;
+            #[cfg(unix)]
+            {
+                for device in &expanded.devices {
+                    sync_private_directory(
+                        &temporary.join("devices").join(hex(&device.device_id)),
+                    )?;
+                }
+                sync_private_directory(&temporary.join("devices"))?;
+                sync_private_directory(&temporary)?;
+            }
+            publish_new_installation(&temporary, output)
+                .map_err(|_| "could not publish expanded installation directory")
+        });
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
     result
+}
+
+#[cfg(windows)]
+fn publish_new_installation(source: &Path, destination: &Path) -> io::Result<()> {
+    durable_windows::rename_write_through(source, destination)
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn publish_new_installation(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: owned NUL-terminated path buffers live through the synchronous call.
+    // These flags atomically refuse *any* existing destination, including an empty
+    // directory or dangling symlink. No hard links or replacing rename fallback.
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result =
+        unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "exclusive directory publication is unsupported",
+    ));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 fn change_owner_kit_passphrase(
@@ -1442,7 +1505,7 @@ fn write_expanded_installation(
             &root.join("route-proof-secret.bin"),
             &device.route_proof_secret,
         )?;
-        write_json_private(&root.join("grant.json"), &device.grant)?;
+        write_new_private(&root.join("grant.json"), &device.grant_json)?;
     }
     Ok(())
 }
@@ -3109,6 +3172,464 @@ mod tests {
         )
         .unwrap();
         assert!(!receipt.contains(&hex(&authority.device_recovery_secret)));
+    }
+
+    const EXPANSION_PASSPHRASE: &str = "synthetic expansion privacy marker";
+
+    struct ExpansionFixture {
+        root: TestRoot,
+        kit: PathBuf,
+        singleton: PathBuf,
+        existing: PathBuf,
+        added: [u8; 16],
+    }
+
+    impl ExpansionFixture {
+        fn new() -> Self {
+            let root = TestRoot::new();
+            fs::create_dir_all(&root.0).unwrap();
+            let bundle = root.0.join("bundle");
+            complete_bundle(&bundle);
+            let kit = root.0.join("owner-kit.json");
+            create_owner_kit(
+                &bundle,
+                &kit,
+                &mut Cursor::new(format!(
+                    "{EXPANSION_PASSPHRASE}
+{EXPANSION_PASSPHRASE}
+"
+                )),
+            )
+            .unwrap();
+            let singleton = root.0.join("singleton");
+            issue_installation(&kit, &singleton, &mut Self::input()).unwrap();
+            let second = add_owner_device(&kit, &mut Self::input()).unwrap();
+            let existing = root.0.join("existing");
+            grant_device_to_installation(&kit, second, &singleton, &existing, &mut Self::input())
+                .unwrap();
+            let added = add_owner_device(&kit, &mut Self::input()).unwrap();
+            Self {
+                root,
+                kit,
+                singleton,
+                existing,
+                added,
+            }
+        }
+
+        fn input() -> Cursor<String> {
+            Cursor::new(format!(
+                "{EXPANSION_PASSPHRASE}
+"
+            ))
+        }
+
+        fn grant(
+            &self,
+            existing: &Path,
+            output: &Path,
+            device: [u8; 16],
+            passphrase: &str,
+        ) -> (Result<(), &'static str>, Vec<u8>) {
+            let args = vec![
+                "grant-device-to-installation".to_owned(),
+                "--owner-kit".to_owned(),
+                self.kit.to_str().unwrap().to_owned(),
+                "--device".to_owned(),
+                format_uuid(&device),
+                "--installation".to_owned(),
+                existing.to_str().unwrap().to_owned(),
+                "--output".to_owned(),
+                output.to_str().unwrap().to_owned(),
+            ];
+            let mut visible = Vec::new();
+            let result = run(
+                &args,
+                &self.root.0.join("unused-bundle"),
+                &mut Cursor::new(format!(
+                    "{passphrase}
+"
+                )),
+                &mut visible,
+            );
+            let text = format!("{result:?}{}", String::from_utf8_lossy(&visible));
+            assert!(!text.contains(passphrase));
+            let set = InstallationCredentialSet::load(&self.existing).unwrap();
+            for credential in set.iter() {
+                assert!(!text.contains(&hex(&credential.device_link_secret())));
+                assert!(!text.contains(&hex(&credential.route_proof_secret())));
+                assert!(!text.contains(&hex(credential.installation_key_der())));
+            }
+            (result, visible)
+        }
+    }
+
+    fn validate_upgrade_command(existing: &Path, candidate: &Path) -> Result<(), &'static str> {
+        run(
+            &[
+                "validate-installation-upgrade".to_owned(),
+                "--existing".to_owned(),
+                existing.to_str().unwrap().to_owned(),
+                "--candidate".to_owned(),
+                candidate.to_str().unwrap().to_owned(),
+            ],
+            Path::new("unused"),
+            &mut Cursor::new(Vec::<u8>::new()),
+            &mut Vec::new(),
+        )
+    }
+
+    // Only generated fixture directories are traversed by this helper.
+    fn fixture_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(
+            root: &Path,
+            directory: &Path,
+            files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect(root, &path, files);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = std::collections::BTreeMap::new();
+        collect(root, root, &mut files);
+        files
+    }
+
+    fn copy_fixture(source: &Path, destination: &Path) {
+        for (relative, bytes) in fixture_files(source) {
+            let path = destination.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn schema3_expansion_command_preserves_every_existing_file_and_rejects_invalid_requests() {
+        let fixture = ExpansionFixture::new();
+        let before = fixture_files(&fixture.existing);
+        let kit_before = fs::read(&fixture.kit).unwrap();
+        let expanded = fixture.root.0.join("expanded-three");
+        assert_eq!(
+            fixture
+                .grant(
+                    &fixture.existing,
+                    &expanded,
+                    fixture.added,
+                    EXPANSION_PASSPHRASE
+                )
+                .0,
+            Ok(())
+        );
+        assert_eq!(
+            validate_upgrade_command(&fixture.existing, &expanded),
+            Ok(())
+        );
+        let after = fixture_files(&expanded);
+        for (name, bytes) in &before {
+            if name != Path::new("installation-v3.json") {
+                assert_eq!(after.get(name), Some(bytes));
+            }
+        }
+        let set = InstallationCredentialSet::load(&expanded).unwrap();
+        assert_eq!(set.len(), 3);
+        assert!(set.get(fixture.added).is_some());
+        assert_eq!(fixture_files(&fixture.existing), before);
+        assert_eq!(fs::read(&fixture.kit).unwrap(), kit_before);
+
+        let output = fixture.root.0.join("must-not-exist");
+        let duplicate = fixture.grant(&expanded, &output, fixture.added, EXPANSION_PASSPHRASE);
+        assert_eq!(
+            duplicate.0,
+            Err("device is already granted to this installation")
+        );
+        assert!(duplicate.1.is_empty());
+        assert!(!output.exists());
+        let wrong_passphrase = fixture.grant(
+            &fixture.existing,
+            &output,
+            fixture.added,
+            "wrong synthetic passphrase",
+        );
+        assert_eq!(
+            wrong_passphrase.0,
+            Err("owner-kit authentication, device grant, or installation match failed")
+        );
+        assert!(wrong_passphrase.1.is_empty());
+        assert!(!output.exists());
+
+        let other_bundle = fixture.root.0.join("other-bundle");
+        complete_bundle(&other_bundle);
+        let other_kit = fixture.root.0.join("other-kit.json");
+        create_owner_kit(
+            &other_bundle,
+            &other_kit,
+            &mut Cursor::new(format!(
+                "{EXPANSION_PASSPHRASE}
+{EXPANSION_PASSPHRASE}
+"
+            )),
+        )
+        .unwrap();
+        let other_installation = fixture.root.0.join("other-installation");
+        issue_installation(
+            &other_kit,
+            &other_installation,
+            &mut ExpansionFixture::input(),
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .grant(
+                    &other_installation,
+                    &output,
+                    fixture.added,
+                    EXPANSION_PASSPHRASE
+                )
+                .0,
+            Err("owner-kit authentication, device grant, or installation match failed")
+        );
+        assert!(!output.exists());
+
+        let malformed = fixture.root.0.join("malformed");
+        copy_fixture(&fixture.existing, &malformed);
+        fs::write(
+            malformed.join("installation-v3.json"),
+            b"{synthetic-private-marker",
+        )
+        .unwrap();
+        assert_eq!(
+            fixture
+                .grant(&malformed, &output, fixture.added, EXPANSION_PASSPHRASE)
+                .0,
+            Err("existing installation credential directory is invalid")
+        );
+        assert!(!output.exists());
+        fs::create_dir(&output).unwrap();
+        assert_eq!(
+            fixture
+                .grant(
+                    &fixture.existing,
+                    &output,
+                    fixture.added,
+                    EXPANSION_PASSPHRASE
+                )
+                .0,
+            Err("expanded installation output already exists")
+        );
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+        fs::write(output.join("sentinel"), b"preserve-me").unwrap();
+        assert!(fixture
+            .grant(
+                &fixture.existing,
+                &output,
+                fixture.added,
+                EXPANSION_PASSPHRASE
+            )
+            .0
+            .is_err());
+        assert_eq!(fs::read(output.join("sentinel")).unwrap(), b"preserve-me");
+        assert!(!fs::read_dir(&fixture.root.0).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".keyferry-installation-v3-")));
+    }
+
+    #[test]
+    fn upgrade_command_rejects_noop_multiple_additions_removed_or_changed_authority() {
+        let fixture = ExpansionFixture::new();
+        let expanded = fixture.root.0.join("expanded-three");
+        fixture
+            .grant(
+                &fixture.existing,
+                &expanded,
+                fixture.added,
+                EXPANSION_PASSPHRASE,
+            )
+            .0
+            .unwrap();
+        assert_eq!(
+            validate_upgrade_command(&fixture.existing, &fixture.existing),
+            Err("candidate installation must add exactly one device grant")
+        );
+        assert_eq!(
+            validate_upgrade_command(&fixture.singleton, &expanded),
+            Err("candidate installation must add exactly one device grant")
+        );
+        assert_eq!(
+            validate_upgrade_command(&expanded, &fixture.existing),
+            Err("candidate installation removes a device grant")
+        );
+
+        // A removed old grant plus two valid additions still has the required count.
+        let fourth = add_owner_device(&fixture.kit, &mut ExpansionFixture::input()).unwrap();
+        let four = fixture.root.0.join("four");
+        fixture
+            .grant(&expanded, &four, fourth, EXPANSION_PASSPHRASE)
+            .0
+            .unwrap();
+        let removed = fixture.root.0.join("removed");
+        copy_fixture(&four, &removed);
+        let old = InstallationCredentialSet::load(&fixture.existing)
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .device_id();
+        let mut manifest: InstallationManifestV3 =
+            serde_json::from_slice(&fs::read(removed.join("installation-v3.json")).unwrap())
+                .unwrap();
+        manifest
+            .devices
+            .retain(|entry| entry.device_id_hex != hex(&old));
+        fs::write(
+            removed.join("installation-v3.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::remove_dir_all(removed.join("devices").join(hex(&old))).unwrap();
+        assert_eq!(
+            validate_upgrade_command(&fixture.existing, &removed),
+            Err("candidate installation removes a device grant")
+        );
+
+        // Raw grant changes, even with an otherwise valid signature, cannot replace old grants.
+        let changed = fixture.root.0.join("changed");
+        copy_fixture(&expanded, &changed);
+        let grant = changed.join("devices").join(hex(&old)).join("grant.json");
+        let original = fs::read(&grant).unwrap();
+        let mut whitespace_changed = original.clone();
+        whitespace_changed.push(b' ');
+        fs::write(&grant, whitespace_changed).unwrap();
+        InstallationCredentialSet::load(&changed).unwrap();
+        assert_eq!(
+            validate_upgrade_command(&fixture.existing, &changed),
+            Err("candidate installation changes existing authority material")
+        );
+        fs::write(&grant, original).unwrap();
+        for relative in [
+            PathBuf::from("desktop-client-cert.der"),
+            PathBuf::from("desktop-server-cert.der"),
+            PathBuf::from("devices")
+                .join(hex(&old))
+                .join("device-link-secret.bin"),
+            PathBuf::from("devices")
+                .join(hex(&old))
+                .join("route-proof-secret.bin"),
+            PathBuf::from("devices")
+                .join(hex(&old))
+                .join("device-server-cert.der"),
+            PathBuf::from("installation-key.der"),
+            PathBuf::from("owner-ca.der"),
+            PathBuf::from("installation-id.bin"),
+            PathBuf::from("installation-spki.der"),
+        ] {
+            let path = changed.join(relative);
+            let original = fs::read(&path).unwrap();
+            let mut changed_bytes = original.clone();
+            changed_bytes[0] ^= 1;
+            fs::write(&path, changed_bytes).unwrap();
+            assert!(validate_upgrade_command(&fixture.existing, &changed).is_err());
+            fs::write(path, original).unwrap();
+        }
+        let other_singleton = fixture.root.0.join("new-computer");
+        issue_installation(
+            &fixture.kit,
+            &other_singleton,
+            &mut ExpansionFixture::input(),
+        )
+        .unwrap_err();
+        let first = InstallationCredentialSet::load(&fixture.singleton)
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .device_id();
+        issue_installation_for_device(
+            &fixture.kit,
+            first,
+            &other_singleton,
+            &mut ExpansionFixture::input(),
+        )
+        .unwrap();
+        let other_two = fixture.root.0.join("new-computer-two");
+        let second = InstallationCredentialSet::load(&fixture.existing)
+            .unwrap()
+            .iter()
+            .find(|credential| credential.device_id() != first)
+            .unwrap()
+            .device_id();
+        fixture
+            .grant(&other_singleton, &other_two, second, EXPANSION_PASSPHRASE)
+            .0
+            .unwrap();
+        let other_three = fixture.root.0.join("new-computer-three");
+        fixture
+            .grant(
+                &other_two,
+                &other_three,
+                fixture.added,
+                EXPANSION_PASSPHRASE,
+            )
+            .0
+            .unwrap();
+        assert_eq!(
+            validate_upgrade_command(&fixture.existing, &other_three),
+            Err("candidate installation changes existing authority material")
+        );
+    }
+
+    #[test]
+    fn expansion_at_eight_devices_fails_explicitly_without_output() {
+        let fixture = ExpansionFixture::new();
+        let mut existing = fixture.existing.clone();
+        let mut device = fixture.added;
+        for count in 3..=keyferry_gateway::MAX_INSTALLATION_DEVICES {
+            let next = fixture.root.0.join(format!("generation-{count}"));
+            fixture
+                .grant(&existing, &next, device, EXPANSION_PASSPHRASE)
+                .0
+                .unwrap();
+            assert_eq!(InstallationCredentialSet::load(&next).unwrap().len(), count);
+            existing = next;
+            if count < keyferry_gateway::MAX_INSTALLATION_DEVICES {
+                device = add_owner_device(&fixture.kit, &mut ExpansionFixture::input()).unwrap();
+            }
+        }
+        let output = fixture.root.0.join("over-limit");
+        assert_eq!(
+            fixture
+                .grant(&existing, &output, [0x91; 16], EXPANSION_PASSPHRASE)
+                .0,
+            Err("installation device limit of eight would be exceeded")
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn exclusive_installation_publish_refuses_an_output_created_after_staging() {
+        let root = TestRoot::new();
+        fs::create_dir_all(&root.0).unwrap();
+        let source = root.0.join("stage");
+        let destination = root.0.join("output");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("synthetic"), b"staged").unwrap();
+        fs::create_dir(&destination).unwrap();
+        assert!(publish_new_installation(&source, &destination).is_err());
+        assert!(source.join("synthetic").exists());
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        fs::remove_dir(&destination).unwrap();
+        publish_new_installation(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(destination.join("synthetic")).unwrap(), b"staged");
     }
 
     #[test]

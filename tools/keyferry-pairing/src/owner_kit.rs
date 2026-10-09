@@ -1,8 +1,8 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use keyferry_gateway::{
     derive_device_link_secret, derive_route_proof_secret, device_gateway_name,
-    installation_gateway_name, installation_id_for_spki, DeviceGrantV1, InstallationCredentials,
-    InstallationDeviceV3, InstallationManifestV3,
+    installation_gateway_name, installation_id_for_spki, DeviceGrantV1, InstallationCredentialSet,
+    InstallationDeviceV3, InstallationManifestV3, MAX_INSTALLATION_DEVICES,
 };
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
@@ -25,7 +25,7 @@ const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 12;
 const OWNER_KIT_AAD: &[u8] = b"keyferry/owner-kit-envelope/v2";
 const OWNER_KIT_AAD_V3: &[u8] = b"keyferry/owner-kit-envelope/v3";
-const MAX_OWNER_DEVICES: usize = 8;
+const MAX_OWNER_DEVICES: usize = MAX_INSTALLATION_DEVICES;
 const MAX_OWNER_KIT_BYTES: usize = 16 * 1024;
 const MAX_CERTIFICATE_BYTES: usize = 1024;
 const MAX_PASSPHRASE_BYTES: usize = 1024;
@@ -172,7 +172,7 @@ pub struct IssuedDeviceGrantV1 {
     pub device_server_certificate_der: Vec<u8>,
     pub device_link_secret: [u8; 32],
     pub route_proof_secret: [u8; 32],
-    pub grant: DeviceGrantV1,
+    pub grant_json: Vec<u8>,
 }
 
 pub(super) struct DeviceOwnerAuthority {
@@ -554,43 +554,84 @@ fn issue_installation_for_authority(
 pub fn expand_installation_with_device(
     owner_kit: &[u8],
     passphrase: &[u8],
-    existing: &InstallationCredentials,
+    credentials: &InstallationCredentialSet,
     new_device_id: [u8; 16],
 ) -> Result<ExpandedInstallationV3, OwnerKitError> {
-    if new_device_id == existing.device_id() {
+    if credentials.get(new_device_id).is_some() || credentials.len() >= MAX_INSTALLATION_DEVICES {
         return Err(OwnerKitError::InvalidAuthority);
     }
-    let old_authority = select_authority(owner_kit, passphrase, Some(existing.device_id()))?;
-    let new_authority = select_authority(owner_kit, passphrase, Some(new_device_id))?;
-    if old_authority.owner_id != existing.owner_id()
-        || new_authority.owner_id != existing.owner_id()
-        || old_authority.owner_ca_der != existing.owner_ca_der()
-        || new_authority.owner_ca_der != existing.owner_ca_der()
-        || old_authority.owner_ca_key_der.as_slice() != new_authority.owner_ca_key_der.as_slice()
-    {
-        return Err(OwnerKitError::InvalidAuthority);
-    }
-
-    let old_link_secret = derive_device_link_secret(
-        &old_authority.device_recovery_secret,
-        &old_authority.owner_id,
-        &old_authority.device_id,
-        old_authority.authority_epoch,
-        existing.installation_spki_der(),
-    )
-    .map_err(|_| OwnerKitError::CryptoFailed)?;
-    let old_route_secret = derive_route_proof_secret(
-        &old_authority.device_recovery_secret,
-        &old_authority.owner_id,
-        &old_authority.device_id,
-        old_authority.authority_epoch,
-        &existing.installation_id(),
-    )
-    .map_err(|_| OwnerKitError::CryptoFailed)?;
-    if old_link_secret != existing.device_link_secret()
-        || old_route_secret != existing.route_proof_secret()
-    {
-        return Err(OwnerKitError::InvalidAuthority);
+    let existing = credentials
+        .iter()
+        .next()
+        .ok_or(OwnerKitError::InvalidAuthority)?;
+    let (schema_version, plaintext) = decrypt_payload(owner_kit, passphrase)?;
+    let new_authority =
+        select_decrypted_authority(schema_version, &plaintext, Some(new_device_id))?;
+    let mut devices = Vec::with_capacity(credentials.len() + 1);
+    for previous in credentials.iter() {
+        let old_authority =
+            select_decrypted_authority(schema_version, &plaintext, Some(previous.device_id()))?;
+        if old_authority.owner_id != previous.owner_id()
+            || new_authority.owner_id != previous.owner_id()
+            || old_authority.owner_ca_der != previous.owner_ca_der()
+            || new_authority.owner_ca_der != previous.owner_ca_der()
+            || old_authority.owner_ca_key_der.as_slice()
+                != new_authority.owner_ca_key_der.as_slice()
+        {
+            return Err(OwnerKitError::InvalidAuthority);
+        }
+        let old_link_secret = derive_device_link_secret(
+            &old_authority.device_recovery_secret,
+            &old_authority.owner_id,
+            &old_authority.device_id,
+            old_authority.authority_epoch,
+            previous.installation_spki_der(),
+        )
+        .map_err(|_| OwnerKitError::CryptoFailed)?;
+        let old_route_secret = derive_route_proof_secret(
+            &old_authority.device_recovery_secret,
+            &old_authority.owner_id,
+            &old_authority.device_id,
+            old_authority.authority_epoch,
+            &previous.installation_id(),
+        )
+        .map_err(|_| OwnerKitError::CryptoFailed)?;
+        if old_link_secret != previous.device_link_secret()
+            || old_route_secret != previous.route_proof_secret()
+        {
+            return Err(OwnerKitError::InvalidAuthority);
+        }
+        let grant_json = if let Some(bytes) = previous.device_grant_json() {
+            let grant: DeviceGrantV1 =
+                serde_json::from_slice(bytes).map_err(|_| OwnerKitError::InvalidAuthority)?;
+            if grant.authority_epoch != old_authority.authority_epoch {
+                return Err(OwnerKitError::InvalidAuthority);
+            }
+            bytes.to_vec()
+        } else {
+            let grant = DeviceGrantV1::sign(
+                old_authority.owner_ca_key_der.as_slice(),
+                previous.owner_id(),
+                previous.owner_ca_der(),
+                previous.device_id(),
+                old_authority.authority_epoch,
+                previous.installation_id(),
+                previous.installation_spki_der(),
+                previous.device_server_certificate_der(),
+                &old_link_secret,
+                &old_route_secret,
+            )
+            .map_err(|_| OwnerKitError::CryptoFailed)?;
+            encode_grant(&grant)?
+        };
+        devices.push(IssuedDeviceGrantV1 {
+            device_id: previous.device_id(),
+            authority_epoch: old_authority.authority_epoch,
+            device_server_certificate_der: previous.device_server_certificate_der().to_vec(),
+            device_link_secret: old_link_secret,
+            route_proof_secret: old_route_secret,
+            grant_json,
+        });
     }
 
     let ca_key = KeyPair::try_from(new_authority.owner_ca_key_der.as_slice())
@@ -628,19 +669,6 @@ pub fn expand_installation_with_device(
     )
     .map_err(|_| OwnerKitError::CryptoFailed)?;
 
-    let old_grant = DeviceGrantV1::sign(
-        old_authority.owner_ca_key_der.as_slice(),
-        existing.owner_id(),
-        existing.owner_ca_der(),
-        existing.device_id(),
-        old_authority.authority_epoch,
-        existing.installation_id(),
-        existing.installation_spki_der(),
-        existing.device_server_certificate_der(),
-        &old_link_secret,
-        &old_route_secret,
-    )
-    .map_err(|_| OwnerKitError::CryptoFailed)?;
     let new_grant = DeviceGrantV1::sign(
         new_authority.owner_ca_key_der.as_slice(),
         existing.owner_id(),
@@ -655,24 +683,14 @@ pub fn expand_installation_with_device(
     )
     .map_err(|_| OwnerKitError::CryptoFailed)?;
 
-    let mut devices = vec![
-        IssuedDeviceGrantV1 {
-            device_id: existing.device_id(),
-            authority_epoch: old_authority.authority_epoch,
-            device_server_certificate_der: existing.device_server_certificate_der().to_vec(),
-            device_link_secret: old_link_secret,
-            route_proof_secret: old_route_secret,
-            grant: old_grant,
-        },
-        IssuedDeviceGrantV1 {
-            device_id: new_device_id,
-            authority_epoch: new_authority.authority_epoch,
-            device_server_certificate_der: new_certificate,
-            device_link_secret: new_link_secret,
-            route_proof_secret: new_route_secret,
-            grant: new_grant,
-        },
-    ];
+    devices.push(IssuedDeviceGrantV1 {
+        device_id: new_device_id,
+        authority_epoch: new_authority.authority_epoch,
+        device_server_certificate_der: new_certificate,
+        device_link_secret: new_link_secret,
+        route_proof_secret: new_route_secret,
+        grant_json: encode_grant(&new_grant)?,
+    });
     devices.sort_unstable_by_key(|device| device.device_id);
     let manifest = InstallationManifestV3 {
         schema_version: OWNER_KIT_SCHEMA_VERSION_V3,
@@ -699,16 +717,30 @@ pub fn expand_installation_with_device(
     })
 }
 
+fn encode_grant(grant: &DeviceGrantV1) -> Result<Vec<u8>, OwnerKitError> {
+    let mut bytes = serde_json::to_vec_pretty(grant).map_err(|_| OwnerKitError::EncodingFailed)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 fn select_authority(
     owner_kit: &[u8],
     passphrase: &[u8],
     requested_device: Option<[u8; 16]>,
 ) -> Result<SelectedOwnerAuthority, OwnerKitError> {
     let (schema_version, plaintext) = decrypt_payload(owner_kit, passphrase)?;
+    select_decrypted_authority(schema_version, &plaintext, requested_device)
+}
+
+fn select_decrypted_authority(
+    schema_version: u8,
+    plaintext: &[u8],
+    requested_device: Option<[u8; 16]>,
+) -> Result<SelectedOwnerAuthority, OwnerKitError> {
     let (owner_id_hex, owner_ca_key_der_hex, owner_ca_der_hex, selected) = match schema_version {
         OWNER_KIT_SCHEMA_VERSION => {
             let authority: OwnerKitPlaintext =
-                serde_json::from_slice(&plaintext).map_err(|_| OwnerKitError::InvalidAuthority)?;
+                serde_json::from_slice(plaintext).map_err(|_| OwnerKitError::InvalidAuthority)?;
             validate_plaintext_authority(&authority)?;
             let device_id = parse_hex_array::<16>(&authority.device_id_hex)?;
             if requested_device.is_some_and(|requested| requested != device_id) {
@@ -727,7 +759,7 @@ fn select_authority(
         }
         OWNER_KIT_SCHEMA_VERSION_V3 => {
             let authority: OwnerKitPlaintextV3 =
-                serde_json::from_slice(&plaintext).map_err(|_| OwnerKitError::InvalidAuthority)?;
+                serde_json::from_slice(plaintext).map_err(|_| OwnerKitError::InvalidAuthority)?;
             validate_plaintext_authority_v3(&authority)?;
             let requested = requested_device.ok_or(OwnerKitError::InvalidAuthority)?;
             let selected = authority

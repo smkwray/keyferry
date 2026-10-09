@@ -2785,6 +2785,7 @@ dependencies = [
  "keyferry-gateway",
  "keyferry-local-management",
  "keyferry-protocol",
+ "libc",
  "rcgen",
  "ring",
  "serde",

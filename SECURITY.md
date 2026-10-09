@@ -278,3 +278,18 @@ Keep reports private until the owner decides otherwise. A report should include 
 hardware revision, reproduction steps, expected boundary, observed result, and whether unauthorized
 input or secret exposure occurred. Never include real Wi-Fi, link, TLS, recovery, or dictated content
 in a report.
+
+## Installation grant expansion
+
+Adding a device is an offline, owner-kit-authenticated operation. A controller generation has at
+most eight devices. The helper checks every existing device against the unlocked owner authority,
+preserves the computer key and identity, and retains schema-3 grant bytes (including signatures).
+A duplicate device, mismatched authority, malformed generation, or full generation fails without
+publishing credentials. The passphrase remains bounded stdin input and is never echoed in errors.
+
+The installer accepts a different credential generation only through the shared upgrade validator:
+exactly one additional device, unchanged computer identity and unchanged existing grant/secret bytes.
+A no-op, multiple additions, removal, replacement or re-signing of an existing grant is rejected.
+A fully validated private temporary directory is published by atomic non-replacing rename; an
+existing destination, including an empty directory, cannot be overwritten. No hard links are used.
+Expansion does not activate a device, change firmware, contact a controller or close a physical gate.
