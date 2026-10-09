@@ -82,7 +82,22 @@ def save(path, value):
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    if os.name == "nt":
+        # Match the pairing helper's durable Windows publication semantics.
+        # A possible-write record must survive the rename before flash starts.
+        import ctypes
+        move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+        move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        move.restype = ctypes.c_int
+        if not move(str(temporary.resolve()), str(path.resolve()), 0x1 | 0x8):
+            raise Stop("STATE_PUBLISH_FAILED")
+    else:
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def module(path, name):
@@ -389,6 +404,7 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
     state = load(state_path) if state_path.exists() else {
         "schema": "keyferry.provision-receipt.v1", "board_profile": profile["id"],
         "dry_run": dry_run, "status": "PREPARE_PENDING"}
+    approval_hash = digest(json.dumps(approval, sort_keys=True, separators=(",", ":")).encode())
     if state["dry_run"] is not dry_run or state["board_profile"] != profile["id"]:
         raise Stop("RUN_MODE_MISMATCH")
     def record(**fields):
@@ -396,6 +412,7 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
         save(state_path, state)
     rom = None
     try:
+        record(approval_sha256=approval_hash)
         prepare = run / "prepare/prepared.json"
         if not prepare.exists():
             if state.get("prepare_possible"):
