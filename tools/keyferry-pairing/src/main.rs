@@ -8,6 +8,7 @@ use keyferry_local_management::{
     generate_operation_id, hid::HidTransport, Client as LocalClient, Error as LocalError,
 };
 use keyferry_protocol::{
+    capability,
     local_management::{ReceiptStatus, StatusPage},
     local_management_operation as local_operation, local_management_status as local_status,
     local_management_status_page as local_status_page, output_mode,
@@ -745,6 +746,22 @@ fn local_probe_value(
     })
 }
 
+fn wifi_diagnostic_value(
+    device: &StatusPage,
+    read: impl FnOnce() -> Result<StatusPage, LocalError>,
+) -> Result<serde_json::Value, &'static str> {
+    let StatusPage::Device(device) = device else {
+        return Err("local device status has wrong page");
+    };
+    if device.capabilities & capability::WIFI_REJECT_DIAGNOSTICS_V1 == 0 {
+        return Ok(serde_json::Value::Null);
+    }
+    match read() {
+        Ok(page @ StatusPage::WifiDiagnostic(_)) => local_status_value(page),
+        _ => Err("local Wi-Fi diagnostic status failed"),
+    }
+}
+
 fn local_status_with(
     device_id: [u8; 16],
     recovery_secret: &[u8; 32],
@@ -772,13 +789,11 @@ fn local_status_with(
     let receipt = client
         .status(local_status_page::LAST_RECEIPT)
         .map_err(|_| "local receipt status failed")?;
-    // Older firmware explicitly reports UNSUPPORTED. Other failures remain
-    // errors; absence must never be manufactured from a broken exchange.
-    let wifi_diagnostic = match client.status(local_status_page::WIFI_DIAGNOSTIC) {
-        Ok(page) => local_status_value(page)?,
-        Err(LocalError::DeviceRejected(local_status::UNSUPPORTED)) => serde_json::Value::Null,
-        Err(_) => return Err("local Wi-Fi diagnostic status failed"),
-    };
+    // Never send a new page to older firmware, which rejects it as BAD_REPORT.
+    // Once advertised, missing or malformed diagnostic data is an error.
+    let wifi_diagnostic = wifi_diagnostic_value(&device, || {
+        client.status(local_status_page::WIFI_DIAGNOSTIC)
+    })?;
     let document = serde_json::json!({
         "schema": "keyferry.local-status.v1",
         "wifi_diagnostic": wifi_diagnostic,
@@ -3460,6 +3475,38 @@ mod tests {
             local_operation::CLEAR_BLE_BOND_AND_ENROLL
         );
         assert!(parse_local_recovery_action("type-text").is_err());
+    }
+
+    #[test]
+    fn wifi_diagnostic_requires_advertised_capability_and_errors_remain_errors() {
+        let device = |capabilities| {
+            StatusPage::Device(keyferry_protocol::local_management::DeviceStatus {
+                active_output_mode: output_mode::USB_HID,
+                stored_output_mode: output_mode::USB_HID,
+                board_compatibility_id: 1,
+                release: *b"0.2.0-fi",
+                capabilities,
+            })
+        };
+        assert_eq!(
+            wifi_diagnostic_value(&device(capability::LOCAL_MANAGEMENT_V1), || {
+                panic!("old firmware must not receive a new status page")
+            }),
+            Ok(serde_json::Value::Null)
+        );
+        for rejection in [local_status::BAD_REPORT, local_status::UNSUPPORTED] {
+            assert!(wifi_diagnostic_value(
+                &device(capability::WIFI_REJECT_DIAGNOSTICS_V1),
+                || Err(LocalError::DeviceRejected(rejection))
+            )
+            .is_err());
+        }
+        assert!(
+            wifi_diagnostic_value(&device(capability::WIFI_REJECT_DIAGNOSTICS_V1), || Ok(
+                device(0)
+            ))
+            .is_err()
+        );
     }
 
     #[test]

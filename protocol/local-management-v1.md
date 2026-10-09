@@ -182,9 +182,12 @@ staged data and releases the lease. If a mutation may have executed, its result 
 ## Wi-Fi reject diagnostic extension
 
 `WIFI_DIAGNOSTIC` (`0x0A`) is an authenticated read-only status page. Existing
-pages and envelope bytes remain unchanged. Older firmware returns `UNSUPPORTED`;
-the host reports `wifi_diagnostic: null` only for that explicit response. Other
-errors fail the read. New firmware returns one 16-byte schema-1 payload:
+pages and envelope bytes remain unchanged. The USB challenge and authenticated
+`DEVICE` page advertise `WIFI_REJECT_DIAGNOSTICS_V1` (`0x00000080`) when supported.
+This bit is USB-local; the network firmware-identity capability mask is unchanged.
+Without the bit the host skips this page and reports `wifi_diagnostic: null`.
+With the bit any rejection, missing page, or malformed data fails the read.
+New firmware returns one 16-byte schema-1 payload:
 
 | Bytes | Field |
 | ---: | --- |

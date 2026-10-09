@@ -352,6 +352,7 @@ enum class Capability : std::uint32_t {
   kMultiWifi = 0x00000010,
   kBluetoothGatt = 0x00000020,
   kFirmwareIdentityV1 = 0x00000040,
+  kWifiRejectDiagnosticsV1 = 0x00000080,
   kMouseRelativeV1 = 0x00010000,
   kConsumerKeysReserved = 0x00020000,
   kRemoteWakeReserved = 0x00040000,

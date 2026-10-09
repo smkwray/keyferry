@@ -654,6 +654,8 @@ capabilities:
     bit: 0x00000020
   - name: FIRMWARE_IDENTITY_V1
     bit: 0x00000040
+  - name: WIFI_REJECT_DIAGNOSTICS_V1
+    bit: 0x00000080
   - name: MOUSE_RELATIVE_V1
     bit: 0x00010000
   - name: CONSUMER_KEYS_RESERVED

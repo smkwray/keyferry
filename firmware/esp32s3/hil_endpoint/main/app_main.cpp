@@ -3062,7 +3062,9 @@ extern "C" void app_main() {
       local_session.emplace(
           provisioning_device_id, provisioning_key,
           static_cast<std::uint32_t>(
-              keyferry::protocol::Capability::kLocalManagementV1),
+              keyferry::protocol::Capability::kLocalManagementV1) |
+              static_cast<std::uint32_t>(
+                  keyferry::protocol::Capability::kWifiRejectDiagnosticsV1),
           provisioning_effects, *local_coordinator);
       local_management_ready = true;
     }
@@ -3076,7 +3078,9 @@ extern "C" void app_main() {
     std::copy_n(firmware_identity.release.begin(), metadata.release.size(),
                 metadata.release.begin());
     metadata.capabilities =
-        keyferry::endpoint::FirmwareCapabilityMask(firmware_identity);
+        keyferry::endpoint::FirmwareCapabilityMask(firmware_identity) |
+        static_cast<std::uint32_t>(
+            keyferry::protocol::Capability::kWifiRejectDiagnosticsV1);
     metadata.policy_sequence =
         config_context.boot.roaming.anchor.policy_sequence;
     metadata.receipts = &local_receipts;

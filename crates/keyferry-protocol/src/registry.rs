@@ -388,6 +388,7 @@ pub mod capability {
     pub const MULTI_WIFI: u32 = 0x00000010;
     pub const BLUETOOTH_GATT: u32 = 0x00000020;
     pub const FIRMWARE_IDENTITY_V1: u32 = 0x00000040;
+    pub const WIFI_REJECT_DIAGNOSTICS_V1: u32 = 0x00000080;
     pub const MOUSE_RELATIVE_V1: u32 = 0x00010000;
     pub const CONSUMER_KEYS_RESERVED: u32 = 0x00020000;
     pub const REMOTE_WAKE_RESERVED: u32 = 0x00040000;
