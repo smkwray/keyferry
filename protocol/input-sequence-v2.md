@@ -15,6 +15,14 @@ Only usages 1..3 are public. Consumer AC Pan is a relative pointer axis; no
 Consumer Control or System Control reports are declared. The non-boot IF2
 **drops the pre-OS BIOS boot mouse**; the boot keyboard remains.
 
+AtomS3 Lite uses the same IF0/IF1/IF2, reports, capability and shared executor,
+with no IF3/MSC, PSRAM or file handoff. Its board build defaults to extended
+pointer and rejects a legacy-pointer or MSC configuration. Its USB-HID PID is
+0x4004, bcdDevice 0x0102; Waveshare remains 0x4008 with MSC. Atom first install
+uses the board's 3 MiB factory slot at 0x10000 after exact-unit recovery proof;
+the Waveshare app-only procedure below does not apply to Atom. Static resource
+fit does not close Atom runtime TLS heap, USB attach or target-input gates.
+
 The existing personality PID is retained, with bcdDevice 0x0101 -> 0x0102.
 No public PID allocation is requested by this lane. Microsoft's USB flags key
 includes VID, PID and revision, and revision participates in hardware IDs:
