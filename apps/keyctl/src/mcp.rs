@@ -1,6 +1,6 @@
 //! Newline-delimited JSON-RPC MCP over stdio only. stdout is exclusively protocol.
 use super::{
-    frames::{self, Capture, Frame, FrameSource, Region},
+    frames::{self, Frame, FrameSource, Region},
     geometry::{self, Geometry},
     ocr::{self, NativeOcr, Ocr},
 };
@@ -19,11 +19,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "daemon_frames.rs"]
+mod daemon_frames;
+use daemon_frames::{automatic_device, DaemonFrames};
+
 const MAX_MESSAGE: usize = 65_536;
 const FRAME_WAIT: Duration = Duration::from_secs(20);
-const HELP: &str = "keyctl mcp --device UUID [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
+const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
 
-fn options(args: &[String]) -> Result<(String, Option<String>), &'static str> {
+fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
     if !args.len().is_multiple_of(2) {
         return Err("input.usage");
     }
@@ -35,8 +39,9 @@ fn options(args: &[String]) -> Result<(String, Option<String>), &'static str> {
             _ => return Err("input.usage"),
         }
     }
-    let device = device.ok_or("input.device_required")?;
-    uuid::Uuid::parse_str(&device).map_err(|_| "input.device_uuid")?;
+    if let Some(device) = &device {
+        uuid::Uuid::parse_str(device).map_err(|_| "input.device_uuid")?;
+    }
     Ok((device, source))
 }
 
@@ -66,12 +71,12 @@ pub(super) fn run(args: &[String], url: &str, token_file: &Path) -> u8 {
         return 25;
     }
     let mut server = Server::new(
-        device,
+        device.unwrap_or_default(),
         source,
         url,
         token_file,
         super::state_root().join("capture-geometry"),
-        Capture::start,
+        |source| DaemonFrames::new(source, url, token_file),
         NativeOcr,
     );
     let active = Arc::new(Mutex::new(None::<Value>));
@@ -153,12 +158,12 @@ pub(super) fn calibrate_cli(args: &[String], url: &str, token: &Path) -> u8 {
         return 25;
     }
     let mut server = Server::new(
-        device,
+        device.unwrap_or_default(),
         source,
         url,
         token,
         super::state_root().join("capture-geometry"),
-        Capture::start,
+        |source| DaemonFrames::new(source, url, token),
         NativeOcr,
     );
     match server.calibrate(&interrupted) {
@@ -222,6 +227,10 @@ fn rpc_error(id: Value, code: i32, message: &str) -> Value {
 }
 fn failure(code: &str) -> Value {
     json!({"code":code,"message": match code {
+        "device.select_required" => "Select a device using list_devices and select_device; no unambiguous authenticated device is available.",
+        "capture.no_source_anywhere" => "No capture source is available on this controller or an authenticated owner peer. Connect a capture card and check list_capture_sources for discovery errors.",
+        "capture.peer_offline" => "The selected capture peer is offline or its fresh device proof failed. Check controller connectivity; no input was sent.",
+        "capture.select_required" => "Select a capture source using list_capture_sources and select_capture_source; no unambiguous source is available.",
         "calibration.cursor_not_seen" => "Cursor not seen: capture may show a different machine. Check HDMI main-display mirroring and a static harmless target.",
         "pointer.capability_required" => "Device lacks POINTER_EXTENDED_V1; keyboard tools remain available.",
         "pointer.calibration_required" => "Calibrate this capture/device binding first, or explicitly pass uncalibrated:true for full-frame linear mapping.",
@@ -271,6 +280,34 @@ fn tools() -> Vec<Value> {
     add("find_text","Local OCR line boxes in screenshot pixels, optional case-insensitive substring query. No persistence/logging; Windows only.",json!({"query":{"type":"string","maxLength":256}}),&[],true);
     add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Use a static harmless target. Persists only geometry.",json!({}),&[],false);
     add("status","Authenticated device/armed state, pointer capability, capture restart status and current/persisted geometry binding.",json!({}),&[],true);
+    add(
+        "list_devices",
+        "List authorized sticks and authenticated routes.",
+        json!({}),
+        &[],
+        true,
+    );
+    add(
+        "select_device",
+        "Choose an exact authenticated stick; clears calibration.",
+        json!({"device":{"type":"string","minLength":36,"maxLength":36}}),
+        &["device"],
+        true,
+    );
+    add(
+        "list_capture_sources",
+        "List local and authenticated owner-controller capture sources.",
+        json!({}),
+        &[],
+        true,
+    );
+    add(
+        "select_capture_source",
+        "Choose an exact capture source; clears calibration.",
+        json!({"source":{"type":"string","minLength":1,"maxLength":1100}}),
+        &["source"],
+        true,
+    );
     result
 }
 
@@ -337,6 +374,7 @@ fn validate(value: &Value, schema: &Value) -> bool {
 
 struct Server<F: FrameSource, O: Ocr> {
     device: String,
+    device_choice: &'static str,
     source: Option<String>,
     url: String,
     token: PathBuf,
@@ -364,6 +402,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     ) -> Self {
         Self {
             frames: create(source.clone()),
+            device_choice: if device.is_empty() {
+                "unselected"
+            } else {
+                "explicit"
+            },
             device,
             source,
             url: url.into(),
@@ -453,7 +496,44 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             super::load_token(&self.token).map_err(|_| failure("daemon.token_unavailable"))?;
         Ok(super::Client { endpoint, token })
     }
+    fn devices(&self) -> Result<Value, Value> {
+        let response = self
+            .client()?
+            .request("GET", "/v1/devices", None)
+            .map_err(|_| failure("daemon.unavailable"))?;
+        serde_json::from_str(&response).map_err(|_| failure("protocol.invalid_response"))
+    }
+    fn choose_device(&mut self) -> Result<(), Value> {
+        if self.device.is_empty() || self.device_choice.starts_with("automatic") {
+            let inventory = self.devices()?;
+            let chosen = automatic_device(&inventory)?;
+            if self.device.is_empty() {
+                if let Some((id, why)) = chosen {
+                    self.device = id;
+                    self.device_choice = why;
+                }
+            } else if chosen.as_ref().is_none_or(|(id, _)| id != &self.device) {
+                self.device.clear();
+                self.device_choice = "unselected";
+                self.clear_binding();
+                return Err(failure("device.select_required"));
+            }
+        }
+        if self.device.is_empty() {
+            return Err(failure("device.select_required"));
+        }
+        Ok(())
+    }
+    fn clear_binding(&mut self) {
+        self.geometry = None;
+        self.bound_generation = None;
+        self.screenshot_geometry = None;
+        self.loaded = false;
+    }
     fn device_status(&self) -> Result<Value, Value> {
+        if self.device.is_empty() {
+            return Err(failure("device.select_required"));
+        }
         let response = self
             .client()?
             .request("GET", &format!("/v1/devices/{}", self.device), None)
@@ -559,7 +639,45 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             .map_err(failure)
     }
     fn call(&mut self, name: &str, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
+        match name {
+            "list_devices" => return self.devices().map(|v| tool_result(v, false)),
+            "select_device" => {
+                let inventory = self.devices()?;
+                let id = args["device"].as_str().unwrap_or("");
+                if !inventory["devices"].as_array().is_some_and(|a| {
+                    a.iter()
+                        .any(|d| d["id"] == id && d["link"] == "authenticated")
+                }) {
+                    return Err(failure("device.not_authenticated_or_authorized"));
+                }
+                self.device = id.into();
+                self.device_choice = "selected";
+                self.clear_binding();
+                return Ok(tool_result(
+                    json!({"device":self.device,"selection":self.device_choice}),
+                    false,
+                ));
+            }
+            "list_capture_sources" => {
+                return self
+                    .frames
+                    .sources()
+                    .map(|v| tool_result(v, false))
+                    .map_err(failure)
+            }
+            "select_capture_source" => {
+                let source = args["source"].as_str().unwrap_or("");
+                self.frames.select(source).map_err(failure)?;
+                self.source = Some(source.into());
+                self.clear_binding();
+                return Ok(tool_result(self.frames.status(), false));
+            }
+            _ => {}
+        }
+        let selection = self.choose_device();
+        self.frames.device(&self.device);
         if name == "status" {
+            let source_error = self.frames.resolve().err();
             let capture = self.frames.status();
             if !capture["error"].is_null()
                 || capture["generation"]
@@ -571,10 +689,24 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             }
             let device = self.device_status();
             return Ok(tool_result(
-                json!({"device":device.as_ref().ok(),"device_error":device.as_ref().err(),"capture":self.frames.status(),
-                "binding_verified_this_session":self.bound_generation.is_some(),"geometry":self.geometry,"ocr":if cfg!(windows){"windows-native"}else{"unsupported"}}),
+                json!({"selected_device":if self.device.is_empty(){None}else{Some(&self.device)},"device_selection":self.device_choice,"selection_error":selection.err(),
+                "device":device.as_ref().ok(),"device_error":device.as_ref().err(),"capture":self.frames.status(),"capture_selection_error":source_error,
+                "binding_verified_this_session":self.bound_generation.is_some(),"geometry":self.geometry,"ocr":self.frames.status().get("ocr").cloned().unwrap_or_else(||json!(if cfg!(windows){"windows-native"}else{"unsupported"}))}),
                 false,
             ));
+        }
+        if [
+            "calibrate",
+            "move",
+            "click",
+            "drag",
+            "scroll",
+            "type_text",
+            "key",
+        ]
+        .contains(&name)
+        {
+            selection?;
         }
         if name == "calibrate" {
             return self.calibrate(cancelled).map(|v| tool_result(v, false));
@@ -601,6 +733,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                 .submission(vec![action], false, cancelled)
                 .map(|v| tool_result(v, false));
         }
+        self.frames.request_ocr(name == "find_text");
         let frame = self.frame(cancelled)?;
         if name == "screenshot" {
             let png = frame.png().map_err(failure)?;
@@ -633,7 +766,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
         if name == "find_text" {
             let boxes = ocr::filter(
-                self.ocr.recognize(&frame).map_err(failure)?,
+                match self.frames.ocr_result() {
+                    Some(boxes) => boxes,
+                    None => self.ocr.recognize(&frame).map_err(failure)?,
+                },
                 args["query"].as_str(),
             );
             self.screenshot_geometry =
@@ -785,6 +921,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
     }
     fn calibrate(&mut self, cancelled: &AtomicBool) -> Result<Value, Value> {
+        self.choose_device()?;
+        self.frames.device(&self.device);
         self.bound_generation = None;
         self.geometry = None;
         self.loaded = true;

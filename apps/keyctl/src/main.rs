@@ -1,10 +1,8 @@
 #![forbid(unsafe_code)]
 
-mod capture;
-mod frames;
+use keyferry_capture::{capture, frames, ocr};
 mod geometry;
 mod mcp;
-mod ocr;
 mod recipe;
 
 use keyferry_core::TransportDiagnostic;
@@ -98,9 +96,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args[0] == "mcp" {
+        SERVICE_OPEN_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::run(&args[1..], &url, &token_file));
     }
     if args[0] == "capture" && args.get(1).is_some_and(|s| s == "calibrate") {
+        SERVICE_OPEN_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::calibrate_cli(&args[2..], &url, &token_file));
     }
     if args[0] == "capture" {
@@ -954,6 +954,11 @@ impl Client {
         body: Option<&str>,
     ) -> Result<HttpResponse, ClientError> {
         let mut stream = self.connect()?;
+        if path == "/v1/capture/sources" {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(25)))
+                .map_err(|error| ClientError(error.to_string()))?;
+        }
         if path.ends_with("/file") || path.ends_with("/files") {
             stream
                 .set_read_timeout(Some(Duration::from_secs(150)))
@@ -1067,9 +1072,13 @@ struct HttpResponse {
 fn read_response(stream: &mut TcpStream) -> Result<HttpResponse, ClientError> {
     let headers = read_headers(stream)?;
     let mut body = Vec::new();
-    stream
+    Read::by_ref(stream)
+        .take(8 * 1024 * 1024 + 1)
         .read_to_end(&mut body)
         .map_err(|error| ClientError(format!("cannot read response: {error}")))?;
+    if body.len() > 8 * 1024 * 1024 {
+        return Err(ClientError("daemon response exceeds size limit".into()));
+    }
     let body = if headers.chunked {
         decode_chunked(&body)?
     } else {
@@ -1230,7 +1239,7 @@ fn default_recipe_dir() -> PathBuf {
 }
 
 fn help_text() -> &'static str {
-    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  mcp --device UUID [--source NAME_OR_ID]  (stdio agent KVM tools; mcp --help)\n  capture calibrate DEVICE [--source NAME_OR_ID]  (cursor binding and geometry; moves pointer)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
+    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  mcp [--device UUID] [--source NAME_OR_ID]  (stdio agent KVM tools; mcp --help)\n  capture calibrate DEVICE [--source NAME_OR_ID]  (cursor binding and geometry; moves pointer)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
 }
 
 fn run_local_helper(args: &[String]) -> u8 {

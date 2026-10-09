@@ -2,8 +2,8 @@
 use super::frames::Frame;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Serialize)]
-pub(super) struct TextBox {
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub struct TextBox {
     pub text: String,
     pub x: f64,
     pub y: f64,
@@ -11,11 +11,11 @@ pub(super) struct TextBox {
     pub height: f64,
 }
 
-pub(super) trait Ocr {
+pub trait Ocr {
     fn recognize(&mut self, frame: &Frame) -> Result<Vec<TextBox>, &'static str>;
 }
 
-pub(super) struct NativeOcr;
+pub struct NativeOcr;
 
 impl Ocr for NativeOcr {
     fn recognize(&mut self, frame: &Frame) -> Result<Vec<TextBox>, &'static str> {
@@ -86,7 +86,7 @@ fn recognize(frame: &Frame) -> Result<Vec<TextBox>, &'static str> {
     work().map_err(|_| "ocr.engine_unavailable")
 }
 
-pub(super) fn filter(boxes: Vec<TextBox>, query: Option<&str>) -> Vec<TextBox> {
+pub fn filter(boxes: Vec<TextBox>, query: Option<&str>) -> Vec<TextBox> {
     let query = query.map(str::to_lowercase);
     boxes
         .into_iter()

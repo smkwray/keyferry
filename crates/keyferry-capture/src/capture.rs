@@ -55,14 +55,14 @@ impl Backend {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-struct Device {
-    name: String,
-    id: String,
+pub struct Device {
+    pub name: String,
+    pub id: String,
 }
 
 #[derive(Debug)]
-struct Error {
-    code: &'static str,
+pub struct Error {
+    pub code: &'static str,
     message: &'static str,
     candidates: Vec<Device>,
 }
@@ -334,7 +334,7 @@ fn bounded_output(
 
 /// Windows PATH launchers may spawn the real encoder as a grandchild holding both pipes.
 /// Stop this owned child's entire tree before joining readers; never use a process name.
-pub(super) fn stop_child(child: &mut Child) {
+pub fn stop_child(child: &mut Child) {
     #[cfg(windows)]
     {
         let _ = Command::new("taskkill")
@@ -473,7 +473,7 @@ fn list_error() -> Error {
     Error::new("capture.list_failed", "Cannot enumerate video devices; check ffmpeg's platform backend and device/Camera permissions.")
 }
 
-fn select_source<'a>(devices: &'a [Device], source: Option<&str>) -> Result<&'a Device, Error> {
+pub fn select_source<'a>(devices: &'a [Device], source: Option<&str>) -> Result<&'a Device, Error> {
     let matches: Vec<_> = devices
         .iter()
         .filter(|device| {
@@ -628,9 +628,7 @@ fn signal(rgb: &[u8]) -> (&'static str, f64) {
 
 /// Enumerate and probe in memory, then return arguments for one continuous raw RGB pipe.
 /// The probe bounds the native geometry; showinfo detects a later input-mode change.
-pub(super) fn stream_setup(
-    source: Option<&str>,
-) -> Result<(String, u32, u32, Vec<String>), &'static str> {
+pub fn stream_setup(source: Option<&str>) -> Result<(String, u32, u32, Vec<String>), &'static str> {
     let backend = Backend::current();
     let devices = list(backend, &|| Command::new("ffmpeg"), TIMEOUT).map_err(|e| e.code)?;
     let device = select_source(&devices, source).map_err(|e| e.code)?;
@@ -685,3 +683,11 @@ pub(super) fn stream_setup(
 #[cfg(test)]
 #[path = "capture_tests.rs"]
 mod tests;
+
+/// Local inventory; only recognized HDMI capture devices auto-select.
+pub fn devices() -> Result<Vec<Device>, &'static str> {
+    list(Backend::current(), &|| Command::new("ffmpeg"), TIMEOUT).map_err(|e| e.code)
+}
+pub fn recognized(device: &Device) -> bool {
+    select_source(std::slice::from_ref(device), None).is_ok()
+}
