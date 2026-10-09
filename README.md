@@ -171,6 +171,9 @@ It is installed next to the app:
 keyctl devices                                  # list sticks; use one whose link is "authenticated"
 keyctl status DEVICE                            # read one stick's state, firmware and connection
 keyctl capabilities                             # read the controller's supported API features
+keyctl capture list                             # list local HDMI/UVC video sources (no daemon)
+keyctl capture frame --out screen.png            # capture one PNG to a new private path
+keyctl input-sequence --describe                 # supported pointer/keyboard actions and bounds
 keyctl stream DEVICE --input message.txt        # type a UTF-8 file of any length
 keyctl file DEVICE path/to/message.txt           # publish bytes as KEYFERRY/MESSAGE.TXT
 keyctl files DEVICE path/to/a.txt path/to/b.txt   # replace the drive with named files (v2 firmware)
@@ -259,6 +262,61 @@ A hotkey pressed in order:
 `chord` presses its keys together in one report; `ordered_chord` presses them one after another.
 Both end with every key released. Key names are the registry names from `keyctl keys` or its
 aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_`/`RIGHT_` forms.
+
+### Agent screen control
+
+Connect the target's HDMI output to a USB HDMI/UVC capture dongle on the controller host.
+`keyctl capture list` returns video source names and platform IDs as JSON. Install
+[FFmpeg](https://ffmpeg.org/download.html) on PATH; capture uses its
+[dshow, avfoundation or v4l2 backend](https://ffmpeg.org/ffmpeg-devices.html).
+On macOS, grant Camera permission to the terminal/app in System Settings → Privacy & Security.
+Default selection requires one recognized capture device; unknown or ambiguous sources require
+`--source NAME_OR_ID` from the list. Listing does not probe capture modes or include supported sizes.
+
+The loop is **capture → inspect/decide → input once → capture to verify**:
+
+```text
+keyctl capture frame --out before.png --source "Hagibis" --size 1920x1080
+keyctl devices
+keyctl status DEVICE
+keyctl input-sequence --describe
+keyctl input-sequence --validate --input action.json
+keyctl input-sequence DEVICE --input action.json
+keyctl capture frame --out after.png --source "Hagibis" --size 1920x1080
+```
+
+Every input needs the exact authenticated, idle/disarmed device; the daemon arms it for that command.
+Current firmware supports `move_relative` (`dx_counts`/`dy_counts`, each −4096…4096), clicks on
+`button_1`/`button_2`, and `text`/`tap`/`chord`/`ordered_chord`. Counts undergo target OS acceleration
+and are not pixels. To home the pointer, deliberately send several large negative moves toward the
+top-left, capture to confirm the corner, then use small moves with capture verification:
+
+```json
+{"schema":"keyferry.input-sequence.v1","arm":"command-scoped","start_within_ms":5000,
+ "actions":[{"type":"repeat","count":4,"actions":[
+   {"type":"move_relative","dx_counts":-4096,"dy_counts":-4096}]}]}
+```
+
+This is a requested sequence of separate moves, not a retry; multiple displays or target pointer
+settings can defeat homing. A small follow-up can use
+`{"type":"move_relative","dx_counts":20,"dy_counts":10}` and
+`{"type":"click","button":"button_1"}`. Mixed keyboard actions additionally require
+`keyboard_profile:"windows-us"`; `keyboard_timing` can override the default. Validate locally.
+After the absolute-pointer image and host support are qualified, `move_absolute` will use
+`x_px`/`y_px` with `frame_w`/`frame_h` from the full target frame. Check the installed CLI description
+and firmware capabilities before using it; this capture addition does not activate that support.
+Never automatically resend input: missing responses or possible-start losses are **UNKNOWN**.
+`EMITTED` proves USB emission; the next capture verifies the visible target result.
+
+Frames may show secrets. Capture writes one PNG **only to `--out`**, refuses existing paths, keeps
+intermediate pixels in memory, and sends no image, statistics or capture path to the daemon.
+Delete frames privately after inspection. `--size WxH` selects the input mode; optional
+`--scale WxH` reduces output size (each dimension 1…4096); translate coordinates back to the full
+frame before absolute input. The JSON `keyferry.capture-frame.v1` reports path, source, output
+width/height, host UTC `captured_at`, `signal` and mean Rec.709 luma (0…255). Near-uniform black/blue
+is `no-signal`; this heuristic can also label a blank real screen and cannot prove HDMI sync.
+Each FFmpeg invocation is bounded to 15 seconds and killed on timeout, without retry or temp frames.
+`capture --help` lists JSON error/exit conventions; `no-signal` itself is successful capture (exit 0).
 
 ### Mac targets
 
