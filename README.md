@@ -265,46 +265,52 @@ aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_
 
 ### Agent screen control
 
-`keyctl mcp --device UUID [--source CAPTURE]` exposes a
+`keyctl mcp` exposes a
 [stdio MCP server](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-with newline-delimited JSON-RPC, initialization, tool discovery, PNG image content and structured
-results. It creates no network listener and never opens/restarts the controller app. Start the
-installed controller normally; input uses its existing token and sole daemon command writer.
-Global `--url` and `--token-file` options select an existing daemon. Screenshots and local OCR work
-with an absent device/daemon. Install FFmpeg on PATH and select a source from `keyctl capture list`.
+with newline-delimited JSON-RPC, tool discovery, PNG images and structured results. It creates no
+listener and never opens/restarts the controller app. Start the installed controller normally;
+input uses its existing token and sole daemon command writer. Install FFmpeg on the controllers
+with capture cards and grant Camera permission on macOS.
 
-Replace the all-zero example UUID with the authenticated UUID from `keyctl devices`, and `CAPTURE`
-with the exact source name/ID. Keep device-specific client configuration private. Put the updated
-`keyctl` on PATH, or use its installed executable path.
+Register through the synced **keyferry skill's `keyferry-mcp` launcher and `/relink`**. The launcher
+resolves the installed CLI on the current computer and runs `keyctl mcp` with no arguments;
+explicit extra arguments pass through. Registration needs no device UUID, capture card name or
+per-device executable path. Rebuild and reinstall the updated packages on every controller,
+then run `/relink` to synchronize agent registration. Keep any explicit overrides private.
 
-[Claude Code](https://code.claude.com/docs/en/mcp), command form:
+With no `--device`, the server selects the single authenticated authorized stick, including one
+held by another owner controller over the tailnet. A unique authenticated `POINTER_EXTENDED_V1`
+stick is preferred when other keyboard-only sticks are present. Ambiguity never selects by list
+position: call `list_devices` and `select_device`. Action tools require a selected device.
+With no `--source`, use the single recognized local HDMI capture device; if none is local,
+use the single recognized remote source. Multiple candidates require `list_capture_sources` and
+`select_capture_source`. `status` reports the exact selections and whether each was automatic,
+an argument override, or a selection tool. `--device UUID` and `--source NAME_OR_ID` remain available;
+global `--url` and `--token-file` select the existing loopback daemon.
 
-```sh
-claude mcp add --transport stdio --scope local keyferry -- keyctl mcp --device 00000000-0000-0000-0000-000000000000 --source CAPTURE
-```
+The controller with the capture card owns one continuous FFmpeg stream per selected card, shared
+by local and remote clients. Remote frames and OCR travel through the existing owner-mTLS tailnet
+API. Eyes and hands may be on different controllers: both ends reprove the configured stick at
+its actual holder, and the capture peer serves its own frames directly. There is no frame relay
+chain or new listener. Capture source IDs include the authenticated controller installation;
+calibration binds that source to the exact stick, even when input and capture are remote.
 
-Equivalent `.mcp.json` (requires the client's project trust/approval):
+The read-only HTTP capture API is:
 
-```json
-{
-  "mcpServers": {
-    "keyferry": {
-      "type": "stdio",
-      "command": "keyctl",
-      "args": ["mcp", "--device", "00000000-0000-0000-0000-000000000000", "--source", "CAPTURE"]
-    }
-  }
-}
-```
+| Route | Listener | Response |
+| --- | --- | --- |
+| `GET /v1/capture/sources` | loopback bearer | local and authenticated peer inventories; local/peer discovery errors |
+| `POST /v1/capture/frame` | loopback bearer | local latest frame or one direct owner-mTLS peer read |
+| `GET /v1/devices/{id}/capture/sources` | existing owner-mTLS | that controller's local capture inventory only |
+| `POST /v1/devices/{id}/capture/frame` | existing owner-mTLS + fresh device proof | that controller's latest frame and optional native OCR |
 
-[Codex](https://developers.openai.com/codex/mcp/), user `config.toml`:
-
-```toml
-[mcp_servers.keyferry]
-command = "keyctl"
-args = ["mcp", "--device", "00000000-0000-0000-0000-000000000000", "--source", "CAPTURE"]
-tool_timeout_sec = 180
-```
+Frame JSON requests require `device` and `source`; optional `after`/`epoch` wait for a fresh serial
+within the same daemon epoch, `region` crops screenshot pixels, `max_width` scales to 2..1280 pixels,
+and `ocr:true` returns OCR boxes from that exact frame. Responses include base64 PNG, dimensions,
+native dimensions, region, serial, daemon epoch, generation, frame age and capture status. Frames
+are memory-only, PNG is bounded to 5 MiB and response JSON to 7 MiB. A service admits one read at a
+time, at most ten frame requests/second and four capture streams. MCP uses full-frame geometry;
+direct API callers must account for region/scale before driving a pointer.
 
 First call `status`, then `calibrate` on a static, harmless approved target, then take a fresh
 `screenshot` before pointer input. The target HDMI output must be its only display or mirror the main
@@ -338,9 +344,11 @@ accepts the risk of driving a different target or a cropped/scaled display.
 | `key` | `keys` (1..14 names/aliases) | tap or balanced chord through the `keyctl keys` table |
 | `wait_for_stable` | `timeout_ms` (1..30000); optional `region` | matched after at least 3 fresh frames below 0.002 mean normalized RGB difference for 300 ms; otherwise timed_out |
 | `wait_for_change` | same | matched above 0.01 mean difference from the initial frame; otherwise timed_out |
-| `find_text` | optional `query` | local OCR line boxes in screenshot pixels, case-insensitive substring filter |
+| `find_text` | optional `query` | capture-controller OCR line boxes in screenshot pixels, case-insensitive substring filter |
 | `calibrate` | none | verified binding, mapping and probe receipts; persists geometry only |
-| `status` | none | authenticated/armed device state, capability mask, capture errors/restarts and binding |
+| `status` | none | chosen device/source, selection reasons, authenticated state, capture errors/restarts and binding |
+| `list_devices` / `select_device` | none / exact `device` UUID | authorized inventory / choose authenticated stick and clear binding |
+| `list_capture_sources` / `select_capture_source` | none / exact `source` ID | local/remote inventory / choose capture source and clear binding |
 
 A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame. Positive `dy` is
 wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject
@@ -357,14 +365,16 @@ behavior. MCP cancellation reaches the existing daemon cancellation mechanism.
 One continuous ffmpeg rawvideo pipe retains the latest RGB frame, scaled proportionally to at most
 1280 pixels on each axis. Comparison frames are bounded and memory-only. Capture faults clear the
 latest frame, report an explicit error and restart after backoff; counters remain visible. A stalled
-stream is a capture error, not a stable screen. Capture children stop on server exit.
+stream is a capture error, not a stable screen. Capture children belong to the daemon and stop
+when its capture service is dropped.
 `keyctl capture frame --out PATH` retains its independent one-shot behavior.
 
 Screens and OCR may contain secrets. They are never logged or written except to an explicit
 `screenshot.save_path` or CLI `--out`; clients receive the content and may retain conversations.
-Windows OCR uses local Windows.Media.Ocr language packs, no cloud recognizer or downloaded model.
-macOS Vision and Linux OCR are explicitly unsupported. Black/blue no-signal frames remain valid
-screenshots and may be stable; they are not target proof. Exact firmware/OS physical gates remain
+OCR runs on the capture controller and uses its local Windows.Media.Ocr language packs, with no
+cloud recognizer or downloaded model. A macOS or Linux agent can use OCR from a Windows capture
+controller. Capture controllers on macOS/Linux report `ocr.unsupported_platform` explicitly.
+Black/blue no-signal frames remain valid screenshots and may be stable; they are not target proof. Exact firmware/OS physical gates remain
 OPEN until the hardware window qualifies them.
 
 The original one-shot CLI loop is also available:

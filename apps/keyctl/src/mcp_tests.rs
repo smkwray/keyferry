@@ -166,7 +166,7 @@ fn dispatch_lifecycle_schema_and_duplicate_id_no_replay() {
             &c,
         )
         .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 16);
     for tool in tools() {
         assert!(
             validate(&json!({}), &tool["inputSchema"])
@@ -570,4 +570,80 @@ fn windows_native_ocr_synthetic_smoke() {
     assert!(result
         .iter()
         .any(|b| b.text.to_lowercase().contains("keyferry test")));
+}
+
+#[test]
+fn no_argument_options_and_unselected_action_errors_are_clear() {
+    assert_eq!(options(&[]).unwrap(), (None, None));
+    assert_eq!(
+        options(&["--source".into(), "HDMI".into()]).unwrap(),
+        (None, Some("HDMI".into()))
+    );
+    assert!(options(&["--device".into(), "invalid".into()]).is_err());
+    let mut s = server();
+    s.device.clear();
+    init(&mut s);
+    // Absent daemon/token is visible; it never becomes permission to pick a device.
+    let status = s
+        .call("status", &json!({}), &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(status["structuredContent"]["selected_device"], Value::Null);
+    for name in ["type_text", "key", "click", "calibrate"] {
+        let e = s
+            .call(
+                name,
+                &json!({"text":"PRIVATE","keys":["A"],"x":1,"y":2}),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+        assert!(!e.to_string().contains("PRIVATE"));
+    }
+    let listed = tools();
+    for name in [
+        "list_devices",
+        "select_device",
+        "list_capture_sources",
+        "select_capture_source",
+    ] {
+        assert!(listed.iter().any(|t| t["name"] == name));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_status_and_selection_use_the_production_device_inventory() {
+    let (mut server, _, _, task) = harness(vec![], true).await;
+    tokio::task::spawn_blocking(move || {
+        server.device.clear();
+        server.device_choice = "unselected";
+        let c = AtomicBool::new(false);
+        let status = server.call("status", &json!({}), &c).unwrap();
+        assert_eq!(
+            status["structuredContent"]["selected_device"],
+            SIMULATOR_DEVICE_ID
+        );
+        assert_eq!(
+            status["structuredContent"]["device_selection"],
+            "automatic-single"
+        );
+        let listed = server.call("list_devices", &json!({}), &c).unwrap();
+        assert_eq!(
+            listed["structuredContent"]["devices"][0]["id"],
+            SIMULATOR_DEVICE_ID
+        );
+        let selected = server
+            .call("select_device", &json!({"device":SIMULATOR_DEVICE_ID}), &c)
+            .unwrap();
+        assert_eq!(selected["structuredContent"]["selection"], "selected");
+        assert!(server
+            .call(
+                "select_device",
+                &json!({"device":"00000000-0000-0000-0000-000000000000"}),
+                &c
+            )
+            .is_err());
+        std::fs::remove_dir_all(&server.root).unwrap();
+    })
+    .await
+    .unwrap();
+    task.abort();
 }
