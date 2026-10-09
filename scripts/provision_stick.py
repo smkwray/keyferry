@@ -255,7 +255,7 @@ class Tools:
         self.command([self.helper, "validate-installation", "--input", self.settings["installation_directory"]])
         expected = Path(os.environ["LOCALAPPDATA"]) / "keyferry/installation"
         if Path(self.settings["installation_directory"]).resolve() != expected.resolve():
-            raise Stop("example-host_INSTALLED_IDENTITY_REQUIRED")
+            raise Stop("CONTROLLER_INSTALLED_IDENTITY_REQUIRED")
         # Version/help check is offline; no private input is read by help.
         result = subprocess.run([self.helper, "--help"], capture_output=True, timeout=10)
         if result.returncode or b"prepare-stick" not in result.stdout:
@@ -272,7 +272,7 @@ class Tools:
 
     def prepare(self, run):
         self.command([self.hushrun, "run", "--deliver", "stdin-line", "--label",
-                      "owner-kit passphrase - mint new Keyferry stick and authorize example-host",
+                      "owner-kit passphrase - mint new Keyferry stick and authorize this controller",
                       "--cwd", ROOT, "--", self.helper, "prepare-stick", "--owner-kit",
                       self.settings["owner_kit"], "--installation", self.settings["installation_directory"],
                       "--network-bundle", self.settings["network_bundle"], "--output", run / "prepare"],
@@ -417,7 +417,7 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
         if not prepare.exists():
             if state.get("prepare_possible"):
                 raise Stop("PREPARATION_UNKNOWN_INSPECT_HUSHRUN_AND_STAGED_KIT")
-            emit("PREPARE: one masked owner-kit prompt; mint identity and expand example-host grant")
+            emit("PREPARE: one masked owner-kit prompt; mint identity and expand this controller's grant")
             record(prepare_possible=True)
             tools.prepare(run)
             # The Hushrun adapter may have recorded its request while waiting.
@@ -444,7 +444,7 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
         if not state.get("controller_applied"):
             if state.get("apply_possible"):
                 raise Stop("INSTALL_UNKNOWN_RECONCILE_INSTALLED_GENERATION")
-            emit("CONTROLLER: Apply expanded credentials; example-host holder restarts once before flashing")
+            emit("CONTROLLER: Apply expanded credentials; local holder restarts once before flashing")
             record(apply_possible=True)
             tools.apply(run)
             record(controller_applied=True)
@@ -550,7 +550,7 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
         if inventory is None:
             raise Stop("AUTHENTICATED_INVENTORY_TIMEOUT")
         record(inventory=inventory, status="READY", hardware_gate="OPEN")
-        emit(f"READY: {device} on example-host (disarmed)" + (" [DRY RUN]" if dry_run else ""))
+        emit(f"READY: {device} on this controller (disarmed)" + (" [DRY RUN]" if dry_run else ""))
         return state
     except Exception as error:
         state.update(load(state_path))
