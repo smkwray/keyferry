@@ -265,6 +265,110 @@ aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_
 
 ### Agent screen control
 
+`keyctl mcp --device UUID [--source CAPTURE]` exposes a
+[stdio MCP server](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+with newline-delimited JSON-RPC, initialization, tool discovery, PNG image content and structured
+results. It creates no network listener and never opens/restarts the controller app. Start the
+installed controller normally; input uses its existing token and sole daemon command writer.
+Global `--url` and `--token-file` options select an existing daemon. Screenshots and local OCR work
+with an absent device/daemon. Install FFmpeg on PATH and select a source from `keyctl capture list`.
+
+Replace the all-zero example UUID with the authenticated UUID from `keyctl devices`, and `CAPTURE`
+with the exact source name/ID. Keep device-specific client configuration private. Put the updated
+`keyctl` on PATH, or use its installed executable path.
+
+[Claude Code](https://code.claude.com/docs/en/mcp), command form:
+
+```sh
+claude mcp add --transport stdio --scope local keyferry -- keyctl mcp --device 00000000-0000-0000-0000-000000000000 --source CAPTURE
+```
+
+Equivalent `.mcp.json` (requires the client's project trust/approval):
+
+```json
+{
+  "mcpServers": {
+    "keyferry": {
+      "type": "stdio",
+      "command": "keyctl",
+      "args": ["mcp", "--device", "00000000-0000-0000-0000-000000000000", "--source", "CAPTURE"]
+    }
+  }
+}
+```
+
+[Codex](https://developers.openai.com/codex/mcp/), user `config.toml`:
+
+```toml
+[mcp_servers.keyferry]
+command = "keyctl"
+args = ["mcp", "--device", "00000000-0000-0000-0000-000000000000", "--source", "CAPTURE"]
+tool_timeout_sec = 180
+```
+
+First call `status`, then `calibrate` on a static, harmless approved target, then take a fresh
+`screenshot` before pointer input. The target HDMI output must be its only display or mirror the main
+display. Calibration sends eight absolute pointer probes (no clicks), isolates the cursor in
+three-frame differences, fits independent affine axes and verifies another position. It handles
+letterbox/pillarbox, scaling and modest overscan. Animation, ambiguous/missing cursor, rotated axes or
+excessive residuals fail explicitly. "Cursor not seen: capture may show a different machine" is a
+binding failure. Calibration is observational, not cryptographic proof of machine identity.
+
+Only geometry is persisted per device UUID and resolved capture source in `capture-geometry` under
+the user's Keyferry state directory. Persisted geometry is inspectable; each new session must reprove
+binding. Resolution changes or capture restarts invalidate binding and require a fresh screenshot.
+Recalibrate after any HDMI/display arrangement or stick/target change, even at the same resolution.
+Coordinates are **screenshot pixels**, mapped to normalized HID and rounded to 0..32767 by the existing
+compiler; points outside the measured active rectangle reject. The equivalent CLI is
+`keyctl capture calibrate DEVICE [--source CAPTURE]`.
+
+Pointer tools refuse devices without authenticated `POINTER_EXTENDED_V1` (0x08000000); keyboard tools
+remain available. Explicit per-call `uncalibrated:true` bypasses binding and uses full-frame linear
+mapping, flagged in results. It still requires the capability and a fresh screenshot. This override
+accepts the risk of driving a different target or a cropped/scaled display.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `screenshot` | optional `save_path` (new file only) | PNG image, screenshot/native geometry, frame ID/age and capture status |
+| `move` | integer `x,y`; optional `uncalibrated` | absolute move receipt |
+| `click` | `x,y`; optional `button` = left/right/middle, `double`, `uncalibrated` | move then single/double click receipt |
+| `drag` | `from_x,from_y,to_x,to_y`; optional `button`, `uncalibrated` | balanced atomic drag, 40 ms hold |
+| `scroll` | `x,y,dx,dy`; optional `uncalibrated` | integer detents, each -127..127, not both zero |
+| `type_text` | `text` (1..4096 supported ASCII characters) | ordinary US-mapped text; unsupported characters reject |
+| `key` | `keys` (1..14 names/aliases) | tap or balanced chord through the `keyctl keys` table |
+| `wait_for_stable` | `timeout_ms` (1..30000); optional `region` | matched after at least 3 fresh frames below 0.002 mean normalized RGB difference for 300 ms; otherwise timed_out |
+| `wait_for_change` | same | matched above 0.01 mean difference from the initial frame; otherwise timed_out |
+| `find_text` | optional `query` | local OCR line boxes in screenshot pixels, case-insensitive substring filter |
+| `calibrate` | none | verified binding, mapping and probe receipts; persists geometry only |
+| `status` | none | authenticated/armed device state, capability mask, capture errors/restarts and binding |
+
+A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame. Positive `dy` is
+wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject
+unknown fields, null optionals and invalid ranges. Keyboard actions use the existing alias table and
+reject unsupported ASCII controls. Ordinary text only: **secrets stay in the owner-only secure-text
+dialog**; no MCP tool exposes that dialog or its content.
+
+Every action submits once through `/input-sequences` with existing authentication, command-scoped
+arm, admission and release guarantees. No cross-call held button, alternate writer or input retry
+exists. Failed/possible-start UNKNOWN results return `isError:true` with command IDs and evidence.
+Inspect/reconcile uncertain outcomes; never replay them. `EMITTED` proves emission, not visible target
+behavior. MCP cancellation reaches the existing daemon cancellation mechanism.
+
+One continuous ffmpeg rawvideo pipe retains the latest RGB frame, scaled proportionally to at most
+1280 pixels on each axis. Comparison frames are bounded and memory-only. Capture faults clear the
+latest frame, report an explicit error and restart after backoff; counters remain visible. A stalled
+stream is a capture error, not a stable screen. Capture children stop on server exit.
+`keyctl capture frame --out PATH` retains its independent one-shot behavior.
+
+Screens and OCR may contain secrets. They are never logged or written except to an explicit
+`screenshot.save_path` or CLI `--out`; clients receive the content and may retain conversations.
+Windows OCR uses local Windows.Media.Ocr language packs, no cloud recognizer or downloaded model.
+macOS Vision and Linux OCR are explicitly unsupported. Black/blue no-signal frames remain valid
+screenshots and may be stable; they are not target proof. Exact firmware/OS physical gates remain
+OPEN until the hardware window qualifies them.
+
+The original one-shot CLI loop is also available:
+
 Connect the target's HDMI output to a USB HDMI/UVC capture dongle on the controller host.
 `keyctl capture list` returns video source names and platform IDs as JSON. Install
 [FFmpeg](https://ffmpeg.org/download.html) on PATH; capture uses its
@@ -286,27 +390,13 @@ keyctl capture frame --out after.png --source "Hagibis" --size 1920x1080
 ```
 
 Every input needs the exact authenticated, idle/disarmed device; the daemon arms it for that command.
-Current firmware supports `move_relative` (`dx_counts`/`dy_counts`, each −4096…4096), clicks on
-`button_1`/`button_2`, and `text`/`tap`/`chord`/`ordered_chord`. Counts undergo target OS acceleration
-and are not pixels. To home the pointer, deliberately send several large negative moves toward the
-top-left, capture to confirm the corner, then use small moves with capture verification:
-
-```json
-{"schema":"keyferry.input-sequence.v1","arm":"command-scoped","start_within_ms":5000,
- "actions":[{"type":"repeat","count":4,"actions":[
-   {"type":"move_relative","dx_counts":-4096,"dy_counts":-4096}]}]}
-```
-
-This is a requested sequence of separate moves, not a retry; multiple displays or target pointer
-settings can defeat homing. A small follow-up can use
-`{"type":"move_relative","dx_counts":20,"dy_counts":10}` and
-`{"type":"click","button":"button_1"}`. Mixed keyboard actions additionally require
-`keyboard_profile:"windows-us"`; `keyboard_timing` can override the default. Validate locally.
-After the absolute-pointer image and host support are qualified, `move_absolute` will use
-`x_px`/`y_px` with `frame_w`/`frame_h` from the full target frame. Check the installed CLI description
-and firmware capabilities before using it; this capture addition does not activate that support.
+Input Sequence v2 uses absolute positions, wheel/pan and balanced drag on devices with
+POINTER_EXTENDED_V1. Older images retain v1 relative-count motion, which undergoes target OS
+acceleration and cannot be interpreted as pixels. Mixed keyboard actions require
+`keyboard_profile:"windows-us"`; validate locally. Inspect the installed CLI
+`input-sequence --describe` and authenticated firmware capabilities.
 Never automatically resend input: missing responses or possible-start losses are **UNKNOWN**.
-`EMITTED` proves USB emission; the next capture verifies the visible target result.
+`EMITTED` proves emission; a subsequent capture verifies the visible target result.
 
 Frames may show secrets. Capture writes one PNG **only to `--out`**, refuses existing paths, keeps
 intermediate pixels in memory, and sends no image, statistics or capture path to the daemon.
