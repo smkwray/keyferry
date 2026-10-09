@@ -104,6 +104,27 @@ phrases, or a general-purpose secret vault on the dongle.
    after possible start. Trust boundary: the loopback bearer now carries that installation's
    owner-mTLS authority for its configured devices across the tailnet, which only a holder of the
    installation credential could exercise before.
+   The owner-mTLS API additionally serves controller-local capture inventory and frames at
+   `/v1/devices/{id}/capture/sources` and `/capture/frame`. Local clients use the existing loopback
+   bearer at `/v1/capture/sources` and `/v1/capture/frame`. Legacy remote bearers cannot reach these
+   routes. Discovery inventory is authenticated metadata, never permission to read a frame.
+   Every remote frame request repeats fresh device proof. If the capture peer holds the stick,
+   the caller proves that exact peer and the server checks its existing caller-bound route lease.
+   When capture and holder differ, the requesting controller proves its own device grant through
+   the actual holder (or has its own live local session), and the capture controller independently
+   proves its own grant through that holder on every read. Peer authentication remains owner-mTLS;
+   no caller credential or frame request is relayed. This explicitly grants non-revoked owner
+   controllers access to a configured device's controller capture sources, rather than treating
+   tailnet membership as screen authority. Calibration must separately demonstrate that the source
+   shows the machine driven by the stick; device proof alone cannot establish that visual binding.
+   Sources are opaque discovered IDs, never caller-supplied network addresses. Frame bodies and OCR
+   text stay in memory; no events, logs, histories, or automatic disk writes contain them. Responses
+   bound both axes to 1280 pixels by default, PNG to 5 MiB and JSON to 7 MiB. Request bodies are
+   bounded to 4 KiB; each capture service admits one in-flight read, at most ten frame reads/second
+   and four camera streams. Discovery is cached for ten seconds and remote discovery waits at most
+   four seconds. Missing sources, stale frames, invalid sizes and offline peers fail explicitly.
+   Region/scale and OCR are read-only; they never arm, send HID or weaken input admission. Owner
+   clients can retain screens/OCR after receipt, including in agent conversations.
 6. **USB administration:** nonce-bound HMAC under a random 256-bit administrative recovery secret.
 7. **Execution safety:** one active host sequence and one bounded endpoint chunk, one writer,
    daemon-atomic route-proof/command-scoped-arm/first-command ordering, cancellation between reports,
@@ -240,7 +261,7 @@ clipboard, or ask the human to enter the secret in chat, stdin, or arguments.
 Only a deliberate human confirmation and Send once can submit one command-scoped keyboard sequence.
 The destination cannot be changed inside the prompt. The exact device must report an authenticated,
 idle, disarmed keyboard route initially and immediately before submission. Text is restricted to
-1–256 printable ASCII bytes with no normalization; Enter is optional and off initially. Expiry and
+1â€“256 printable ASCII bytes with no normalization; Enter is optional and off initially. Expiry and
 pre-submission cancellation clear the editor without a POST. After submission, cancellation uses the
 existing exact-command route once; uncertain results are UNKNOWN and the sequence is never replayed.
 Responses are reduced to correlated IDs and fixed outcome text; reflected peer messages/errors

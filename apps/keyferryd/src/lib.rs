@@ -54,6 +54,7 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
 
 mod ble;
+mod capture;
 mod discovery;
 mod forward;
 mod tailnet;
@@ -1959,6 +1960,8 @@ struct DaemonInner {
     owner_installation: Mutex<Option<InstallationTlsSecretStore>>,
     owner_control_listener: Mutex<OwnerControlListenerState>,
     forwarder: std::sync::OnceLock<Arc<forward::Forwarder>>,
+    capture: Arc<Mutex<capture::Service>>,
+    capture_admission: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2250,6 +2253,8 @@ impl Daemon {
             owner_installation: Mutex::new(None),
             owner_control_listener: Mutex::new(OwnerControlListenerState::default()),
             forwarder: std::sync::OnceLock::new(),
+            capture: Arc::new(Mutex::new(capture::Service::default())),
+            capture_admission: Arc::new(tokio::sync::Semaphore::new(1)),
         }));
         for (runtime, transport, work_rx) in pending {
             let weak_daemon = Arc::downgrade(&daemon.0);
@@ -2373,6 +2378,7 @@ impl Daemon {
 
     pub fn router(&self) -> Router {
         Self::base_routes()
+            .merge(capture::local_routes())
             .route(
                 "/v1/devices/{id}/maintenance/begin",
                 post(begin_maintenance),
@@ -2501,6 +2507,8 @@ impl Daemon {
             local_token: self.token().to_owned(),
         };
         Self::base_routes()
+            .merge(capture::local_routes())
+            .merge(capture::peer_routes())
             .route("/v2/devices/{id}/route-proof", get(route_proof))
             .route(
                 "/v2/devices/{id}/gateway/handoffs",
@@ -4670,6 +4678,15 @@ impl Daemon {
         let _ = time::timeout(grace, async {
             while closing.join_next().await.is_some() {}
         })
+        .await;
+        self.0.capture_admission.close();
+        let capture = self.0.capture.clone();
+        let _ = time::timeout(
+            grace,
+            tokio::task::spawn_blocking(move || {
+                capture.lock().expect("capture service").stop();
+            }),
+        )
         .await;
     }
 

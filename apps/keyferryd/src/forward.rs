@@ -243,6 +243,8 @@ enum Proven {
     Refused(Response),
 }
 
+type CaptureInventory = Option<(Instant, Vec<Value>, Vec<Value>)>;
+
 pub(crate) struct Forwarder {
     installation_id: [u8; 16],
     credentials: HashMap<String, InstallationTlsSecretStore>,
@@ -250,6 +252,8 @@ pub(crate) struct Forwarder {
     peers: Box<dyn PeerSource>,
     state: Mutex<ForwardState>,
     refresh: tokio::sync::Mutex<()>,
+    captures: Mutex<HashMap<String, (Route, String)>>,
+    capture_inventory: tokio::sync::Mutex<CaptureInventory>,
 }
 
 impl Forwarder {
@@ -284,7 +288,168 @@ impl Forwarder {
             peers,
             state: Mutex::new(ForwardState::default()),
             refresh: tokio::sync::Mutex::new(()),
+            captures: Mutex::new(HashMap::new()),
+            capture_inventory: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// Capture discovery never trusts the plaintext hint: inventory must arrive over owner-mTLS.
+    pub(crate) async fn capture_sources(self: &Arc<Self>) -> (Vec<Value>, Vec<Value>) {
+        let mut inventory = self.capture_inventory.lock().await;
+        if let Some((at, sources, errors)) = &*inventory {
+            if at.elapsed() < DISCOVERY_INTERVAL {
+                return (sources.clone(), errors.clone());
+            }
+        }
+        let started = Instant::now();
+        let mut tasks = JoinSet::new();
+        for peer in self.peers.peers().await.into_iter().take(MAX_TAILNET_PEERS) {
+            let this = self.clone();
+            tasks.spawn(async move {
+                let installation_id = probe_candidate(&peer).await?;
+                if installation_id == this.installation_id {
+                    return None;
+                }
+                let route = Route {
+                    installation_id,
+                    control: SocketAddr::new(peer.address, peer.control_port),
+                    name: peer.name.as_deref().map(display_name),
+                };
+                // Devices are sorted only to make inventory deterministic, never to choose input.
+                let mut devices = this.credentials.keys().cloned().collect::<Vec<_>>();
+                devices.sort();
+                for device in devices {
+                    let path = format!("/v1/devices/{device}/capture/sources");
+                    if let OwnerExchange::Response {
+                        status: 200, body, ..
+                    } = this
+                        .exchange(&route, "GET", &path, None, CONTROL_TIMEOUT)
+                        .await
+                    {
+                        let value: Value = serde_json::from_slice(&body).ok()?;
+                        return Some((route, value));
+                    }
+                }
+                None
+            });
+        }
+        let mut sources = Vec::new();
+        let mut errors = Vec::new();
+        while let Ok(Some(result)) = time::timeout(
+            STATUS_WAIT.saturating_sub(started.elapsed()),
+            tasks.join_next(),
+        )
+        .await
+        {
+            if let Ok(Some((route, value))) = result {
+                let controller = encode_hex(&route.installation_id);
+                if let Some(error) = value["error"].as_str() {
+                    errors.push(serde_json::json!({"controller":controller,"error":error}));
+                }
+                if value["sources"].as_array().is_none_or(|a| a.len() > 32) {
+                    errors.push(serde_json::json!({"controller":controller,"error":"capture.invalid_inventory","count":value["sources"].as_array().map_or(1,Vec::len)}));
+                    continue;
+                }
+                if let Some(entries) = value["sources"].as_array() {
+                    for entry in entries.iter().take(32) {
+                        let Some(local) = entry["id"]
+                            .as_str()
+                            .filter(|id| id.starts_with("local:") && id.len() <= 1024)
+                        else {
+                            errors.push(serde_json::json!({"controller":controller,"error":"capture.invalid_source","count":1}));
+                            continue;
+                        };
+                        if !entry["recognized"].is_boolean()
+                            || !entry["name"].is_string()
+                            || entry["controller"] != "local"
+                        {
+                            errors.push(serde_json::json!({"controller":controller,"error":"capture.invalid_source","count":1}));
+                            continue;
+                        }
+                        let id = format!("{controller}:{}", &local[6..]);
+                        let mut entry = entry.clone();
+                        entry["id"] = serde_json::json!(id);
+                        entry["controller"] = serde_json::json!(controller);
+                        let mut captures = self.captures.lock().expect("capture routes");
+                        if captures.len() < MAX_TAILNET_PEERS * 32 || captures.contains_key(&id) {
+                            captures.insert(id, (route.clone(), local.to_owned()));
+                            sources.push(entry);
+                        }
+                    }
+                }
+            }
+        }
+        if !tasks.is_empty() {
+            errors
+                .push(serde_json::json!({"error":"capture.discovery_timeout","count":tasks.len()}));
+        }
+        sources.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        sources.dedup_by(|a, b| a["id"] == b["id"]);
+        *inventory = Some((Instant::now(), sources.clone(), errors.clone()));
+        (sources, errors)
+    }
+
+    pub(crate) async fn capture_prove_device(self: &Arc<Self>, device: &str) -> bool {
+        matches!(self.prove_holder(device).await, Proven::Route(_))
+    }
+
+    pub(crate) async fn capture_frame(
+        self: &Arc<Self>,
+        daemon: &Daemon,
+        mut request: crate::capture::FrameRequest,
+    ) -> Response {
+        if !self.handles(&request.device) {
+            return ApiError::auth("capture.device_not_authorized").into_response();
+        }
+        let target = self
+            .captures
+            .lock()
+            .expect("capture routes")
+            .get(&request.source)
+            .cloned();
+        let Some((route, local)) = target else {
+            return ApiError::unavailable("capture.peer_offline_or_select_source").into_response();
+        };
+        // Reprove the eyes peer if it holds the device. If eyes and hands differ, prove the
+        // actual holder; the eyes daemon independently reproves its grant on every frame read.
+        if !matches!(
+            self.verify_route(&route, &request.device).await,
+            RouteCheck::Verified
+        ) && !daemon.local_link_authenticated(&request.device)
+            && !self.capture_prove_device(&request.device).await
+        {
+            return ApiError::unavailable("capture.peer_offline_or_fresh_proof_failed")
+                .into_response();
+        }
+        request.source = local;
+        let path = format!("/v1/devices/{}/capture/frame", request.device);
+        let Ok(body) = serde_json::to_vec(&request) else {
+            return ApiError::bad_request("capture.request").into_response();
+        };
+        match owner_exchange(
+            &self.connector,
+            &route.installation_id,
+            route.control,
+            "POST",
+            &path,
+            Some(&body),
+            CONTROL_TIMEOUT,
+            crate::capture::MAX_WIRE + MAX_RESPONSE_HEADER,
+        )
+        .await
+        {
+            OwnerExchange::Response {
+                status,
+                content_type,
+                body,
+            } if body.len() <= crate::capture::MAX_WIRE => passthrough(status, content_type, body),
+            OwnerExchange::Response { .. } => {
+                ApiError::unavailable("capture.size_limit").into_response()
+            }
+            OwnerExchange::NotSent | OwnerExchange::Uncertain => {
+                ApiError::unavailable("capture.peer_offline_or_invalid_frame").into_response()
+            }
+        }
     }
 
     pub(crate) fn device_ids(&self) -> impl Iterator<Item = &String> {
@@ -1795,6 +1960,12 @@ mod tests {
     }
 
     impl DeviceTransport for ProvingTransport {
+        fn supports_input_sequence(&self) -> bool {
+            self.inner.supports_input_sequence()
+        }
+        fn supports_extended_pointer(&self) -> bool {
+            self.inner.supports_extended_pointer()
+        }
         fn supports_file_handoff(&self) -> bool {
             true
         }
@@ -2198,11 +2369,13 @@ mod tests {
         let owner = TestOwner::new(OWNER);
         let (holder_id, _) = owner.issue(&root.join("holder"), DEVICE, HOLDER_SECRET);
         let (forwarder_id, _) = owner.issue(&root.join("forwarder"), DEVICE, FORWARDER_SECRET);
+        let (eyes_id, _) = owner.issue(&root.join("eyes"), DEVICE, [0x62; 32]);
         let holder_set = InstallationTlsSecretSet::load(root.join("holder")).unwrap();
         let forwarder_set = InstallationTlsSecretSet::load(root.join("forwarder")).unwrap();
         let holder_store = holder_set.iter().next().unwrap().clone();
 
         let holder_device = SimulatorTransport::default()
+            .with_extended_pointer()
             .with_output_mode(OutputMode::UsbHid)
             .with_screen_power(crate::ScreenPower::On);
         let file = Arc::new(Mutex::new(TestFile::default()));
@@ -2220,7 +2393,10 @@ mod tests {
                 Arc::new(ProvingTransport {
                     inner: holder_device.clone(),
                     gateway: holder_id,
-                    controllers: HashMap::from([(forwarder_id, proof_secret)]),
+                    controllers: HashMap::from([
+                        (forwarder_id, proof_secret),
+                        (eyes_id, [0x62; 32]),
+                    ]),
                     file: Arc::clone(&file),
                 }) as Arc<dyn DeviceTransport>,
                 Some(GatewayAuthority {
@@ -3055,5 +3231,301 @@ mod tests {
         assert_eq!(peers[0].address, IpAddr::from([100, 64, 0, 2]));
         assert_eq!(peers[0].probe_port, OWNER_GATEWAY_PROBE_PORT);
         assert_eq!(peers[0].control_port, OWNER_GATEWAY_CONTROL_PORT);
+    }
+    fn fake_capture(daemon: &Daemon) {
+        daemon.0.capture.lock().unwrap().fake = Some(keyferry_capture::frames::Frame {
+            width: 320,
+            height: 240,
+            native: (640, 480),
+            rgb: vec![72; 320 * 240 * 3],
+            serial: 1,
+            generation: 1,
+            at: Instant::now(),
+        });
+    }
+    async fn capture_source(daemon: &Daemon) -> String {
+        // Bypass local FFmpeg discovery only: actual owner-mTLS inventory is production code.
+        let (sources, errors) = daemon.forwarder().unwrap().capture_sources().await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(sources.len(), 1);
+        sources[0]["id"].as_str().unwrap().to_owned()
+    }
+    fn frame_request(source: &str) -> Value {
+        serde_json::json!({"device":device_id(),"source":source})
+    }
+
+    #[tokio::test]
+    async fn remote_frames_and_click_use_real_owner_mtls_without_frame_logs() {
+        use base64::Engine;
+        let harness = harness(None, FORWARDER_SECRET).await;
+        fake_capture(&harness.holder);
+        let source = capture_source(&harness.forwarder).await;
+        let (status, frame) = call(
+            &harness.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request(&source)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{frame}");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(frame["png"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(frame["width"], 320);
+        assert!(!harness.holder_device.is_remotely_armed());
+        assert!(harness.holder.metadata().is_empty());
+        assert!(harness.forwarder.metadata().is_empty());
+        // Agent controller has no local capture or stick. Screenshot coordinates drive the
+        // holder's pointer compiler through the same production input-sequence admission.
+        let command = Uuid::now_v7();
+        let (status,receipt)=call(&harness.forwarder,"POST",&format!("/v1/devices/{}/input-sequences",device_id()),
+            Some(serde_json::json!({"schema":"keyferry.input-sequence.v2","command_id":command,"arm":"command-scoped","start_within_ms":5000,
+                "actions":[{"type":"move_absolute","x":0.5,"y":0.5},{"type":"click","button":"button_1"}]}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+        let outcome = wait_for_outcome(&harness.forwarder, &command.to_string()).await;
+        assert_eq!(outcome["outcome"], "EMITTED");
+        assert_eq!(outcome["terminal_zero_confirmed"], true);
+        assert!(!harness.holder_device.is_remotely_armed());
+        let events = serde_json::to_string(&harness.holder.metadata()).unwrap();
+        assert!(!events.contains(frame["png"].as_str().unwrap()));
+        assert!(!events.contains("png"));
+    }
+
+    #[tokio::test]
+    async fn remote_frames_refuse_untrusted_proof_oversize_and_offline_peer() {
+        let bad = harness(None, [0xee; 32]).await;
+        fake_capture(&bad.holder);
+        let source = capture_source(&bad.forwarder).await;
+        let (status, _) = call(
+            &bad.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request(&source)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(bad.holder.metadata().is_empty());
+
+        let good = harness(None, FORWARDER_SECRET).await;
+        fake_capture(&good.holder);
+        let source = capture_source(&good.forwarder).await;
+        let mut request = frame_request(&source);
+        request["max_width"] = serde_json::json!(1281);
+        let (status, error) =
+            call(&good.forwarder, "POST", "/v1/capture/frame", Some(request)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error["error"], "capture.scale");
+        // A source emitting an oversized frame is rejected before encoding or allocating a crop.
+        good.holder
+            .0
+            .capture
+            .lock()
+            .unwrap()
+            .fake
+            .as_mut()
+            .unwrap()
+            .width = 1281;
+        time::sleep(Duration::from_millis(110)).await;
+        let (status, error) = call(
+            &good.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request(&source)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error["error"], "capture.size_limit");
+        good.proxy.arm(1);
+        let (status, error) = call(
+            &good.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request(&source)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error["error"].as_str().unwrap().contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn capture_routes_are_loopback_or_owner_mtls_only_and_proof_is_required() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        fake_capture(&h.holder);
+        let forwarder = h.forwarder.forwarder().unwrap();
+        let _ = call(&h.forwarder, "GET", "/v1/devices", None).await;
+        let route = forwarder.fresh_route(&device_id()).unwrap();
+        h.holder.0.owner_routes.lock().unwrap().clear();
+        let body = serde_json::to_vec(&frame_request("local:fake-hdmi")).unwrap();
+        let path = format!("/v1/devices/{}/capture/frame", device_id());
+        let response = forwarder
+            .exchange(&route, "POST", &path, Some(&body), CONTROL_TIMEOUT)
+            .await;
+        assert!(matches!(
+            response,
+            OwnerExchange::Response { status: 401, .. }
+        ));
+        // Plain HTTP cannot reach the owner-mTLS router, even with the holder's loopback bearer.
+        let mut tcp = TcpStream::connect(route.control).await.unwrap();
+        tcp.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer holder-token-123456\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+        let mut bytes = [0; 128];
+        let n = time::timeout(Duration::from_secs(2), tcp.read(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap_or(0);
+        assert!(!bytes[..n].starts_with(b"HTTP/1.1 200"));
+        let mut local = h.holder.router();
+        let response = local
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/capture/frame")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn eyes_controller_can_differ_from_the_authenticated_stick_holder() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        let _ = call(&h.forwarder, "GET", "/v1/devices", None).await;
+        let holder_route = h
+            .forwarder
+            .forwarder()
+            .unwrap()
+            .fresh_route(&device_id())
+            .unwrap();
+        let eyes_stores = InstallationTlsSecretSet::load(h.root.join("eyes")).unwrap();
+        let eyes_store = eyes_stores.iter().next().unwrap().clone();
+        let eyes = Daemon::with_tls_transports(
+            MemoryTokenStore::new("eyes-token-123456"),
+            vec![(
+                device_id(),
+                "Eyes".into(),
+                TlsTransport::from_installation_store(&eyes_store).unwrap(),
+            )],
+        )
+        .unwrap();
+        // Seed a discovered holder route from the same authenticated test exchange. Frame serving
+        // still reproves it using the eyes controller's own distinct device secret every request.
+        let eyes_forwarder = Forwarder::new(&eyes_stores, Box::new(StaticPeers(vec![]))).unwrap();
+        let view = h
+            .forwarder
+            .forwarder()
+            .unwrap()
+            .fetch_view(&holder_route, &device_id())
+            .await
+            .unwrap();
+        eyes_forwarder.state().holders.insert(
+            device_id(),
+            Holder {
+                route: holder_route,
+                view,
+                view_at: Instant::now(),
+                verified_at: Instant::now(),
+            },
+        );
+        eyes.enable_forwarding(eyes_forwarder).unwrap();
+        fake_capture(&eyes);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let route = Route {
+            installation_id: eyes_store.installation_id(),
+            control: address,
+            name: None,
+        };
+        tokio::spawn(serve_owner_mtls_listener(
+            eyes.clone(),
+            listener,
+            eyes_store,
+        ));
+        let caller = h.forwarder.forwarder().unwrap();
+        caller
+            .captures
+            .lock()
+            .unwrap()
+            .insert("eyes:fake-hdmi".into(), (route, "local:fake-hdmi".into()));
+        let (status, frame) = call(
+            &h.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request("eyes:fake-hdmi")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{frame}");
+        assert!(eyes.metadata().is_empty());
+        assert!(!eyes.local_link_authenticated(&device_id()));
+        assert!(!h.holder_device.is_remotely_armed());
+    }
+    #[tokio::test]
+    async fn oversized_frame_response_is_refused_by_the_real_owner_mtls_transport() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        fake_capture(&h.holder);
+        let source = capture_source(&h.forwarder).await;
+        let store = InstallationTlsSecretSet::load(h.root.join("holder"))
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let listener = crate::OwnerTlsListener {
+            control_port: address.port(),
+            listener,
+            acceptor: store.remote_tls_acceptor().unwrap(),
+        };
+        let app = h
+            .holder
+            .owner_remote_router()
+            .layer(axum::middleware::from_fn(
+                |request: Request, next: Next| async move {
+                    let frame = request.uri().path().ends_with("/capture/frame");
+                    let response = next.run(request).await;
+                    if frame && response.status() == StatusCode::OK {
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            vec![b'x'; crate::capture::MAX_WIRE + MAX_RESPONSE_HEADER + 1],
+                        )
+                            .into_response()
+                    } else {
+                        response
+                    }
+                },
+            ));
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<crate::RemoteTlsPeer>(),
+            )
+            .await
+            .unwrap();
+        });
+        h.forwarder
+            .forwarder()
+            .unwrap()
+            .captures
+            .lock()
+            .unwrap()
+            .get_mut(&source)
+            .unwrap()
+            .0
+            .control = address;
+        let (status, error) = call(
+            &h.forwarder,
+            "POST",
+            "/v1/capture/frame",
+            Some(frame_request(&source)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error["error"], "capture.peer_offline_or_invalid_frame");
+        assert!(h.holder.metadata().is_empty());
+        task.abort();
     }
 }
