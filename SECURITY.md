@@ -293,3 +293,27 @@ A no-op, multiple additions, removal, replacement or re-signing of an existing g
 A fully validated private temporary directory is published by atomic non-replacing rename; an
 existing destination, including an empty directory, cannot be overwritten. No hard links are used.
 Expansion does not activate a device, change firmware, contact a controller or close a physical gate.
+
+## Owner-run new-stick provisioning
+
+The first-install runner uses one Hushrun stdin delivery for the existing mint, grant and private
+header producers. It stages encrypted owner authority and preserves the installation principal;
+partial preparation is retained for reconciliation, never another mint. The prepared identity is
+bound to one observed chip MAC in a private index before any erase. Preparing before attachment
+allocates an unbound candidate; reusing an already bound chip cannot assign that candidate to it.
+
+Real first installs require an attributable owner record ratifying the proposed automatic-ROM
+recovery gate and authorizing the narrow new-device full-install scope. Until that replacement is
+ratified, the runner refuses before the secret prompt. This does not change the existing qualified
+unit updater's manual-ROM or exact-hash authorization boundary. Writes require a validated private
+full plan, exact profile/flash agreement, inactive security and readable zero-valued download-disable
+eFuses. Security-enabling build configuration, ambiguous serial discovery and identity changes stop
+the flow. No force flag, eFuse write, input submission or automatic uncertain-write replay exists.
+
+Write intent is durable before erase; reruns re-observe identity and select verification only.
+Policy bootstrap uses the existing authenticated journaled producer once; unknown completion stops
+for journal reconciliation. Receipt fields are allowlisted metadata. READY requires a local
+authenticated, idle, disarmed inventory with the exact ELF/profile and authenticated pointer bit.
+The daemon exposes that raw capability mask as metadata, granting no additional command authority.
+Enabled download eFuses prove current state, not permanent immunity to later eFuse burns. Automatic
+reset and app boot remain exact-board hardware evidence, and never close physical gates in simulation.

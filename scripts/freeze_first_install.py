@@ -14,22 +14,24 @@ ROOT = Path(__file__).resolve().parents[1]
 def freeze(build, output, idf_root):
     description = json.loads((build / "project_description.json").read_text())
     flash = json.loads((build / "flasher_args.json").read_text())
-    if description["target"] != "esp32s3" or flash["flash_settings"]["flash_size"] != "8MB":
-        raise ValueError("expected ESP32-S3 and 8 MB flash")
+    sizes = {"8MB": 8*1024*1024, "16MB": 16*1024*1024}
+    flash_bytes = sizes.get(flash["flash_settings"]["flash_size"])
+    if description["target"] != "esp32s3" or flash_bytes is None:
+        raise ValueError("expected ESP32-S3 and supported 8/16 MB flash")
     spec = importlib.util.spec_from_file_location("gen_esp32part", idf_root/"components/partition_table/gen_esp32part.py")
     decoder = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(decoder)
     table = decoder.PartitionTable.from_binary((build/"partition_table/partition-table.bin").read_bytes())
     decoder.offset_part_table = int(flash["partition-table"]["offset"], 0)
     table.verify()
-    table.verify_size_fits(8*1024*1024)
+    table.verify_size_fits(flash_bytes)
     apps = [p for p in table if p.type == decoder.APP_TYPE]
     if len(apps) != 1 or apps[0].offset != 0x10000 or apps[0].subtype != 0:
         raise ValueError("expected one factory app at 0x10000")
     records = []
     for address, relative in sorted(flash["flash_files"].items(), key=lambda item: int(item[0], 0)):
         data = (build/relative).read_bytes()
-        if int(address, 0) + len(data) > 8*1024*1024:
+        if int(address, 0) + len(data) > flash_bytes:
             raise ValueError("flash image exceeds device")
         records.append(dict(offset=int(address, 0), file=relative, size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest()))
     if {item["offset"] for item in records} != {0, 0x8000, 0x10000}:
@@ -58,7 +60,7 @@ def freeze(build, output, idf_root):
     plan = dict(schema="keyferry.first-install-plan.v1", status="DRY_RUN_ONLY",
                 artifact_role="RECOVERY_QUALIFICATION" if project == "keyferry_qualification" else "RESOURCE_ONLY_NEVER_FLASH" if "probe" in version.split("-")[-1].split(".") else "DEVICE_PRIVATE_CANDIDATE",
                 hardware_authorized=False, version=version, producer_commit=subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT).decode().strip(),
-                flash_settings=flash["flash_settings"], flash_size_bytes=8*1024*1024,
+                flash_settings=flash["flash_settings"], flash_size_bytes=flash_bytes,
                 erase_before_first_install=erases, writes=records,
                 application_slot_bytes=apps[0].size, application_headroom_bytes=apps[0].size-app_size,
                 artifacts=hashes)
