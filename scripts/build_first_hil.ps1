@@ -10,6 +10,10 @@ param(
 
     [string]$PrivateHeader = '',
 
+    [switch]$ResourceOnly,
+
+    [string]$ToolchainRoot = '',
+
     [switch]$MscSizeProbe,
 
     [switch]$MscMemoryProbe,
@@ -26,8 +30,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$idfExport = Join-Path $projectRoot '.tools\esp-idf-v6.0.3\export.ps1'
-$idfTools = Join-Path $projectRoot '.tools\idf-tools-v6.0.3'
+if ([string]::IsNullOrWhiteSpace($ToolchainRoot)) { $ToolchainRoot = $projectRoot }
+$idfExport = Join-Path $ToolchainRoot '.tools\esp-idf-v6.0.3\export.ps1'
+$idfTools = Join-Path $ToolchainRoot '.tools\idf-tools-v6.0.3'
 if (-not (Test-Path -LiteralPath $idfExport -PathType Leaf)) {
     throw 'Pinned ESP-IDF v6.0.3 is absent; run the project toolchain setup first.'
 }
@@ -55,7 +60,11 @@ try {
     $env:SOURCE_DATE_EPOCH = $sourceEpoch
     $env:IDF_PY_BUILD_JOBS = $buildJobs
     $privateHeaderArgument = @()
-    if ([string]::IsNullOrWhiteSpace($PrivateHeader)) {
+    if ($ResourceOnly) {
+        if (-not [string]::IsNullOrWhiteSpace($PrivateHeader)) {
+            throw 'ResourceOnly cannot use private credentials.'
+        }
+    } elseif ([string]::IsNullOrWhiteSpace($PrivateHeader)) {
         cargo run --locked --offline --quiet --jobs $buildJobs -p keyferry-pairing -- validate
         if ($LASTEXITCODE -ne 0) { throw 'Private pairing validation failed.' }
     } else {
@@ -70,13 +79,17 @@ try {
         }
         $privateHeaderArgument = @("-DKEYFERRY_PRIVATE_HEADER=$resolvedPrivateHeader")
     }
+    $env:CCACHE_DIR = Join-Path $projectRoot 'build\ccache'
     $env:IDF_TOOLS_PATH = $idfTools
     . $idfExport | Out-Null
     $mscProbeArg = if ($MscSizeProbe -or $MscMemoryProbe) { 'ON' } else { 'OFF' }
     $mscMemoryArg = if ($MscMemoryProbe) { 'ON' } else { 'OFF' }
     $fileHandoffArg = if ($FileHandoff) { 'ON' } else { 'OFF' }
+    $resourceOnlyArg = if ($ResourceOnly) { 'ON' } else { 'OFF' }
     idf.py -C firmware/esp32s3/hil_endpoint -B $BuildDir `
         "-DKEYFERRY_BOARD=$BoardProfile" `
+        "-DKEYFERRY_RESOURCE_ONLY=$resourceOnlyArg" `
+        "-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON" `
         "-DKEYFERRY_BLE_HID_SPIKE=$BleHidSpike" `
         "-DKEYFERRY_MSC_SIZE_PROBE=$mscProbeArg" `
         "-DKEYFERRY_MSC_MEMORY_PROBE=$mscMemoryArg" `
