@@ -487,9 +487,9 @@ def main():
         elif args.command == "update-plan":
             plan, _ = make_update_plan(args.installed_plan, args.installed_build,
                                        args.build)
-            args.output_dir.mkdir(parents=False, exist_ok=False)
-            (args.output_dir / "app-update-plan.json").write_text(
-                json.dumps(plan, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            args.output_dir.mkdir(parents=False, exist_ok=True)
+            with (args.output_dir / "app-update-plan.json").open("x", encoding="utf-8") as output:
+                output.write(json.dumps(plan, sort_keys=True, indent=2) + "\n")
             result = {"schema": SCHEMA, "outcome": "PLANNED_ONLY",
                       "app_update_authorization_sha256": plan["authorization_sha256"]}
         elif args.command == "apply-update":

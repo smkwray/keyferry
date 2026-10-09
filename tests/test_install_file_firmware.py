@@ -1,6 +1,7 @@
 """Offline authorization boundary for the exact-unit layout installer."""
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,28 @@ SPEC.loader.exec_module(installer)
 
 
 class InstallFileFirmwareTest(unittest.TestCase):
+    def test_update_plan_cli_saves_beside_image_without_overwriting_evidence(self):
+        for existing_directory in (False, True):
+            with self.subTest(existing_directory=existing_directory), tempfile.TemporaryDirectory() as directory:
+                build = Path(directory) / "candidate"
+                if existing_directory:
+                    build.mkdir()
+                    (build / "image.bin").write_bytes(b"retained image")
+                plan = {"authorization_sha256": "a" * 64}
+                argv = [str(SCRIPT), "update-plan", "--installed-plan", "previous.json",
+                        "--installed-build", "previous", "--build", str(build),
+                        "--output-dir", str(build)]
+                with patch("sys.argv", argv), patch("sys.stdout", io.StringIO()), patch.object(
+                        installer, "make_update_plan", return_value=(plan, b"app")):
+                    self.assertEqual(installer.main(), 0)
+                    saved = (build / "app-update-plan.json").read_bytes()
+                    self.assertEqual(json.loads(saved), plan)
+                    plan["authorization_sha256"] = "b" * 64
+                    self.assertEqual(installer.main(), 20)
+                    self.assertEqual((build / "app-update-plan.json").read_bytes(), saved)
+                if existing_directory:
+                    self.assertEqual((build / "image.bin").read_bytes(), b"retained image")
+
     def test_successive_app_update_binds_prior_plan_and_image(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

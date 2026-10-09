@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--build", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--size-json", type=Path,
-                        help="ESP-IDF size --format json output for static RAM evidence")
+                        help="ESP-IDF size --format json2 output for static RAM evidence")
     parser.add_argument("--build-command", help="Exact offline command used to build this image")
     args = parser.parse_args()
     subprocess.run(["git", "diff", "--exit-code", "HEAD", "--"], check=True)
