@@ -130,6 +130,34 @@ class ProvisionTests(unittest.TestCase):
             self.run_flow()
         self.assertEqual(self.tools.counts["mint"], 0)
 
+    def test_live_pipeline_refuses_efuse_before_any_erase(self):
+        original = self.tools.rom
+        def unsafe_rom(port, mode):
+            rom = original(port, mode)
+            observe = rom.observe
+            def unsafe_observation():
+                result = observe()
+                result["efuses"]["DIS_DOWNLOAD_MODE"] = 1
+                return result
+            rom.observe = unsafe_observation
+            return rom
+        self.tools.rom = unsafe_rom
+        with self.assertRaisesRegex(p.Stop, "ACTIVE_OR_UNKNOWN_DOWNLOAD_EFUSE"):
+            self.run_flow()
+        self.assertEqual(self.tools.counts["erase"], 0)
+        self.assertEqual(self.tools.counts["write"], 0)
+
+    def test_hushrun_adapter_retains_request_id_without_raw_output(self):
+        receipt = self.private / "receipt.json"
+        p.save(receipt, {"status": "PREPARE_PENDING"})
+        tools = p.Tools(ROOT, {"package_directory": str(self.private)})
+        request_id = "00000000-0000-4000-8000-000000000001"
+        tools.command([sys.executable, "-c", f"print('request {request_id} SYNTHETIC_SECRET')"],
+                      hushrun_receipt=receipt)
+        retained = p.load(receipt)
+        self.assertEqual(retained["hushrun_request_id"], request_id)
+        self.assertNotIn("SYNTHETIC_SECRET", receipt.read_text())
+
     def test_inventory_refuses_armed_wrong_elf_or_missing_pointer(self):
         self.run_flow()
         inventory = self.tools.inventory()
