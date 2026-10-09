@@ -2805,6 +2805,7 @@ name = "keyferry-sim"
 version = "0.0.0"
 dependencies = [
  "keyferry-layouts",
+ "keyferry-protocol",
 ]
 
 [[package]]

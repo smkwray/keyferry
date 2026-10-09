@@ -184,6 +184,7 @@ enum class MessageType : std::uint8_t {
   kRouteProofRequest = 0x56,
   kRouteProofResponse = 0x57,
   kInputCommandResultV1 = 0x58,
+  kInputCommandResultV2 = 0x5B,
   kGatewayHandoff = 0x59,
   kGatewayHandoffStatus = 0x5A,
   kFileRequest = 0x60,
@@ -199,6 +200,9 @@ enum class CommandKind : std::uint8_t {
   kExecuteInputChunkV1 = 0x04,
   kCancelInputSequenceV1 = 0x05,
   kReleaseInputAllV1 = 0x06,
+  kExecuteInputChunkV2 = 0x07,
+  kCancelInputSequenceV2 = 0x08,
+  kReleaseInputAllV2 = 0x09,
 };
 
 enum class ReportAction : std::uint8_t {
@@ -209,6 +213,10 @@ enum class ReportAction : std::uint8_t {
   kMouseMoveRelative = 0x05,
   kMouseClick = 0x06,
   kNeutralAll = 0x07,
+  kPointerMoveAbsolute = 0x08,
+  kPointerScroll = 0x09,
+  kPointerButtonDown = 0x0A,
+  kPointerButtonUp = 0x0B,
 };
 
 enum class ProvisioningOperation : std::uint8_t {
@@ -343,6 +351,7 @@ enum class Capability : std::uint32_t {
   kUsbFileHandoffV1 = 0x01000000,
   kScreenPowerV1 = 0x02000000,
   kUsbFileSetV2 = 0x04000000,
+  kPointerExtendedV1 = 0x08000000,
 };
 
 enum class OutputMode : std::uint8_t {

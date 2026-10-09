@@ -13,6 +13,16 @@ pub enum InputEffect {
         delta: MouseDelta,
     },
     MouseButtons(u8),
+    PointerPosition {
+        logical_token: u64,
+        x: u16,
+        y: u16,
+    },
+    PointerScroll {
+        logical_token: u64,
+        wheel: i8,
+        pan: i8,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,8 +122,18 @@ impl MixedInputSimulator {
                 // independent of whether a completion callback or result is later observed.
                 self.mark_possible_effect();
             }
+            InputEffect::PointerPosition { logical_token, .. }
+            | InputEffect::PointerScroll { logical_token, .. } => {
+                if !self.keyboard.is_released() {
+                    return Err(InputSimulationError::HeldStateConflict);
+                }
+                if !self.consumed_movements.insert(logical_token) {
+                    return Err(InputSimulationError::MovementReplay);
+                }
+                self.mark_possible_effect();
+            }
             InputEffect::MouseButtons(buttons) => {
-                if buttons & !0x03 != 0 {
+                if buttons & !0x07 != 0 {
                     return Err(InputSimulationError::InvalidButtonBitmap);
                 }
                 if buttons != 0 && !self.keyboard.is_released() {
@@ -149,7 +169,9 @@ impl MixedInputSimulator {
                     self.neutral_mask |= NEUTRAL_KEYBOARD;
                 }
             }
-            InputEffect::MouseMove { .. } => {}
+            InputEffect::MouseMove { .. }
+            | InputEffect::PointerPosition { .. }
+            | InputEffect::PointerScroll { .. } => {}
             InputEffect::MouseButtons(buttons) => {
                 self.mouse_buttons = buttons;
                 if buttons == 0 && self.possible_effect {
@@ -235,6 +257,30 @@ pub fn execute_input_gestures(
 
     for gesture in gestures {
         match gesture {
+            InputGesture::ExtendedPointer { records, cost_ms } => {
+                for r in records {
+                    use keyferry_protocol::action;
+                    let effect = match r[0] {
+                        action::POINTER_MOVE_ABSOLUTE => InputEffect::PointerPosition {
+                            logical_token,
+                            x: u16::from_le_bytes([r[2], r[3]]),
+                            y: u16::from_le_bytes([r[4], r[5]]),
+                        },
+                        action::POINTER_SCROLL => InputEffect::PointerScroll {
+                            logical_token,
+                            wheel: r[2] as i8,
+                            pan: r[3] as i8,
+                        },
+                        action::POINTER_BUTTON_DOWN => InputEffect::MouseButtons(1 << (r[2] - 1)),
+                        action::POINTER_BUTTON_UP => InputEffect::MouseButtons(0),
+                        action::WAIT_MS => continue,
+                        _ => return Err(InputSimulationError::CompletionMismatch),
+                    };
+                    logical_token += 1;
+                    submit_and_complete(&mut simulator, &mut transfers, effect)?;
+                }
+                elapsed_ms += cost_ms;
+            }
             InputGesture::Keyboard { report, timing } => {
                 submit_and_complete(
                     &mut simulator,
@@ -307,6 +353,7 @@ pub fn execute_input_gestures(
                 let bit = match button {
                     ClickButton::Button1 => 0x01,
                     ClickButton::Button2 => 0x02,
+                    ClickButton::Button3 => 0x04,
                 };
                 let clicks = if matches!(gesture, InputGesture::DoubleClick { .. }) {
                     2
