@@ -208,7 +208,7 @@ def file_handoff_version(cmake: Path = HIL_CMAKE) -> bytes:
     source = cmake.read_text(encoding="utf-8")
     versions = re.findall(
         r'^if\(KEYFERRY_FILE_HANDOFF\)\s*\n'
-        r'\s*set\(PROJECT_VER "([0-9]+\.[0-9]+\.[0-9]+-file\.[0-9]+)"\)\s*\n'
+        r'\s*set\(PROJECT_VER "([0-9]+\.[0-9]+\.[0-9]+-file\.[0-9]+(?:-[a-z0-9.]+)?)"\)\s*\n'
         r'endif\(\)$', source, re.MULTILINE,
     )
     if len(versions) != 1:

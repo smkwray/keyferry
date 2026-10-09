@@ -45,7 +45,7 @@ def main():
         "schema": "keyferry.wifi-build.v1", "source_head": head,
         "producer": "scripts/freeze_wifi_build.py",
         "board": "waveshare_geek_v1_1_reference",
-        "version": inspector.app_version(args.build / members[0]),
+        "version": inspector.app_version(args.build / members[0]).decode("ascii"),
         "artifacts": artifacts,
         "app_headroom_bytes": 0x200000 - artifacts[members[0]]["bytes"],
         "hardware_writes": False, "physical_gate": "OPEN",
