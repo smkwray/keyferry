@@ -9,6 +9,7 @@ use crate::{
     local_management_probe_outcome as probe_outcome, local_management_probe_phase as probe_phase,
     local_management_receipt_state as receipt_state, local_management_registry as limits,
     local_management_status as status, local_management_status_page as status_page, output_mode,
+    wifi_reject_reason,
 };
 use std::fmt;
 
@@ -147,10 +148,22 @@ pub struct ProbeStackStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WifiDiagnosticStatus {
+    pub last_wifi_reject_reason: u8,
+    pub beacon_tls_identity_equal: bool,
+    pub identity_checked: bool,
+    pub tls_verified: bool,
+    pub attempt_count: u32,
+    pub elapsed_to_tls_ms: u32,
+    pub elapsed_to_close_ms: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StatusPage {
     Device(DeviceStatus),
     Safety(SafetyStatus),
     Network(NetworkStatus),
+    WifiDiagnostic(WifiDiagnosticStatus),
     BleHid(BleHidStatus),
     Policy(PolicyStatus),
     LastReceipt(Option<ReceiptStatus>),
@@ -262,6 +275,7 @@ pub fn status_request_payload(page: u8) -> Result<RequestPayload, StatusPageErro
         status_page::DEVICE
             | status_page::SAFETY
             | status_page::NETWORK
+            | status_page::WIFI_DIAGNOSTIC
             | status_page::BLE_HID
             | status_page::POLICY
             | status_page::LAST_RECEIPT
@@ -346,6 +360,33 @@ pub fn decode_status_page(
                 receipt_storage_healthy: flags & 0x80 != 0,
                 usb_attachment_generation: u32::from_le_bytes(array(&payload[4..8])),
             }))
+        }
+        status_page::WIFI_DIAGNOSTIC => {
+            if payload[3] != 0 || payload[2] & !7 != 0 {
+                return Err(StatusPageError::NonzeroReserved);
+            }
+            let value = WifiDiagnosticStatus {
+                last_wifi_reject_reason: payload[1],
+                beacon_tls_identity_equal: payload[2] & 1 != 0,
+                identity_checked: payload[2] & 2 != 0,
+                tls_verified: payload[2] & 4 != 0,
+                attempt_count: u32::from_le_bytes(payload[4..8].try_into().unwrap()),
+                elapsed_to_tls_ms: u32::from_le_bytes(payload[8..12].try_into().unwrap()),
+                elapsed_to_close_ms: u32::from_le_bytes(payload[12..16].try_into().unwrap()),
+            };
+            if value.last_wifi_reject_reason > wifi_reject_reason::OTHER
+                || (value.beacon_tls_identity_equal && !value.identity_checked)
+                || (value.identity_checked && !value.tls_verified)
+                || (!value.tls_verified && value.elapsed_to_tls_ms != 0)
+                || value.elapsed_to_tls_ms > value.elapsed_to_close_ms
+                || (value.attempt_count == 0
+                    && (value.last_wifi_reject_reason != 0
+                        || value.tls_verified
+                        || value.elapsed_to_close_ms != 0))
+            {
+                return Err(StatusPageError::InvalidValue);
+            }
+            Ok(StatusPage::WifiDiagnostic(value))
         }
         status_page::NETWORK => {
             if payload[1] > 15
@@ -1241,5 +1282,56 @@ mod tests {
             decode_receipt_payload(&response),
             Err(StatusPageError::NonzeroReserved)
         );
+    }
+}
+
+#[cfg(test)]
+mod wifi_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn wifi_status_agrees_with_cpp_vector_and_rejects_malformed_metadata() {
+        let bytes: Vec<u8> = include_str!("../../../protocol/vectors/local-wifi-diagnostic.hex")
+            .split_whitespace()
+            .map(|value| u8::from_str_radix(value, 16).unwrap())
+            .collect();
+        let payload: ResponsePayload = bytes.try_into().unwrap();
+        assert_eq!(
+            decode_status_page(status_page::WIFI_DIAGNOSTIC, &payload),
+            Ok(StatusPage::WifiDiagnostic(WifiDiagnosticStatus {
+                last_wifi_reject_reason: wifi_reject_reason::WIFI_PREFERENCE_EXPIRED,
+                beacon_tls_identity_equal: true,
+                identity_checked: true,
+                tls_verified: true,
+                attempt_count: 0x01020304,
+                elapsed_to_tls_ms: 5000,
+                elapsed_to_close_ms: 15000,
+            }))
+        );
+        let empty = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(decode_status_page(status_page::WIFI_DIAGNOSTIC, &empty).is_ok());
+        for index in [1, 2, 3] {
+            for value in 0..=255 {
+                let mut malformed = payload;
+                malformed[index] = value;
+                let valid = match index {
+                    1 => value <= wifi_reject_reason::OTHER,
+                    2 => matches!(value, 0 | 4 | 6 | 7),
+                    3 => value == 0,
+                    _ => unreachable!(),
+                };
+                // TLS elapsed is nonzero, so flags 0 cannot be valid here.
+                let valid = valid && !(index == 2 && value == 0);
+                assert_eq!(
+                    decode_status_page(status_page::WIFI_DIAGNOSTIC, &malformed).is_ok(),
+                    valid
+                );
+            }
+        }
+        for range in [4..8, 12..16] {
+            let mut malformed = payload;
+            malformed[range].fill(0);
+            assert!(decode_status_page(status_page::WIFI_DIAGNOSTIC, &malformed).is_err());
+        }
     }
 }

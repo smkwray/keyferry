@@ -1216,6 +1216,11 @@ class HilRuntime final : public keyferry::transport::Delegate,
       snapshot.network.ble_available = diagnostics.ble_available;
       snapshot.network.wifi_error = diagnostics.wifi_error;
       snapshot.network.nvs_error = diagnostics.nvs_error;
+      const auto& wifi = diagnostics.wifi_attempt;
+      snapshot.wifi_diagnostic = {
+          wifi.last_wifi_reject_reason, wifi.beacon_tls_identity_equal,
+          wifi.identity_checked, wifi.tls_verified, wifi.attempt_count,
+          wifi.elapsed_to_tls_ms, wifi.elapsed_to_close_ms};
     }
     snapshot.network.endpoint_authenticated = authenticated_epoch_ != 0;
     snapshot.network.configuration_valid =

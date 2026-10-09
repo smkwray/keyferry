@@ -12,7 +12,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_JOBS = max(1, int((os.cpu_count() or 1) * 0.60))
+BUILD_JOB_CEILING = max(1, int((os.cpu_count() or 1) * 0.60))
+BUILD_JOBS = min(BUILD_JOB_CEILING,
+                 max(1, int(os.environ.get("CARGO_BUILD_JOBS", str(BUILD_JOB_CEILING)))))
 
 
 def run(
@@ -40,6 +42,12 @@ def run_cpp_check(compiler: str) -> None:
     with tempfile.TemporaryDirectory(prefix="keyferry-check-") as raw_tmp:
         tmp = Path(raw_tmp)
         checks = [
+            (
+                "wifi-attempt-diagnostics-test",
+                [ROOT / "firmware/common/include",
+                 ROOT / "firmware/esp32s3/components/kf_esp_transport/include"],
+                [ROOT / "firmware/esp32s3/components/kf_esp_transport/test/wifi_attempt_diagnostics_test.cpp"],
+            ),
             (
                 "file-handoff-test",
                 [
@@ -443,7 +451,10 @@ def run_cpp_check(compiler: str) -> None:
                     str(executable),
                 ]
             run(command, cwd=tmp)
-            run([str(executable)], cwd=tmp)
+            arguments = [str(executable)]
+            if name == "local-management-status-test":
+                arguments.append(str(ROOT / "protocol/vectors/local-wifi-diagnostic.hex"))
+            run(arguments, cwd=tmp)
 
 
 def main() -> None:
@@ -468,7 +479,7 @@ def main() -> None:
     if cargo:
         cargo_env = os.environ.copy()
         cargo_env["CARGO_INCREMENTAL"] = "0"
-        print(f"build concurrency: {BUILD_JOBS} jobs (60% of logical CPUs)", flush=True)
+        print(f"build concurrency: {BUILD_JOBS} jobs (60% CPU ceiling; CARGO_BUILD_JOBS honored)", flush=True)
         run([cargo, "fmt", "--all", "--", "--check"], env=cargo_env)
         run(
             [

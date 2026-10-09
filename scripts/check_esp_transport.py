@@ -147,6 +147,13 @@ def source_checks() -> None:
             "bool EspTransport::RequestRestart()",
             "restart_requested_.exchange(false",
             "void EspTransport::RestartRuntime",
+            "wifi_attempt_.Start(candidate_started_ms_)",
+            "CloseCurrentTls(false)",
+            "wifi_attempt_.TlsVerified(NowMs())",
+            "wifi_attempt_.IdentityCompared(equal)",
+            "reject = WifiReject::kBeaconTlsIdentityMismatch",
+            "RejectWifi(WifiReject::kEndpointAuthenticationTimeout)",
+            "portENTER_CRITICAL(&wifi_diagnostic_mux_)",
         ),
     )
     lowered = source_text.lower()

@@ -772,8 +772,16 @@ fn local_status_with(
     let receipt = client
         .status(local_status_page::LAST_RECEIPT)
         .map_err(|_| "local receipt status failed")?;
+    // Older firmware explicitly reports UNSUPPORTED. Other failures remain
+    // errors; absence must never be manufactured from a broken exchange.
+    let wifi_diagnostic = match client.status(local_status_page::WIFI_DIAGNOSTIC) {
+        Ok(page) => local_status_value(page)?,
+        Err(LocalError::DeviceRejected(local_status::UNSUPPORTED)) => serde_json::Value::Null,
+        Err(_) => return Err("local Wi-Fi diagnostic status failed"),
+    };
     let document = serde_json::json!({
         "schema": "keyferry.local-status.v1",
+        "wifi_diagnostic": wifi_diagnostic,
         "device_id": hex(&device_id),
         "device": local_status_value(device)?,
         "safety": local_status_value(safety)?,
@@ -821,6 +829,16 @@ fn local_status_value(page: StatusPage) -> Result<serde_json::Value, &'static st
             "policy_state": value.policy_state,
             "wifi_error": value.wifi_error,
             "nvs_error": value.nvs_error,
+        })),
+        StatusPage::WifiDiagnostic(value) => Ok(serde_json::json!({
+            "last_wifi_reject_reason": keyferry_protocol::wifi_reject_reason::name(value.last_wifi_reject_reason)
+                .ok_or("invalid Wi-Fi reject reason")?,
+            "beacon_tls_identity_equal": value.beacon_tls_identity_equal,
+            "identity_checked": value.identity_checked,
+            "tls_verified": value.tls_verified,
+            "attempt_count": value.attempt_count,
+            "elapsed_to_tls_ms": value.elapsed_to_tls_ms,
+            "elapsed_to_close_ms": value.elapsed_to_close_ms,
         })),
         StatusPage::BleHid(value) => Ok(serde_json::json!({
             "bond_state": value.bond_state,
@@ -3442,6 +3460,29 @@ mod tests {
             local_operation::CLEAR_BLE_BOND_AND_ENROLL
         );
         assert!(parse_local_recovery_action("type-text").is_err());
+    }
+
+    #[test]
+    fn wifi_diagnostic_cli_document_has_only_registered_metadata() {
+        let page =
+            StatusPage::WifiDiagnostic(keyferry_protocol::local_management::WifiDiagnosticStatus {
+                last_wifi_reject_reason:
+                    keyferry_protocol::wifi_reject_reason::BEACON_TLS_IDENTITY_MISMATCH,
+                beacon_tls_identity_equal: false,
+                identity_checked: true,
+                tls_verified: true,
+                attempt_count: 2,
+                elapsed_to_tls_ms: 5100,
+                elapsed_to_close_ms: 5101,
+            });
+        assert_eq!(
+            local_status_value(page).unwrap(),
+            serde_json::json!({
+                "last_wifi_reject_reason": "beacon_tls_identity_mismatch",
+                "beacon_tls_identity_equal": false, "identity_checked": true, "tls_verified": true,
+                "attempt_count": 2, "elapsed_to_tls_ms": 5100, "elapsed_to_close_ms": 5101,
+            })
+        );
     }
 
     #[test]

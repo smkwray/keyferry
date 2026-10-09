@@ -295,6 +295,49 @@ pub mod local_management_status_page {
     pub const PROBE_RUN: u8 = 0x07;
     pub const PROBE_HEAP: u8 = 0x08;
     pub const PROBE_STACK: u8 = 0x09;
+    pub const WIFI_DIAGNOSTIC: u8 = 0x0A;
+}
+
+pub mod wifi_reject_reason {
+    pub const NONE: u8 = 0x00;
+    pub const DISCOVERY_TIMEOUT: u8 = 0x01;
+    pub const TLS_FAILED: u8 = 0x02;
+    pub const ROAMING_AUTHORIZATION_EMPTY: u8 = 0x03;
+    pub const HANDOFF_IDENTITY_MISMATCH: u8 = 0x04;
+    pub const BEACON_TLS_IDENTITY_MISMATCH: u8 = 0x05;
+    pub const ENDPOINT_POLICY_REJECTED: u8 = 0x06;
+    pub const WIFI_PREFERENCE_EXPIRED: u8 = 0x07;
+    pub const ENDPOINT_AUTHENTICATION_TIMEOUT: u8 = 0x08;
+    pub const STATION_TIMEOUT: u8 = 0x09;
+    pub const STATION_DISCONNECTED: u8 = 0x0A;
+    pub const RUNTIME_RESTART: u8 = 0x0B;
+    pub const HANDOFF_TRANSITION: u8 = 0x0C;
+    pub const TRANSPORT_FAILED: u8 = 0x0D;
+    pub const ENDPOINT_REJECTED: u8 = 0x0E;
+    pub const OTHER: u8 = 0x0F;
+
+    #[must_use]
+    pub const fn name(value: u8) -> Option<&'static str> {
+        match value {
+            NONE => Some("none"),
+            DISCOVERY_TIMEOUT => Some("discovery_timeout"),
+            TLS_FAILED => Some("tls_failed"),
+            ROAMING_AUTHORIZATION_EMPTY => Some("roaming_authorization_empty"),
+            HANDOFF_IDENTITY_MISMATCH => Some("handoff_identity_mismatch"),
+            BEACON_TLS_IDENTITY_MISMATCH => Some("beacon_tls_identity_mismatch"),
+            ENDPOINT_POLICY_REJECTED => Some("endpoint_policy_rejected"),
+            WIFI_PREFERENCE_EXPIRED => Some("wifi_preference_expired"),
+            ENDPOINT_AUTHENTICATION_TIMEOUT => Some("endpoint_authentication_timeout"),
+            STATION_TIMEOUT => Some("station_timeout"),
+            STATION_DISCONNECTED => Some("station_disconnected"),
+            RUNTIME_RESTART => Some("runtime_restart"),
+            HANDOFF_TRANSITION => Some("handoff_transition"),
+            TRANSPORT_FAILED => Some("transport_failed"),
+            ENDPOINT_REJECTED => Some("endpoint_rejected"),
+            OTHER => Some("other"),
+            _ => None,
+        }
+    }
 }
 
 pub mod local_management_probe_phase {

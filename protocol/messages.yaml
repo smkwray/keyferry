@@ -518,6 +518,42 @@ local_management_status_pages:
     id: 0x08
   - name: PROBE_STACK
     id: 0x09
+  - name: WIFI_DIAGNOSTIC
+    id: 0x0A
+
+wifi_reject_reasons:
+  - name: NONE
+    id: 0x00
+  - name: DISCOVERY_TIMEOUT
+    id: 0x01
+  - name: TLS_FAILED
+    id: 0x02
+  - name: ROAMING_AUTHORIZATION_EMPTY
+    id: 0x03
+  - name: HANDOFF_IDENTITY_MISMATCH
+    id: 0x04
+  - name: BEACON_TLS_IDENTITY_MISMATCH
+    id: 0x05
+  - name: ENDPOINT_POLICY_REJECTED
+    id: 0x06
+  - name: WIFI_PREFERENCE_EXPIRED
+    id: 0x07
+  - name: ENDPOINT_AUTHENTICATION_TIMEOUT
+    id: 0x08
+  - name: STATION_TIMEOUT
+    id: 0x09
+  - name: STATION_DISCONNECTED
+    id: 0x0A
+  - name: RUNTIME_RESTART
+    id: 0x0B
+  - name: HANDOFF_TRANSITION
+    id: 0x0C
+  - name: TRANSPORT_FAILED
+    id: 0x0D
+  - name: ENDPOINT_REJECTED
+    id: 0x0E
+  - name: OTHER
+    id: 0x0F
 
 local_management_probe_phases:
   - name: BOOT

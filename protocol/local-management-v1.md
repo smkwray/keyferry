@@ -179,6 +179,43 @@ cancel, disarm, and release-only cleanup, but cannot arm or construct nonzero in
 staged data and releases the lease. If a mutation may have executed, its result is reconciled by its
 128-bit operation ID and bounded durable receipt.
 
+## Wi-Fi reject diagnostic extension
+
+`WIFI_DIAGNOSTIC` (`0x0A`) is an authenticated read-only status page. Existing
+pages and envelope bytes remain unchanged. Older firmware returns `UNSUPPORTED`;
+the host reports `wifi_diagnostic: null` only for that explicit response. Other
+errors fail the read. New firmware returns one 16-byte schema-1 payload:
+
+| Bytes | Field |
+| ---: | --- |
+| 0 | schema `1` |
+| 1 | `WifiRejectReason`, generated from `wifi_reject_reasons` |
+| 2 | bit 0 beacon/TLS identities equal; bit 1 comparison reached; bit 2 TLS verified; bits 3–7 zero |
+| 3 | zero |
+| 4–7 | completed attempt counter `u32LE` |
+| 8–11 | attempt start to verified TLS milliseconds `u32LE` |
+| 12–15 | attempt start to close milliseconds `u32LE` |
+
+Reasons are `none`, `discovery_timeout`, `tls_failed`, `roaming_authorization_empty`,
+`handoff_identity_mismatch`, `beacon_tls_identity_mismatch`, `endpoint_policy_rejected`,
+`wifi_preference_expired`, `endpoint_authentication_timeout`, `station_timeout`,
+`station_disconnected`, `runtime_restart`, `handoff_transition`, `transport_failed`,
+`endpoint_rejected`, and `other`. `none` with counter zero is the boot/no-completed-attempt
+state. A completed unclassified close is `other`; success itself is not a close.
+The first reject reason wins through cleanup. A new pending attempt, BLE connection,
+or network restart cannot erase the last completed record. Counts and elapsed times
+saturate at `u32::MAX`, never wrap; reboot clears them. The counter increments for
+each started Wi-Fi candidate and is published with its completed record, so a read
+while a new attempt is pending still names the previous closed attempt.
+
+The equality result is meaningful only when `identity_checked` is true. Pinned-v1
+admission does not compare roaming identities. TLS time is zero unless `tls_verified`
+is true. Equal requires checked, checked requires verified TLS, TLS time cannot exceed
+close time, and a zero counter requires the empty state. All other shapes fail closed.
+The single page is copied atomically from RAM under a short transport critical section;
+no identity, address, certificate, link material, text, or flash write is exposed.
+The shared vector is `protocol/vectors/local-wifi-diagnostic.hex`.
+
 ## Direct host commands
 
 The agent-facing CLI reaches the vendor HID interface directly. It does not contact `keyferryd`,

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include "freertos/FreeRTOS.h"
+#include "keyferry/wifi_attempt_diagnostics.h"
 
 #include "keyferry/ble_tls_link.h"
 #include "keyferry/gateway_handoff.h"
@@ -37,6 +39,7 @@ struct TransportDiagnostics {
   std::int32_t wifi_error = 0;
   std::int32_t nvs_error = 0;
   ble::PeripheralStatus ble{};
+  WifiAttemptStatus wifi_attempt{};
 };
 
 class Delegate {
@@ -133,11 +136,15 @@ class EspTransport final : public endpoint::Effects {
   void CandidateFailed(std::uint64_t now_ms);
   void ActiveTransportLost(std::uint64_t now_ms);
   void RestartRuntime(std::uint64_t now_ms);
-  void CloseCurrentTls();
+  void CloseCurrentTls(bool finish_wifi_attempt = true);
+  void RejectWifi(protocol::WifiRejectReason reason);
+  void CloseWifiAttempt();
   void ClearPeerAuthorization();
   std::uint32_t WifiPreferenceRemainingMs(std::uint64_t now_ms) const;
   void RecordWifi(WifiStage stage, std::int32_t error = 0);
 
+  WifiAttemptDiagnostics wifi_attempt_{};
+  mutable portMUX_TYPE wifi_diagnostic_mux_ = portMUX_INITIALIZER_UNLOCKED;
   RuntimeConfig config_;
   Delegate& delegate_;
   endpoint::EndpointSession session_;

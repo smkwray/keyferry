@@ -83,10 +83,21 @@ struct ProbeStatus {
   std::uint32_t probe_stack_free{};
 };
 
+struct WifiDiagnosticStatus {
+  protocol::WifiRejectReason last_wifi_reject_reason{protocol::WifiRejectReason::kNone};
+  bool beacon_tls_identity_equal{};
+  bool identity_checked{};
+  bool tls_verified{};
+  std::uint32_t attempt_count{};
+  std::uint32_t elapsed_to_tls_ms{};
+  std::uint32_t elapsed_to_close_ms{};
+};
+
 struct StatusSnapshot {
   DeviceStatus device{};
   SafetyStatus safety{};
   NetworkStatus network{};
+  WifiDiagnosticStatus wifi_diagnostic{};
   BleHidStatus ble_hid{};
   PolicyStatus policy{};
   bool probe_available{};

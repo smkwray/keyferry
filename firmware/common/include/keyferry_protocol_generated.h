@@ -282,6 +282,26 @@ enum class LocalManagementStatusPage : std::uint8_t {
   kProbeRun = 0x07,
   kProbeHeap = 0x08,
   kProbeStack = 0x09,
+  kWifiDiagnostic = 0x0A,
+};
+
+enum class WifiRejectReason : std::uint8_t {
+  kNone = 0x00,
+  kDiscoveryTimeout = 0x01,
+  kTlsFailed = 0x02,
+  kRoamingAuthorizationEmpty = 0x03,
+  kHandoffIdentityMismatch = 0x04,
+  kBeaconTlsIdentityMismatch = 0x05,
+  kEndpointPolicyRejected = 0x06,
+  kWifiPreferenceExpired = 0x07,
+  kEndpointAuthenticationTimeout = 0x08,
+  kStationTimeout = 0x09,
+  kStationDisconnected = 0x0A,
+  kRuntimeRestart = 0x0B,
+  kHandoffTransition = 0x0C,
+  kTransportFailed = 0x0D,
+  kEndpointRejected = 0x0E,
+  kOther = 0x0F,
 };
 
 enum class LocalManagementProbePhase : std::uint8_t {
