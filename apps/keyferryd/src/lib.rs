@@ -539,6 +539,9 @@ fn unsupported_keyboard_lock_state() -> String {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FirmwareView {
+    /// Authenticated endpoint bits; absent on older controllers, never inferred.
+    #[serde(default)]
+    pub device_capability_mask: u32,
     pub endpoint: String,
     pub elf_sha256: String,
     pub board_compatibility_id: u32,
@@ -3290,6 +3293,7 @@ impl Daemon {
             .session_snapshot()?
             .firmware_identity?;
         Some(FirmwareView {
+            device_capability_mask: identity.device_capability_mask,
             endpoint: identity.release,
             elf_sha256: encode_hex(&identity.elf_sha256),
             board_compatibility_id: identity.board_compatibility_id,
@@ -8546,6 +8550,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(device["firmware"]["endpoint"], "ABC12345");
+        assert_eq!(device["firmware"]["device_capability_mask"], u32::MAX);
         assert_eq!(device["firmware"]["usb_file_set_v2"], true);
         assert_eq!(device["firmware"]["keyboard_lock_state"], "unsupported");
         let (status, devices) = call_json(&mut router, "GET", "/v1/devices".to_owned(), None).await;
@@ -8558,7 +8563,12 @@ mod tests {
         // A holder view rendered by a daemon that predates the field never reads as "off".
         let mut older = device["firmware"].clone();
         older.as_object_mut().unwrap().remove("keyboard_lock_state");
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("device_capability_mask");
         let older: FirmwareView = serde_json::from_value(older).unwrap();
+        assert_eq!(older.device_capability_mask, 0);
         assert_eq!(older.keyboard_lock_state, KEYBOARD_LOCK_STATE_UNSUPPORTED);
         assert_eq!(
             serde_json::to_value(&older).unwrap()["keyboard_lock_state"],
