@@ -2669,15 +2669,22 @@ dependencies = [
 name = "keyctl"
 version = "0.0.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
  "ctrlc",
  "keyferry-core",
  "keyferry-layouts",
  "keyferry-protocol",
+ "keyferryd",
  "png",
  "serde",
  "serde_json",
+ "sha2",
  "time",
+ "tokio",
  "uuid",
+ "windows",
+ "windows-future",
 ]
 
 [[package]]

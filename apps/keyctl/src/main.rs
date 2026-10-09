@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
 mod capture;
+mod frames;
+mod geometry;
+mod mcp;
+mod ocr;
 mod recipe;
 
 use keyferry_core::TransportDiagnostic;
@@ -92,6 +96,12 @@ fn main() -> ExitCode {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h" | "help") {
         println!("{}", help_text());
         return ExitCode::SUCCESS;
+    }
+    if args[0] == "mcp" {
+        return ExitCode::from(mcp::run(&args[1..], &url, &token_file));
+    }
+    if args[0] == "capture" && args.get(1).is_some_and(|s| s == "calibrate") {
+        return ExitCode::from(mcp::calibrate_cli(&args[2..], &url, &token_file));
     }
     if args[0] == "capture" {
         return ExitCode::from(capture::run(&args[1..]));
@@ -1220,7 +1230,7 @@ fn default_recipe_dir() -> PathBuf {
 }
 
 fn help_text() -> &'static str {
-    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
+    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  mcp --device UUID [--source NAME_OR_ID]  (stdio agent KVM tools; mcp --help)\n  capture calibrate DEVICE [--source NAME_OR_ID]  (cursor binding and geometry; moves pointer)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
 }
 
 fn run_local_helper(args: &[String]) -> u8 {
@@ -2571,37 +2581,63 @@ fn submit_prepared_command(
         );
         return 25;
     }
+    submit_prepared_with_interrupt(
+        client,
+        device,
+        detach,
+        endpoint_suffix,
+        command_id,
+        body,
+        &interrupted,
+        |rendered| {
+            println!("{rendered}");
+        },
+    )
+}
+
+// Both CLI and MCP select this single submission/outcome engine. No payload diagnostics.
+#[allow(clippy::too_many_arguments)]
+fn submit_prepared_with_interrupt(
+    client: &Client,
+    device: &str,
+    detach: bool,
+    endpoint_suffix: &str,
+    command_id: &str,
+    body: &str,
+    interrupted: &AtomicBool,
+    mut emit: impl FnMut(String),
+) -> u8 {
     let path = format!("/v1/devices/{device}{endpoint_suffix}");
     let (initial, uncertain_post) = match client.sequence_post(&path, body) {
         Ok(response) if response.status < 400 => match parse_daemon_outcome(&response.body) {
             Ok(outcome) => (outcome, false),
             Err(()) => {
-                emit_sequence_result(
+                emit(sequence_result_json(
                     device,
                     Some(command_id),
                     SequenceOutcome::Unknown,
                     Some("protocol.invalid_response"),
-                );
+                ));
                 return 25;
             }
         },
         Ok(response) => {
             let code = http_exit_code(response.status);
-            emit_sequence_result(
+            emit(sequence_result_json(
                 device,
                 Some(command_id),
                 http_outcome(response.status),
                 Some(http_error_code(response.status)),
-            );
+            ));
             return code;
         }
         Err(error) if !error.may_have_sent => {
-            emit_sequence_result(
+            emit(sequence_result_json(
                 device,
                 Some(command_id),
                 SequenceOutcome::Rejected,
                 Some("daemon.unavailable"),
-            );
+            ));
             return 23;
         }
         Err(_) => (
@@ -2618,7 +2654,7 @@ fn submit_prepared_command(
         ),
     };
     if detach {
-        emit_daemon_sequence_result(device, command_id, &initial);
+        emit(daemon_sequence_result_json(device, command_id, &initial));
         return if initial.outcome == SequenceOutcome::Queued {
             0
         } else {
@@ -2630,7 +2666,7 @@ fn submit_prepared_command(
     let mut cancellation_deadline = None;
     loop {
         if last.terminal && (!uncertain_post || last.outcome != SequenceOutcome::Unknown) {
-            emit_daemon_sequence_result(device, command_id, &last);
+            emit(daemon_sequence_result_json(device, command_id, &last));
             return outcome_exit_code(last.outcome);
         }
         if started.elapsed() >= SEQUENCE_WAIT_TIMEOUT {
@@ -2639,7 +2675,12 @@ fn submit_prepared_command(
             } else {
                 (last.outcome, "command.wait_timeout", 24)
             };
-            emit_sequence_result(device, Some(command_id), outcome, Some(error));
+            emit(sequence_result_json(
+                device,
+                Some(command_id),
+                outcome,
+                Some(error),
+            ));
             return code;
         }
         if interrupted.load(Ordering::Acquire) && cancellation_deadline.is_none() {
@@ -2652,12 +2693,12 @@ fn submit_prepared_command(
             cancellation_deadline = Some(std::time::Instant::now() + SEQUENCE_CANCEL_RECONCILE);
         }
         if cancellation_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            emit_sequence_result(
+            emit(sequence_result_json(
                 device,
                 Some(command_id),
                 SequenceOutcome::Unknown,
                 Some("command.cancel_reconciliation_timeout"),
-            );
+            ));
             return 12;
         }
         std::thread::sleep(SEQUENCE_POLL_INTERVAL);
@@ -2691,11 +2732,11 @@ fn parse_daemon_outcome(body: &str) -> Result<DaemonCommandResponse, ()> {
     Ok(response)
 }
 
-fn emit_daemon_sequence_result(
+fn daemon_sequence_result_json(
     device_id: &str,
     command_id: &str,
     response: &DaemonCommandResponse,
-) {
+) -> String {
     let rendered = sequence_result_json_with_transport(
         device_id,
         Some(command_id),
@@ -2711,9 +2752,7 @@ fn emit_daemon_sequence_result(
         },
         response.diagnostic_code.as_deref(),
     );
-    let mut output = io::stdout().lock();
-    let _ = output.write_all(rendered.as_bytes());
-    let _ = output.write_all(b"\n");
+    rendered
 }
 
 fn emit_sequence_result(

@@ -5,7 +5,7 @@ use std::{
     fs::OpenOptions,
     io::{self, Cursor, Read, Write},
     path::PathBuf,
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -15,7 +15,7 @@ const MAX_PIXELS: usize = 4096 * 4096;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_LIST_BYTES: usize = 256 * 1024;
 
-pub const HELP: &str = "keyctl capture list\nkeyctl capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  Local USB HDMI/UVC video capture using ffmpeg on PATH; never contacts a stick or daemon.\n  Default source: the single recognized capture device; otherwise supply --source from list.\n  --size selects the input mode; --scale resizes the output (each at most 4096x4096 pixels).\n  Writes one PNG only to --out; refuses an existing path. Screens may contain secrets: keep and delete it privately.\n  Each ffmpeg process has a 15-second deadline; no retries or temporary frames.\n  signal=no-signal is a near-uniform black/blue heuristic, not proof of HDMI signal loss.\n  On macOS grant Camera permission to the terminal/app in System Settings > Privacy & Security.\n  Exit: 0 success (including no-signal), 20 arguments/source selection, 23 ffmpeg missing,\n        24 timeout (child killed), 25 capture/list/decode/output failure. Output/errors are compact JSON.";
+pub const HELP: &str = "keyctl capture calibrate DEVICE [--source NAME_OR_ID] (moves pointer through daemon; see keyctl mcp --help)\nkeyctl capture list\nkeyctl capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  list/frame: local USB HDMI/UVC video capture using ffmpeg on PATH; never contacts a stick or daemon.\n  Default source: the single recognized capture device; otherwise supply --source from list.\n  --size selects the input mode; --scale resizes the output (each at most 4096x4096 pixels).\n  Writes one PNG only to --out; refuses an existing path. Screens may contain secrets: keep and delete it privately.\n  Each ffmpeg process has a 15-second deadline; no retries or temporary frames.\n  signal=no-signal is a near-uniform black/blue heuristic, not proof of HDMI signal loss.\n  On macOS grant Camera permission to the terminal/app in System Settings > Privacy & Security.\n  Exit: 0 success (including no-signal), 20 arguments/source selection, 23 ffmpeg missing,\n        24 timeout (child killed), 25 capture/list/decode/output failure. Output/errors are compact JSON.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Backend {
@@ -317,8 +317,7 @@ fn bounded_output(
         }
     };
     if status.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
     }
     let stdout = out
         .join()
@@ -331,6 +330,22 @@ fn bounded_output(
         stdout: stdout??,
         stderr: stderr??,
     })
+}
+
+/// Windows PATH launchers may spawn the real encoder as a grandchild holding both pipes.
+/// Stop this owned child's entire tree before joining readers; never use a process name.
+pub(super) fn stop_child(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn list(
@@ -609,6 +624,62 @@ fn signal(rgb: &[u8]) -> (&'static str, f64) {
         },
         (luma * 100.0).round() / 100.0,
     )
+}
+
+/// Enumerate and probe in memory, then return arguments for one continuous raw RGB pipe.
+/// The probe bounds the native geometry; showinfo detects a later input-mode change.
+pub(super) fn stream_setup(
+    source: Option<&str>,
+) -> Result<(String, u32, u32, Vec<String>), &'static str> {
+    let backend = Backend::current();
+    let devices = list(backend, &|| Command::new("ffmpeg"), TIMEOUT).map_err(|e| e.code)?;
+    let device = select_source(&devices, source).map_err(|e| e.code)?;
+    let options = FrameOptions {
+        out: PathBuf::new(),
+        source: None,
+        size: None,
+        scale: None,
+    };
+    let mut command = Command::new("ffmpeg");
+    command.args(frame_args(backend, device, &options));
+    let output = bounded_output(command, TIMEOUT, MAX_FRAME_BYTES, backend).map_err(|e| e.code)?;
+    if !output.status.success() {
+        return Err("capture.frame_failed");
+    }
+    let (w, h, _) = decode(&output.stdout).map_err(|e| e.code)?;
+    let mut args = frame_args(backend, device, &options);
+    let end = args
+        .iter()
+        .position(|s| s == "-frames:v")
+        .ok_or("capture.arguments")?;
+    args.truncate(end);
+    // Keep aspect ratio; bound both dimensions, preserving screenshot pixel coordinates.
+    let (sw, sh) = super::frames::scaled_size((w, h));
+    let level = args
+        .iter()
+        .position(|s| s == "-loglevel")
+        .ok_or("capture.arguments")?;
+    args[level + 1] = "info".into();
+    if let Some(buffer) = args.iter().position(|s| s == "-rtbufsize") {
+        args[buffer + 1] = "16M".into();
+    }
+    args.extend([
+        "-vf".into(),
+        format!("showinfo,scale={sw}:{sh}"),
+        "-an".into(),
+        "-sn".into(),
+        "-dn".into(),
+        "-threads".into(),
+        "1".into(),
+        "-filter_threads".into(),
+        "1".into(),
+        "-pix_fmt".into(),
+        "rgb24".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]);
+    Ok((device.id.clone(), w, h, args))
 }
 
 #[cfg(test)]

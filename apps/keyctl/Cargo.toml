@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+sha2 = { version = "=0.10.9", default-features = false }
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 ctrlc = { version = "=3.5.2", default-features = false }
 keyferry-core = { path = "../../crates/keyferry-core" }
 keyferry-layouts = { path = "../../crates/keyferry-layouts" }
@@ -26,3 +28,12 @@ harness = false
 name = "capture_cli"
 path = "tests/capture_cli.rs"
 harness = false
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", default-features = false, features = ["std", "Foundation", "Foundation_Collections", "Graphics_Imaging", "Media_Ocr", "Storage_Streams"] }
+windows-future = { version = "=0.3.2", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+keyferryd = { path = "../keyferryd" }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+axum = { version = "=0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
