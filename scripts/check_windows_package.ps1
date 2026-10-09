@@ -8,7 +8,10 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $projectRoot
 $logicalCpus = [Environment]::ProcessorCount
-$buildJobs = [Math]::Max(1, [Math]::Floor($logicalCpus * 0.60))
+$buildJobCeiling = [Math]::Max(1, [Math]::Floor($logicalCpus * 0.60))
+$buildJobs = if ($env:CARGO_BUILD_JOBS) {
+    [Math]::Min($buildJobCeiling, [Math]::Max(1, [int]$env:CARGO_BUILD_JOBS))
+} else { $buildJobCeiling }
 $env:CARGO_BUILD_JOBS = [string]$buildJobs
 Write-Output "build concurrency: $buildJobs jobs (60% of $logicalCpus logical CPUs)"
 # Panic locations embed source paths. Map the home, Cargo, and project prefixes (last match wins)
@@ -25,7 +28,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows daemon tests failed.' }
 cargo build --locked --release -p keyferry -p keyferryd -p keyferry-pairing -p keyctl
 if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
 
-$releaseRoot = Join-Path $projectRoot 'target\release'
+$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $projectRoot 'target' }
+$releaseRoot = Join-Path $targetRoot 'release'
 $controller = Join-Path $releaseRoot 'keyferry.exe'
 $daemon = Join-Path $releaseRoot 'keyferryd.exe'
 $pairing = Join-Path $releaseRoot 'keyferry-pairing.exe'
