@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use uuid::Version;
 
+pub const INPUT_SEQUENCE_SCHEMA_V2: &str = "keyferry.input-sequence.v2";
 pub const INPUT_SEQUENCE_SCHEMA_V1: &str = "keyferry.input-sequence.v1";
 pub const MAX_INPUT_BYTES: usize = 65_536;
 pub const MAX_INPUT_DEPTH: usize = 8;
@@ -66,6 +67,8 @@ pub enum ClickButton {
     Button1,
     #[serde(rename = "button_2")]
     Button2,
+    #[serde(rename = "button_3")]
+    Button3,
 }
 
 impl ClickButton {
@@ -74,6 +77,58 @@ impl ClickButton {
         match self {
             Self::Button1 => 1,
             Self::Button2 => 2,
+            Self::Button3 => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PointerPosition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_px: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_px: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_w: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_h: Option<u64>,
+}
+
+impl PointerPosition {
+    pub fn hid_coordinates(&self) -> Result<(u16, u16), InputError> {
+        match (
+            &self.x,
+            &self.y,
+            self.x_px,
+            self.y_px,
+            self.frame_w,
+            self.frame_h,
+        ) {
+            (Some(x), Some(y), None, None, None, None) => {
+                let axis = |n: &serde_json::Number| {
+                    let v = n.as_f64().ok_or(InputError::PointerOutOfScope)?;
+                    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                        return Err(InputError::PointerOutOfScope);
+                    }
+                    Ok((v * 32767.0).round() as u16)
+                };
+                Ok((axis(x)?, axis(y)?))
+            }
+            (None, None, Some(x), Some(y), Some(w), Some(h))
+                if (2..=65536).contains(&w) && (2..=65536).contains(&h) && x < w && y < h =>
+            {
+                // Pixel centres: the first and last pixel map exactly to the HID endpoints.
+                Ok((
+                    ((x * 32767 + (w - 1) / 2) / (w - 1)) as u16,
+                    ((y * 32767 + (h - 1) / 2) / (h - 1)) as u16,
+                ))
+            }
+            _ => Err(InputError::PointerOutOfScope),
         }
     }
 }
@@ -95,6 +150,27 @@ pub struct InputSequenceV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InputAction {
+    MoveAbsolute {
+        #[serde(flatten)]
+        position: PointerPosition,
+    },
+    Scroll {
+        vertical: i64,
+        horizontal: i64,
+    },
+    ButtonDown {
+        button: ClickButton,
+    },
+    ButtonUp {
+        button: ClickButton,
+    },
+    Drag {
+        button: ClickButton,
+        #[serde(flatten)]
+        position: PointerPosition,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_ms: Option<u64>,
+    },
     Text {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,6 +272,11 @@ pub struct MouseDelta {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputGesture {
+    /// A bounded V2 wire unit; held spans are combined before packetization.
+    ExtendedPointer {
+        records: Vec<Vec<u8>>,
+        cost_ms: u64,
+    },
     Keyboard {
         report: KeyboardReport,
         timing: TypingTiming,
@@ -246,6 +327,7 @@ pub struct CompiledInputSequence {
     pub planned_ms: u64,
     pub has_keyboard: bool,
     pub has_pointer: bool,
+    pub requires_extended: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,7 +542,14 @@ fn validate_json_tree(value: &serde_json::Value, depth: usize) -> Result<(), Inp
             }
         }
         serde_json::Value::Object(values) => {
-            for value in values.values() {
+            let coordinates = values
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|t| t == "move_absolute" || t == "drag");
+            for (key, value) in values {
+                if coordinates && (key == "x" || key == "y") && value.is_number() {
+                    continue;
+                }
                 validate_json_tree(value, depth + 1)?;
             }
         }
@@ -509,8 +598,34 @@ fn validate_shape(value: &serde_json::Value) -> Result<(), InputError> {
         .get("actions")
         .and_then(serde_json::Value::as_array)
         .ok_or(InputError::Json)?;
+    let extended =
+        object.get("schema").and_then(serde_json::Value::as_str) == Some(INPUT_SEQUENCE_SCHEMA_V2);
     for action in actions {
-        validate_action_shape(action, true)?;
+        let kind = action.get("type").and_then(serde_json::Value::as_str);
+        if extended
+            && matches!(
+                kind,
+                Some("move_absolute" | "scroll" | "drag" | "button_down" | "button_up")
+            )
+        {
+            let a = action.as_object().ok_or(InputError::Json)?;
+            let allowed: &[&str] = match kind.unwrap() {
+                "move_absolute" => &["type", "x", "y", "x_px", "y_px", "frame_w", "frame_h"],
+                "drag" => &[
+                    "type", "button", "hold_ms", "x", "y", "x_px", "y_px", "frame_w", "frame_h",
+                ],
+                "scroll" => &["type", "vertical", "horizontal"],
+                _ => &["type", "button"],
+            };
+            reject_unknown(a, allowed)?;
+            reject_null(a, allowed)?;
+        } else if extended && matches!(kind, Some("click" | "double_click")) {
+            let a = action.as_object().ok_or(InputError::Json)?;
+            reject_unknown(a, &["type", "button", "hold_ms", "release_gap_ms"])?;
+            reject_null(a, &["hold_ms", "release_gap_ms"])?;
+        } else {
+            validate_action_shape(action, true)?;
+        }
     }
     Ok(())
 }
@@ -604,6 +719,7 @@ fn reject_null(
 }
 
 struct CompileState {
+    extended: bool,
     gestures: Vec<InputGesture>,
     source_nodes: usize,
     text_characters: usize,
@@ -625,7 +741,8 @@ enum Leaf<'a> {
 pub fn compile_input_sequence(
     request: &InputSequenceV1,
 ) -> Result<CompiledInputSequence, InputError> {
-    if request.schema != INPUT_SEQUENCE_SCHEMA_V1 {
+    let extended = request.schema == INPUT_SEQUENCE_SCHEMA_V2;
+    if request.schema != INPUT_SEQUENCE_SCHEMA_V1 && !extended {
         return Err(InputError::Schema);
     }
     let command_id =
@@ -648,6 +765,7 @@ pub fn compile_input_sequence(
         .keyboard_timing
         .unwrap_or(InputKeyboardTiming::DESKTOP_SAFE);
     let mut state = CompileState {
+        extended,
         gestures: Vec::new(),
         source_nodes: request.actions.len(),
         text_characters: 0,
@@ -656,7 +774,111 @@ pub fn compile_input_sequence(
         has_pointer: false,
     };
     for action in &request.actions {
+        if !extended
+            && matches!(
+                action,
+                InputAction::MoveAbsolute { .. }
+                    | InputAction::Scroll { .. }
+                    | InputAction::ButtonDown { .. }
+                    | InputAction::ButtonUp { .. }
+                    | InputAction::Drag { .. }
+                    | InputAction::Click {
+                        button: ClickButton::Button3,
+                        ..
+                    }
+                    | InputAction::DoubleClick {
+                        button: ClickButton::Button3,
+                        ..
+                    }
+            )
+        {
+            return Err(InputError::PointerOutOfScope);
+        }
         match action {
+            InputAction::MoveAbsolute { position } => {
+                let (x, y) = position.hid_coordinates()?;
+                let payload = [x.to_le_bytes(), y.to_le_bytes()].concat();
+                push_effect(
+                    &mut state,
+                    InputGesture::ExtendedPointer {
+                        records: vec![record(action::POINTER_MOVE_ABSOLUTE, &payload)],
+                        cost_ms: 10,
+                    },
+                    false,
+                    true,
+                )?;
+            }
+            InputAction::Scroll {
+                vertical,
+                horizontal,
+            } => {
+                if !(-127..=127).contains(vertical)
+                    || !(-127..=127).contains(horizontal)
+                    || (*vertical == 0 && *horizontal == 0)
+                {
+                    return Err(InputError::PointerOutOfScope);
+                }
+                push_effect(
+                    &mut state,
+                    InputGesture::ExtendedPointer {
+                        records: vec![record(
+                            action::POINTER_SCROLL,
+                            &[*vertical as i8 as u8, *horizontal as i8 as u8],
+                        )],
+                        cost_ms: 10,
+                    },
+                    false,
+                    true,
+                )?;
+            }
+            InputAction::ButtonDown { button } | InputAction::ButtonUp { button } => {
+                let tag = if matches!(action, InputAction::ButtonDown { .. }) {
+                    action::POINTER_BUTTON_DOWN
+                } else {
+                    action::POINTER_BUTTON_UP
+                };
+                push_effect(
+                    &mut state,
+                    InputGesture::ExtendedPointer {
+                        records: vec![record(tag, &[button.usage()])],
+                        cost_ms: if tag == action::POINTER_BUTTON_UP {
+                            20
+                        } else {
+                            10
+                        },
+                    },
+                    false,
+                    true,
+                )?;
+            }
+            InputAction::Drag {
+                button,
+                position,
+                hold_ms,
+            } => {
+                let (x, y) = position.hid_coordinates()?;
+                let hold = hold_ms.unwrap_or(DEFAULT_CLICK_MS);
+                if !(10..=100).contains(&hold) {
+                    return Err(InputError::Timing);
+                }
+                push_effect(
+                    &mut state,
+                    InputGesture::ExtendedPointer {
+                        records: vec![
+                            record(action::POINTER_BUTTON_DOWN, &[button.usage()]),
+                            record(
+                                action::POINTER_MOVE_ABSOLUTE,
+                                &[x.to_le_bytes(), y.to_le_bytes()].concat(),
+                            ),
+                            record(action::WAIT_MS, &(hold as u16).to_le_bytes()),
+                            record(action::POINTER_BUTTON_UP, &[button.usage()]),
+                        ],
+                        cost_ms: 40 + hold,
+                    },
+                    false,
+                    true,
+                )?;
+            }
             InputAction::Text { value, timing } => {
                 compile_leaf(&mut state, Leaf::Text(value, *timing), default_timing)?
             }
@@ -749,13 +971,22 @@ pub fn compile_input_sequence(
             }
         }
     }
-    let (chunks, planned_ms) = packetize(&state.gestures)?;
+    if extended {
+        balance_pointer_spans(&mut state.gestures)?;
+    }
+    let (chunks, planned_ms) = packetize(&state.gestures, extended)?;
     let profile = if state.has_keyboard {
         LEGACY_WIRE_MAPPING
     } else {
         "none"
     };
-    let fingerprint = fingerprint(request.start_within_ms, profile, &chunks);
+    let mut fingerprint = fingerprint(request.start_within_ms, profile, &chunks);
+    if extended {
+        let mut hash = Sha256::new();
+        hash.update(b"keyferry.input-sequence.v2\0pointer-extended-v1\0");
+        hash.update(fingerprint);
+        fingerprint = hash.finalize().into();
+    }
     Ok(CompiledInputSequence {
         gestures: state.gestures,
         chunks,
@@ -766,6 +997,7 @@ pub fn compile_input_sequence(
         planned_ms,
         has_keyboard: state.has_keyboard,
         has_pointer: state.has_pointer,
+        requires_extended: extended,
     })
 }
 
@@ -903,6 +1135,9 @@ fn compile_leaf(
             )?;
         }
         Leaf::Click(button, hold_ms, release_gap_ms, double) => {
+            if button == ClickButton::Button3 && !state.extended {
+                return Err(InputError::PointerButton);
+            }
             let hold_ms = hold_ms.unwrap_or(DEFAULT_CLICK_MS);
             let release_gap_ms = release_gap_ms.unwrap_or(DEFAULT_CLICK_MS);
             if !(10..=100).contains(&hold_ms) || !(10..=100).contains(&release_gap_ms) {
@@ -958,7 +1193,12 @@ pub fn canonicalize_input_sequence_keys(request: &mut InputSequenceV1) {
             | InputAction::Wait { .. }
             | InputAction::MoveRelative { .. }
             | InputAction::Click { .. }
-            | InputAction::DoubleClick { .. } => {}
+            | InputAction::DoubleClick { .. }
+            | InputAction::MoveAbsolute { .. }
+            | InputAction::Scroll { .. }
+            | InputAction::ButtonDown { .. }
+            | InputAction::ButtonUp { .. }
+            | InputAction::Drag { .. } => {}
         }
     }
 }
@@ -1024,10 +1264,69 @@ struct EncodedUnit {
     effectful: bool,
 }
 
-fn packetize(gestures: &[InputGesture]) -> Result<(Vec<InputChunk>, u64), InputError> {
+fn balance_pointer_spans(gestures: &mut Vec<InputGesture>) -> Result<(), InputError> {
+    let mut output = Vec::new();
+    let mut held = 0u8;
+    let mut span = Vec::new();
+    let mut span_ms = 0u64;
+    for gesture in gestures.drain(..) {
+        let unit = encode_unit(&gesture);
+        let was_held = held != 0;
+        for r in &unit.records {
+            match r[0] {
+                action::POINTER_BUTTON_DOWN if held == 0 => held = r[2],
+                action::POINTER_BUTTON_UP if held == r[2] && held != 0 => held = 0,
+                action::POINTER_BUTTON_DOWN | action::POINTER_BUTTON_UP => {
+                    return Err(InputError::PointerButton)
+                }
+                action::POINTER_MOVE_ABSOLUTE | action::WAIT_MS => {}
+                _ if held != 0 => return Err(InputError::PointerButton),
+                _ => {}
+            }
+        }
+        if was_held || held != 0 {
+            span.extend(unit.records);
+            span_ms += unit.cost_ms;
+            if span_ms + 30 > MAX_INPUT_CHUNK_MS
+                || span.len() + 1 > MAX_INPUT_ACTION_RECORDS
+                || span.iter().map(Vec::len).sum::<usize>() + 2 > MAX_INPUT_ACTION_BYTES
+            {
+                return Err(InputError::Limit);
+            }
+            if held == 0 {
+                output.push(InputGesture::ExtendedPointer {
+                    records: std::mem::take(&mut span),
+                    cost_ms: span_ms,
+                });
+                span_ms = 0;
+            }
+        } else {
+            output.push(gesture);
+        }
+    }
+    if held != 0 {
+        return Err(InputError::PointerButton);
+    }
+    *gestures = output;
+    Ok(())
+}
+
+fn packetize(
+    gestures: &[InputGesture],
+    extended: bool,
+) -> Result<(Vec<InputChunk>, u64), InputError> {
+    let neutral_cost_ms = if extended { 30 } else { NEUTRAL_COST_MS };
     let mut units = Vec::with_capacity(gestures.len());
     for gesture in gestures {
-        units.push(encode_unit(gesture));
+        let mut unit = encode_unit(gesture);
+        if extended {
+            unit.cost_ms += match gesture {
+                InputGesture::Click { .. } => 10,
+                InputGesture::DoubleClick { .. } => 20,
+                _ => 0,
+            };
+        }
+        units.push(unit);
     }
     let mut raw_chunks: Vec<(Vec<Vec<u8>>, u64, bool)> = Vec::new();
     let mut records: Vec<Vec<u8>> = Vec::new();
@@ -1038,7 +1337,7 @@ fn packetize(gestures: &[InputGesture]) -> Result<(Vec<InputChunk>, u64), InputE
         let unit_bytes = unit.records.iter().map(Vec::len).sum::<usize>();
         let fits = records.len() + unit.records.len() < MAX_INPUT_ACTION_RECORDS
             && bytes + unit_bytes + NEUTRAL_RECORD_BYTES <= MAX_INPUT_ACTION_BYTES
-            && cost + unit.cost_ms + NEUTRAL_COST_MS <= MAX_INPUT_CHUNK_MS;
+            && cost + unit.cost_ms + neutral_cost_ms <= MAX_INPUT_CHUNK_MS;
         if !fits && !records.is_empty() {
             raw_chunks.push((std::mem::take(&mut records), cost, effectful));
             bytes = 0;
@@ -1047,7 +1346,7 @@ fn packetize(gestures: &[InputGesture]) -> Result<(Vec<InputChunk>, u64), InputE
         }
         if unit.records.len() >= MAX_INPUT_ACTION_RECORDS
             || unit_bytes + NEUTRAL_RECORD_BYTES > MAX_INPUT_ACTION_BYTES
-            || unit.cost_ms + NEUTRAL_COST_MS > MAX_INPUT_CHUNK_MS
+            || unit.cost_ms + neutral_cost_ms > MAX_INPUT_CHUNK_MS
         {
             return Err(InputError::Limit);
         }
@@ -1073,7 +1372,7 @@ fn packetize(gestures: &[InputGesture]) -> Result<(Vec<InputChunk>, u64), InputE
             body.extend_from_slice(record);
         }
         body.extend_from_slice(&[action::NEUTRAL_ALL, 0]);
-        let chunk_ms = cost + NEUTRAL_COST_MS;
+        let chunk_ms = cost + neutral_cost_ms;
         planned_ms = planned_ms.saturating_add(chunk_ms);
         chunks.push(InputChunk {
             index: index as u16,
@@ -1092,6 +1391,11 @@ fn packetize(gestures: &[InputGesture]) -> Result<(Vec<InputChunk>, u64), InputE
 
 fn encode_unit(gesture: &InputGesture) -> EncodedUnit {
     match gesture {
+        InputGesture::ExtendedPointer { records, cost_ms } => EncodedUnit {
+            records: records.clone(),
+            cost_ms: *cost_ms,
+            effectful: true,
+        },
         InputGesture::Keyboard { report, timing } => {
             let usages: Vec<u8> = report
                 .keys
@@ -1653,5 +1957,73 @@ mod tests {
             compile_input_sequence(&seven),
             Err(InputError::RolloverLimit)
         );
+    }
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    fn compile(actions: &str) -> Result<CompiledInputSequence, InputError> {
+        let json = format!(
+            r#"{{"schema":"keyferry.input-sequence.v2","command_id":"01995fa0-0000-7000-8000-000000000001","arm":"command-scoped","start_within_ms":5000,"actions":{actions}}}"#
+        );
+        compile_input_sequence(&parse_input_sequence_json(json.as_bytes())?)
+    }
+    #[test]
+    fn coordinates_are_explicit_and_round_to_endpoints() {
+        let a = compile(r#"[{"type":"move_absolute","x":0.0,"y":1.0}]"#).unwrap();
+        assert_eq!(&a.chunks[0].body[4..10], &[8, 4, 0, 0, 255, 127]);
+        let b = compile(
+            r#"[{"type":"move_absolute","x_px":1919,"y_px":1079,"frame_w":1920,"frame_h":1080}]"#,
+        )
+        .unwrap();
+        assert_eq!(&b.chunks[0].body[4..10], &[8, 4, 255, 127, 255, 127]);
+        let c = compile(r#"[{"type":"move_absolute","x":0.5,"y":0.5}]"#).unwrap();
+        assert_eq!(&c.chunks[0].body[4..10], &[8, 4, 0, 64, 0, 64]);
+        let pixel = compile(
+            r#"[{"type":"move_absolute","x_px":812,"y_px":440,"frame_w":1920,"frame_h":1080}]"#,
+        )
+        .unwrap();
+        assert!(pixel.requires_extended);
+        assert!(compile(r#"[{"type":"move_absolute","x":1.01,"y":0}]"#).is_err());
+        assert!(compile(r#"[{"type":"move_absolute","x":0,"y":0,"frame_w":1920}]"#).is_err());
+        assert!(compile(
+            r#"[{"type":"move_absolute","x_px":1920,"y_px":0,"frame_w":1920,"frame_h":1080}]"#
+        )
+        .is_err());
+        assert!(compile(r#"[{"type":"move_absolute","x":0,"x":1,"y":0}]"#).is_err());
+        assert!(compile(r#"[{"type":"move_absolute","x":null,"y":0}]"#).is_err());
+    }
+    #[test]
+    fn held_spans_are_balanced_bounded_and_atomic() {
+        let p = compile(r#"[{"type":"button_down","button":"button_1"},{"type":"move_absolute","x":0.9,"y":0.1},{"type":"wait","ms":40},{"type":"button_up","button":"button_1"}]"#).unwrap();
+        assert_eq!(p.chunks.len(), 1);
+        assert!(compile(r#"[{"type":"button_down","button":"button_1"}]"#).is_err());
+        assert!(compile(r#"[{"type":"button_up","button":"button_1"}]"#).is_err());
+        assert!(compile(r#"[{"type":"button_down","button":"button_1"},{"type":"wait","ms":500},{"type":"button_up","button":"button_1"}]"#).is_err());
+        assert!(compile(r#"[{"type":"button_down","button":"button_1"},{"type":"button_up","button":"button_2"}]"#).is_err());
+        let drag = compile(r#"[{"type":"drag","button":"button_1","x":0.2,"y":0.8}]"#).unwrap();
+        assert_eq!(drag.chunks[0].planned_ms, 110);
+    }
+    #[test]
+    fn new_backend_rebudgets_legacy_gestures_before_start() {
+        let json = r#"{"schema":"keyferry.input-sequence.v1","command_id":"01995fa0-0000-7000-8000-000000000001","arm":"command-scoped","start_within_ms":5000,"actions":[{"type":"move_relative","dx_counts":4096,"dy_counts":0},{"type":"click","button":"button_1","hold_ms":100,"release_gap_ms":30}]}"#;
+        let mut request = parse_input_sequence_json(json.as_bytes()).unwrap();
+        let v1 = compile_input_sequence(&request).unwrap();
+        assert_eq!(v1.chunks.len(), 1);
+        assert_eq!(v1.planned_ms, 500);
+        request.schema = INPUT_SEQUENCE_SCHEMA_V2.to_owned();
+        let v2 = compile_input_sequence(&request).unwrap();
+        assert_eq!(v2.chunks.len(), 2);
+        assert!(v2.chunks.iter().all(|chunk| chunk.planned_ms <= 500));
+    }
+
+    #[test]
+    fn scroll_and_middle_click_preserve_limits() {
+        let p = compile(r#"[{"type":"scroll","vertical":-127,"horizontal":127},{"type":"double_click","button":"button_3"}]"#).unwrap();
+        assert_eq!(&p.chunks[0].body[4..8], &[9, 2, 129, 127]);
+        assert!(compile(r#"[{"type":"scroll","vertical":128,"horizontal":0}]"#).is_err());
+        assert!(compile(r#"[{"type":"scroll","vertical":1.0,"horizontal":0}]"#).is_err());
+        assert!(compile(r#"[{"type":"scroll","vertical":0,"horizontal":0}]"#).is_err());
     }
 }

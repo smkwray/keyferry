@@ -107,7 +107,7 @@ std::int8_t RelativeMovementAxisPart(const std::int16_t value, const std::uint16
 }
 
 bool ParseInputChunk(const std::uint8_t* body, const std::size_t length,
-                     ParsedInputChunk* output) noexcept {
+                     ParsedInputChunk* output, const bool extended) noexcept {
     if (body == nullptr || output == nullptr || length < 6 || length > 4 + kMaximumInputActionBytes) {
         return false;
     }
@@ -118,6 +118,7 @@ bool ParseInputChunk(const std::uint8_t* body, const std::size_t length,
         return false;
     }
 
+    std::uint8_t held_button = 0;
     std::size_t offset = 4;
     while (offset < length) {
         if (length - offset < 2 || parsed.action_count == parsed.actions.size()) {
@@ -190,26 +191,61 @@ bool ParseInputChunk(const std::uint8_t* body, const std::size_t length,
             action.button = body[offset];
             action.first_ms = ReadU16(body + offset + 1);
             action.second_ms = ReadU16(body + offset + 3);
-            if ((action.button != 1 && action.button != 2) || action.first_ms < 10 ||
+            if ((action.button < 1 || action.button > (extended ? 3 : 2)) || action.first_ms < 10 ||
                 action.first_ms > 100 || action.second_ms < 10 || action.second_ms > 100 ||
-                !AddDuration(2 * kTransferMs + action.first_ms + action.second_ms,
+                !AddDuration((extended ? 3 : 2) * kTransferMs + action.first_ms + action.second_ms,
                              &parsed.duration_ms)) {
                 return false;
+            }
+            parsed.effectful = true;
+        } else if (extended && tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerMoveAbsolute) && field_length == 4) {
+            action.kind = InputActionKind::kPointerAbsolute;
+            const auto x = ReadU16(body + offset);
+            const auto y = ReadU16(body + offset + 2);
+            if (x > 32767 || y > 32767 || !AddDuration(kTransferMs, &parsed.duration_ms)) { return false; }
+            action.dx_counts = static_cast<std::int16_t>(x);
+            action.dy_counts = static_cast<std::int16_t>(y);
+            parsed.effectful = true;
+        } else if (extended && tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerScroll) && field_length == 2) {
+            action.kind = InputActionKind::kPointerScroll;
+            action.dx_counts = static_cast<std::int8_t>(body[offset]);
+            action.dy_counts = static_cast<std::int8_t>(body[offset + 1]);
+            if (action.dx_counts == -128 || action.dy_counts == -128 ||
+                (action.dx_counts == 0 && action.dy_counts == 0) || held_button != 0 ||
+                !AddDuration(kTransferMs, &parsed.duration_ms)) { return false; }
+            parsed.effectful = true;
+        } else if (extended && field_length == 1 &&
+                   (tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerButtonDown) ||
+                    tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerButtonUp))) {
+            action.button = body[offset];
+            if (action.button < 1 || action.button > 3 || !AddDuration(
+                tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerButtonUp) ? 2 * kTransferMs : kTransferMs, &parsed.duration_ms)) { return false; }
+            if (tag == static_cast<std::uint8_t>(protocol::ReportAction::kPointerButtonDown)) {
+                if (held_button != 0) { return false; }
+                held_button = action.button;
+                action.kind = InputActionKind::kPointerDown;
+            } else {
+                if (held_button != action.button) { return false; }
+                held_button = 0;
+                action.kind = InputActionKind::kPointerUp;
             }
             parsed.effectful = true;
         } else if (tag == static_cast<std::uint8_t>(protocol::ReportAction::kNeutralAll) &&
                    field_length == 0 && offset == length) {
             action.kind = InputActionKind::kNeutralAll;
-            if (!AddDuration(kDualNeutralMs, &parsed.duration_ms)) {
+            if (!AddDuration(extended ? 30 : kDualNeutralMs, &parsed.duration_ms)) {
                 return false;
             }
         } else {
             return false;
         }
+        if (held_button != 0 && action.kind != InputActionKind::kPointerDown &&
+            action.kind != InputActionKind::kPointerAbsolute &&
+            action.kind != InputActionKind::kWait) { return false; }
         offset += field_length;
         ++parsed.action_count;
     }
-    if (parsed.action_count == 0 ||
+    if (held_button != 0 || parsed.action_count == 0 ||
         parsed.actions[parsed.action_count - 1].kind != InputActionKind::kNeutralAll) {
         return false;
     }
@@ -290,6 +326,16 @@ bool EncodeInputResultPayload(const InputResultEvidence& evidence,
     const auto reason = static_cast<std::uint16_t>(evidence.reason);
     (*output)[19] = static_cast<std::uint8_t>(reason);
     (*output)[20] = static_cast<std::uint8_t>(reason >> 8U);
+    return true;
+}
+
+bool EncodeInputResultPayloadV2(const InputResultEvidence& evidence,
+                                std::array<std::uint8_t, 22>* output) noexcept {
+    std::array<std::uint8_t, 21> legacy{};
+    if (output == nullptr || !evidence.extended || !EncodeInputResultPayload(evidence, &legacy)) { return false; }
+    std::copy(legacy.begin(), legacy.begin() + 17, output->begin());
+    (*output)[17] = 0x03; // keyboard + pointer, no undeclared consumer/system roles
+    std::copy(legacy.begin() + 17, legacy.end(), output->begin() + 18);
     return true;
 }
 

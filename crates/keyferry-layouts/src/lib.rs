@@ -12,7 +12,8 @@ pub use input_sequence::{
     canonicalize_input_sequence_keys, compile_input_sequence, parse_input_sequence_json,
     parse_input_sequence_json_with_command_id, ClickButton, CompiledInputSequence, InputAction,
     InputArmPolicy, InputChunk, InputError, InputGesture, InputKeyboardTiming, InputLeafAction,
-    InputSequenceV1, MouseDelta, INPUT_SEQUENCE_SCHEMA_V1,
+    InputSequenceV1, MouseDelta, PointerPosition, INPUT_SEQUENCE_SCHEMA_V1,
+    INPUT_SEQUENCE_SCHEMA_V2,
 };
 
 /// Wire keyboard-mapping identifier hashed into every command envelope. It names the single

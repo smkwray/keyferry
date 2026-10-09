@@ -137,11 +137,11 @@ def main() -> int:
             "usb_transfer_epoch_ != authenticated_epoch_",
             "std::memcmp(report_bytes, expected_report, expected_length)",
             "command_.UsbMouseReportAccepted(",
-            "BootMouseReport{hid_.current_mouse_report().buttons, 0, 0}",
+            "hid_.pointer_snapshot(absolute)",
             "identity.mouse_relative_v1 =",
             "output_mode == keyferry::protocol::OutputMode::kUsbHid;",
             "Capability::kMouseRelativeV1)) != 0;",
-            "command_.BeginSession(epoch, 0, peer_input_v1_);",
+            "command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);",
         ),
         "HIL mouse dispatch",
     )

@@ -1273,6 +1273,9 @@ pub trait DeviceTransport: Send + Sync {
     fn supports_input_sequence(&self) -> bool {
         false
     }
+    fn supports_extended_pointer(&self) -> bool {
+        false
+    }
 
     fn supports_output_mode(&self) -> bool {
         false
@@ -1394,6 +1397,7 @@ pub struct SimulatorTransport {
     accept_delay: Duration,
     chunk_delay: Duration,
     input_sequence_supported: bool,
+    extended_pointer_supported: bool,
     output_mode: Option<Arc<Mutex<TransportOutputModeStatus>>>,
     display_orientation: Option<Arc<Mutex<TransportDisplayOrientationStatus>>>,
     screen_power: Option<Arc<Mutex<TransportScreenPowerStatus>>>,
@@ -1427,6 +1431,7 @@ impl SimulatorTransport {
             accept_delay: Duration::ZERO,
             chunk_delay: Duration::ZERO,
             input_sequence_supported: false,
+            extended_pointer_supported: false,
             output_mode: None,
             display_orientation: None,
             screen_power: None,
@@ -1447,6 +1452,12 @@ impl SimulatorTransport {
     }
 
     #[must_use]
+    pub fn with_extended_pointer(mut self) -> Self {
+        self.input_sequence_supported = true;
+        self.extended_pointer_supported = true;
+        self
+    }
+
     pub fn with_input_sequence(mut self) -> Self {
         self.input_sequence_supported = true;
         self
@@ -1533,6 +1544,10 @@ impl SimulatorTransport {
 impl DeviceTransport for SimulatorTransport {
     fn supports_input_sequence(&self) -> bool {
         self.input_sequence_supported
+    }
+
+    fn supports_extended_pointer(&self) -> bool {
+        self.extended_pointer_supported
     }
 
     fn supports_output_mode(&self) -> bool {
@@ -3789,9 +3804,23 @@ impl Daemon {
     ) -> Result<CommandResponse, ApiError> {
         let command_id = Uuid::parse_str(&request.command_id)
             .map_err(|_| ApiError::bad_request("input.command_id"))?;
-        let compiled = compile_input_sequence(&request)
+        let mut compiled = compile_input_sequence(&request)
             .map_err(|error| ApiError::bad_request(error.code()))?;
+        // Dedupe identifies caller semantics, independent of the selected USB backend.
         let fingerprint = CommandFingerprint::Input(compiled.fingerprint);
+        let extended = self
+            .lookup(id)?
+            .0
+            .lock()
+            .expect("device runtime lock")
+            .transport
+            .supports_extended_pointer();
+        if extended && !compiled.requires_extended {
+            let mut wire_request = request.clone();
+            wire_request.schema = keyferry_layouts::INPUT_SEQUENCE_SCHEMA_V2.to_owned();
+            compiled = compile_input_sequence(&wire_request)
+                .map_err(|error| ApiError::bad_request(error.code()))?;
+        }
         let command = PlannedCommand {
             command_id,
             chunks: Vec::new(),
@@ -3913,6 +3942,14 @@ impl Daemon {
             }
             if device.state.mode != OperationalMode::Keyboard {
                 return Err(ApiError::rejected("device mode rejects keyboard input"));
+            }
+            if command
+                .input
+                .as_ref()
+                .is_some_and(|input| input.requires_extended)
+                && !device.transport.supports_extended_pointer()
+            {
+                return Err(ApiError::rejected("pointer.capability_required"));
             }
             if command.input.is_some() && !device.transport.supports_input_sequence() {
                 return Err(ApiError::rejected("device lacks input-sequence capability"));
@@ -8925,6 +8962,47 @@ mod tests {
         assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error.message, "device lacks input-sequence capability");
         assert_eq!(transport.control_request_counts(), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn extended_pointer_requires_its_capability_before_arm() {
+        for supported in [false, true] {
+            let transport = Arc::new(if supported {
+                SimulatorTransport::default().with_extended_pointer()
+            } else {
+                SimulatorTransport::default().with_input_sequence()
+            });
+            let daemon = Daemon::with_transport(
+                MemoryTokenStore::new("test-token-123456"),
+                transport.clone(),
+            )
+            .unwrap();
+            let mut request = pointer_input_request(Uuid::now_v7());
+            request.schema = keyferry_layouts::INPUT_SEQUENCE_SCHEMA_V2.to_owned();
+            request.actions = vec![keyferry_layouts::InputAction::Drag {
+                button: keyferry_layouts::ClickButton::Button1,
+                position: keyferry_layouts::PointerPosition {
+                    x: Some(serde_json::Number::from_f64(0.5).unwrap()),
+                    y: Some(serde_json::Number::from_f64(0.5).unwrap()),
+                    ..Default::default()
+                },
+                hold_ms: None,
+            }];
+            let id = Uuid::parse_str(&request.command_id).unwrap();
+            let result = daemon
+                .submit_input_sequence(SIMULATOR_DEVICE_ID, "test".to_owned(), request)
+                .await;
+            if supported {
+                result.unwrap();
+                assert_eq!(
+                    daemon.wait_for_terminal(id).await,
+                    Some(CommandOutcome::Emitted)
+                );
+            } else {
+                assert_eq!(result.unwrap_err().message, "pointer.capability_required");
+                assert_eq!(transport.control_request_counts(), (0, 0, 0));
+            }
+        }
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -14,7 +15,7 @@ APP_SLOT_BYTES = 0x100000
 MIN_HEADROOM_BYTES = 0x8000
 PROJECT = Path(__file__).resolve().parents[1]
 IDF_PARTITION_PARSER = (
-    PROJECT / ".tools/esp-idf-v6.0.3/components/partition_table/gen_esp32part.py"
+    Path(os.environ.get("IDF_PATH", str(PROJECT / ".tools/esp-idf-v6.0.3"))) / "components/partition_table/gen_esp32part.py"
 )
 OLD_CSV = PROJECT / "firmware/esp32s3/hil_endpoint/partitions.csv"
 MEMORY_CSV = (
@@ -204,8 +205,12 @@ def app_version(path: Path) -> bytes:
     return image[offset + 16 : offset + 48].split(b"\x00", 1)[0]
 
 
-def file_handoff_version(cmake: Path = HIL_CMAKE) -> bytes:
+def file_handoff_version(cmake: Path = HIL_CMAKE, *, extended: bool = False) -> bytes:
     source = cmake.read_text(encoding="utf-8")
+    if extended:
+        versions = re.findall(r'set\(PROJECT_VER "([0-9]+\.[0-9]+\.[0-9]+-pointer\.[0-9]+)"\)', source)
+        if len(versions) != 1: raise SystemExit("pointer version is not defined once")
+        return versions[0].encode("ascii")
     versions = re.findall(
         r'^if\(KEYFERRY_FILE_HANDOFF\)\s*\n'
         r'\s*set\(PROJECT_VER "([0-9]+\.[0-9]+\.[0-9]+-file\.[0-9]+)"\)\s*\n'
@@ -405,7 +410,7 @@ def inspect_file_handoff(build: Path) -> None:
             or re.search(r"^KEYFERRY_MSC_(SIZE|MEMORY)_PROBE:BOOL=ON$", cache, re.MULTILINE)):
         raise SystemExit("build is not the USB file firmware")
     image = build / "keyferry_hil_endpoint.bin"
-    if app_version(image) != file_handoff_version():
+    if app_version(image) != file_handoff_version(extended="KEYFERRY_POINTER_EXTENDED:BOOL=ON" in cache):
         raise SystemExit("USB file firmware has an unexpected version")
     parser = partition_parser()
     checked_table(parser, MEMORY_CSV, build / "partition_table/partition-table.bin", MEMORY_LAYOUT)

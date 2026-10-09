@@ -1020,6 +1020,9 @@ impl TlsTransport {
         if self.is_in_maintenance() {
             return Err(TlsTransportError::Maintenance);
         }
+        let pointer_extended = firmware_identity.as_ref().is_some_and(|i| {
+            i.device_capability_mask & keyferry_protocol::capability::POINTER_EXTENDED_V1 != 0
+        });
         let (request_tx, request_rx) = mpsc::channel(1);
         let mut session = self.inner.session.lock().await;
         if session.is_some() {
@@ -1043,6 +1046,7 @@ impl TlsTransport {
             next_sequence,
             request_rx,
             session_id,
+            pointer_extended,
         ));
         Ok(())
     }
@@ -1265,8 +1269,18 @@ impl DeviceTransport for TlsTransport {
         self.session_snapshot()
             .and_then(|snapshot| snapshot.firmware_identity)
             .is_some_and(|identity| {
-                identity.device_capability_mask & keyferry_protocol::capability::MOUSE_RELATIVE_V1
+                identity.device_capability_mask
+                    & (keyferry_protocol::capability::MOUSE_RELATIVE_V1
+                        | keyferry_protocol::capability::POINTER_EXTENDED_V1)
                     != 0
+            })
+    }
+
+    fn supports_extended_pointer(&self) -> bool {
+        self.session_snapshot()
+            .and_then(|s| s.firmware_identity)
+            .is_some_and(|i| {
+                i.device_capability_mask & keyferry_protocol::capability::POINTER_EXTENDED_V1 != 0
             })
     }
 
@@ -1365,7 +1379,9 @@ impl DeviceTransport for TlsTransport {
             return OutputTransport::UsbHid;
         };
         if identity.device_capability_mask & keyferry_protocol::capability::BLE_HID_OUTPUT_V1 != 0
-            && identity.device_capability_mask & keyferry_protocol::capability::MOUSE_RELATIVE_V1
+            && identity.device_capability_mask
+                & (keyferry_protocol::capability::MOUSE_RELATIVE_V1
+                    | keyferry_protocol::capability::POINTER_EXTENDED_V1)
                 == 0
         {
             OutputTransport::BleHid
@@ -1828,6 +1844,7 @@ async fn connection_actor<IO>(
     mut next_sequence: u32,
     mut requests: mpsc::Receiver<TransportRequest>,
     actor_session_id: [u8; 16],
+    pointer_extended: bool,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -1968,13 +1985,23 @@ async fn connection_actor<IO>(
                 cancellation,
                 progress,
                 reply,
-            } => match execute_connection(
-                &mut stream,
-                &mut next_sequence,
-                &command,
-                cancellation,
-                &progress,
-            )
+            } => match async {
+                if command
+                    .input
+                    .as_ref()
+                    .is_some_and(|i| i.requires_extended != pointer_extended)
+                {
+                    return Ok(TransportOutcome::Rejected);
+                }
+                execute_connection(
+                    &mut stream,
+                    &mut next_sequence,
+                    &command,
+                    cancellation,
+                    &progress,
+                )
+                .await
+            }
             .await
             {
                 Ok(outcome) => {
@@ -1997,7 +2024,12 @@ async fn connection_actor<IO>(
                 let _ = reply.send(Ok(()));
             }
             TransportRequest::ReleaseInputAll { reply } => {
-                let result = send_input_release_all_and_wait(&mut stream, &mut next_sequence).await;
+                let result = send_input_release_all_and_wait(
+                    &mut stream,
+                    &mut next_sequence,
+                    pointer_extended,
+                )
+                .await;
                 if result.is_err() {
                     let _ = reply.send(Err(TransportError::AcceptedButLost));
                     fail_connection(&transport, &mut stream, next_sequence, actor_session_id).await;
@@ -2126,6 +2158,14 @@ async fn fail_connection<IO>(
 {
     let _ = send_release_all(stream, next_sequence).await;
     clear_connection(transport, actor_session_id).await;
+}
+
+#[cfg(test)]
+fn pointer_wire_command(mut command: PlannedCommand, extended: bool) -> PlannedCommand {
+    if let Some(input) = command.input.as_mut() {
+        input.requires_extended |= extended;
+    }
+    command
 }
 
 async fn execute_connection<IO>(
@@ -2277,6 +2317,7 @@ where
     let input = command.input.as_ref().ok_or_else(|| {
         TlsTransportError::Protocol("input command is missing its compiled plan".to_owned())
     })?;
+    let extended = input.requires_extended;
     let mut ever_started = false;
     let mut terminal_dual_neutral = false;
     for (chunk_index, chunk) in input.chunks.iter().enumerate() {
@@ -2284,7 +2325,7 @@ where
             return Ok(TransportOutcome::Rejected);
         }
         if cancellation.is_cancelled() {
-            send_input_release_all_and_wait(stream, next_sequence).await?;
+            send_input_release_all_and_wait(stream, next_sequence, extended).await?;
             return Ok(TransportOutcome::Aborted);
         }
         if let Err(error) = send_control_request(
@@ -2307,11 +2348,11 @@ where
             };
         }
         if cancellation.is_cancelled() {
-            send_input_release_all_and_wait(stream, next_sequence).await?;
+            send_input_release_all_and_wait(stream, next_sequence, extended).await?;
             return Ok(TransportOutcome::Aborted);
         }
         if chunk_index == 0 && std::time::Instant::now() >= command.expires_at {
-            send_input_release_all_and_wait(stream, next_sequence).await?;
+            send_input_release_all_and_wait(stream, next_sequence, extended).await?;
             return Ok(TransportOutcome::Rejected);
         }
         let sequence = *next_sequence;
@@ -2329,7 +2370,11 @@ where
             stream,
             sequence,
             command,
-            keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V1,
+            if extended {
+                keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V2
+            } else {
+                keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V1
+            },
             &chunk.body,
             valid_for_ms,
         )
@@ -2339,7 +2384,7 @@ where
         let mut started = false;
         loop {
             let result = tokio::select! {
-                result = read_input_command_result(stream, sequence, command.command_id) => Some(result),
+                result = read_input_command_result(stream, sequence, command.command_id, extended) => Some(result),
                 () = wait_for_cancellation(cancellation.clone()) => None,
             };
             let Some(result) = result else {
@@ -2480,6 +2525,7 @@ where
         keyferry_protocol::capability::KEYBOARD
             | keyferry_protocol::capability::FIRMWARE_IDENTITY_V1
             | keyferry_protocol::capability::MOUSE_RELATIVE_V1
+            | keyferry_protocol::capability::POINTER_EXTENDED_V1
             | keyferry_protocol::capability::USB_FILE_HANDOFF_V1
             | keyferry_protocol::capability::USB_FILE_SET_V2
     } else {
@@ -3513,6 +3559,7 @@ where
 async fn send_input_release_all_and_wait<IO>(
     stream: &mut IO,
     next_sequence: &mut u32,
+    extended: bool,
 ) -> Result<(), TlsTransportError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
@@ -3529,7 +3576,11 @@ where
         stream,
         sequence,
         &command,
-        keyferry_protocol::command_kind::RELEASE_INPUT_ALL_V1,
+        if extended {
+            keyferry_protocol::command_kind::RELEASE_INPUT_ALL_V2
+        } else {
+            keyferry_protocol::command_kind::RELEASE_INPUT_ALL_V1
+        },
         &[],
         COMMAND_MAX_MS,
     )
@@ -3542,7 +3593,7 @@ where
         )
     })?;
     *next_sequence += 1;
-    let accepted = read_input_command_result(stream, sequence, command.command_id)
+    let accepted = read_input_command_result(stream, sequence, command.command_id, extended)
         .await
         .map_err(|error| {
             cancellation_error(
@@ -3557,7 +3608,7 @@ where
             TlsTransportError::Protocol("input release-all was not accepted".to_owned()),
         ));
     }
-    let emitted = read_input_command_result(stream, sequence, command.command_id)
+    let emitted = read_input_command_result(stream, sequence, command.command_id, extended)
         .await
         .map_err(|error| {
             cancellation_error(
@@ -3681,6 +3732,10 @@ async fn cancel_input_connection<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    let extended = command
+        .input
+        .as_ref()
+        .is_some_and(|input| input.requires_extended);
     let cancel_sequence = *next_sequence;
     if cancel_sequence == u32::MAX {
         return Err(diagnosed_error(
@@ -3692,7 +3747,11 @@ where
         stream,
         cancel_sequence,
         command,
-        keyferry_protocol::command_kind::CANCEL_INPUT_SEQUENCE_V1,
+        if extended {
+            keyferry_protocol::command_kind::CANCEL_INPUT_SEQUENCE_V2
+        } else {
+            keyferry_protocol::command_kind::CANCEL_INPUT_SEQUENCE_V1
+        },
         &[],
         COMMAND_MAX_MS,
     )
@@ -3706,15 +3765,16 @@ where
     })?;
     *next_sequence += 1;
     let evidence = loop {
-        let evidence = read_input_command_result(stream, active_sequence, command.command_id)
-            .await
-            .map_err(|error| {
-                cancellation_error(
-                    error,
-                    TransportDiagnostic::CancelActiveResultTransport,
-                    TransportDiagnostic::CancelActiveResultProtocol,
-                )
-            })?;
+        let evidence =
+            read_input_command_result(stream, active_sequence, command.command_id, extended)
+                .await
+                .map_err(|error| {
+                    cancellation_error(
+                        error,
+                        TransportDiagnostic::CancelActiveResultTransport,
+                        TransportDiagnostic::CancelActiveResultProtocol,
+                    )
+                })?;
         match evidence.result {
             DeviceCommandResult::Accepted | DeviceCommandResult::Started => {}
             DeviceCommandResult::Emitted
@@ -3727,7 +3787,7 @@ where
         evidence.result,
         DeviceCommandResult::Emitted | DeviceCommandResult::Rejected
     ) {
-        let late = read_input_command_result(stream, cancel_sequence, command.command_id)
+        let late = read_input_command_result(stream, cancel_sequence, command.command_id, extended)
             .await
             .map_err(|error| {
                 cancellation_error(
@@ -3744,7 +3804,7 @@ where
         }
     }
     if evidence.result == DeviceCommandResult::Unknown {
-        send_input_release_all_and_wait(stream, next_sequence).await?;
+        send_input_release_all_and_wait(stream, next_sequence, extended).await?;
         return Ok(TransportOutcome::Aborted);
     }
     Ok(match evidence.result {
@@ -3795,14 +3855,20 @@ async fn read_input_command_result<IO>(
     stream: &mut IO,
     sequence: u32,
     command_id: uuid::Uuid,
+    extended: bool,
 ) -> Result<InputCommandEvidence, TlsTransportError>
 where
     IO: AsyncRead + Unpin,
 {
     let frame = read_frame(stream).await?;
-    if frame.message_type != keyferry_protocol::message::INPUT_COMMAND_RESULT_V1
+    let expected_type = if extended {
+        keyferry_protocol::message::INPUT_COMMAND_RESULT_V2
+    } else {
+        keyferry_protocol::message::INPUT_COMMAND_RESULT_V1
+    };
+    if frame.message_type != expected_type
         || frame.sequence != sequence
-        || frame.payload.len() != INPUT_COMMAND_RESULT_LEN
+        || frame.payload.len() != INPUT_COMMAND_RESULT_LEN + usize::from(extended)
         || frame.payload[..16] != *command_id.as_bytes()
     {
         return Err(TlsTransportError::Protocol(
@@ -3822,11 +3888,17 @@ where
             ))
         }
     };
+    if extended && frame.payload[17] != DUAL_NEUTRAL_MASK {
+        return Err(TlsTransportError::Protocol(
+            "pointer neutral roles differ".to_owned(),
+        ));
+    }
+    let offset = usize::from(extended);
     let evidence = InputCommandEvidence {
         result,
-        neutral_mask: frame.payload[17],
-        effect_flags: frame.payload[18],
-        reason: u16::from_le_bytes([frame.payload[19], frame.payload[20]]),
+        neutral_mask: frame.payload[17 + offset],
+        effect_flags: frame.payload[18 + offset],
+        reason: u16::from_le_bytes([frame.payload[19 + offset], frame.payload[20 + offset]]),
     };
     if !valid_input_evidence(evidence) {
         return Err(TlsTransportError::Protocol(
@@ -4079,6 +4151,35 @@ mod tests {
             stream,
             Frame::v1(
                 keyferry_protocol::message::INPUT_COMMAND_RESULT_V1,
+                sequence,
+                payload,
+            ),
+        )
+        .await
+        .expect("send input evidence");
+    }
+
+    async fn send_pointer_evidence<IO>(
+        stream: &mut IO,
+        sequence: u32,
+        command_id: uuid::Uuid,
+        result: u8,
+        neutral_mask: u8,
+        effect_flags: u8,
+        reason: u16,
+    ) where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut payload = command_id.as_bytes().to_vec();
+        payload.push(result);
+        payload.push(DUAL_NEUTRAL_MASK);
+        payload.push(neutral_mask);
+        payload.push(effect_flags);
+        payload.extend_from_slice(&reason.to_le_bytes());
+        send_frame(
+            stream,
+            Frame::v1(
+                keyferry_protocol::message::INPUT_COMMAND_RESULT_V2,
                 sequence,
                 payload,
             ),
@@ -4753,6 +4854,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extended_pointer_uses_v2_kind_and_report_role_evidence() {
+        let (mut host, mut device) = duplex(4096);
+        let command_id = uuid::Uuid::now_v7();
+        let command = pointer_wire_command(mixed_input_command(command_id), true);
+        let expected_body = command.input.as_ref().unwrap().chunks[0].body.clone();
+        let device = tokio::spawn(async move {
+            let arm = read_frame(&mut device).await.expect("read input ARM");
+            assert_eq!(arm.message_type, keyferry_protocol::message::ARM);
+            assert_eq!(arm.sequence, 2);
+            send_frame(
+                &mut device,
+                Frame::v1(
+                    keyferry_protocol::message::ACK,
+                    arm.sequence,
+                    vec![keyferry_protocol::message::ARM, 0, 0],
+                ),
+            )
+            .await
+            .expect("send input ARM ACK");
+
+            let request = read_frame(&mut device).await.expect("read input command");
+            assert_eq!(request.message_type, keyferry_protocol::message::COMMAND);
+            assert_eq!(request.sequence, 3);
+            assert_eq!(
+                request.payload[52],
+                keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V2
+            );
+            let body_len = u16::from_le_bytes([request.payload[53], request.payload[54]]) as usize;
+            assert_eq!(body_len, expected_body.len());
+            assert_eq!(&request.payload[55..], expected_body.as_slice());
+            send_pointer_evidence(
+                &mut device,
+                3,
+                command_id,
+                keyferry_protocol::result_code::ACCEPTED,
+                0,
+                0,
+                0,
+            )
+            .await;
+            send_pointer_evidence(
+                &mut device,
+                3,
+                command_id,
+                keyferry_protocol::result_code::STARTED,
+                0,
+                INPUT_EFFECT_OCCURRED,
+                0,
+            )
+            .await;
+            send_pointer_evidence(
+                &mut device,
+                3,
+                command_id,
+                keyferry_protocol::result_code::EMITTED,
+                DUAL_NEUTRAL_MASK,
+                INPUT_EFFECT_OCCURRED,
+                0,
+            )
+            .await;
+        });
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&progress);
+        let progress_handler: ProgressHandler = Arc::new(move |event| {
+            observed.lock().unwrap().push(event);
+        });
+        let mut next_sequence = 2;
+        assert_eq!(
+            execute_connection(
+                &mut host,
+                &mut next_sequence,
+                &command,
+                Cancellation::new(),
+                &progress_handler,
+            )
+            .await
+            .expect("execute mixed input"),
+            TransportOutcome::Emitted
+        );
+        device.await.expect("device task");
+        assert_eq!(next_sequence, 4);
+        assert_eq!(
+            *progress.lock().unwrap(),
+            vec![TransportProgress::Accepted, TransportProgress::Started]
+        );
+    }
+
+    #[tokio::test]
     async fn legacy_result_cannot_satisfy_input_command() {
         let (mut host, mut device) = duplex(4096);
         let command_id = uuid::Uuid::now_v7();
@@ -4767,7 +4956,7 @@ mod tests {
             .expect("send legacy result");
         });
         assert!(matches!(
-            read_input_command_result(&mut host, 9, command_id).await,
+            read_input_command_result(&mut host, 9, command_id, false).await,
             Err(TlsTransportError::Protocol(_))
         ));
         device.await.expect("device task");
@@ -5554,7 +5743,7 @@ mod tests {
             .await;
         });
         let mut next_sequence = 3;
-        let error = send_input_release_all_and_wait(&mut host, &mut next_sequence)
+        let error = send_input_release_all_and_wait(&mut host, &mut next_sequence, false)
             .await
             .unwrap_err();
         assert_eq!(

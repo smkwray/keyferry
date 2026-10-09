@@ -21,7 +21,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 INSPECTOR = ROOT / "scripts/check_msc_size_probe.py"
 BACKEND = ROOT / "tools/keyferry-firmware/esptool_backend.py"
-SITE_ROOT = ROOT / ".tools/idf-tools-v6.0.3/python_env"
+SITE_ROOT = Path(os.environ.get("IDF_TOOLS_PATH", str(ROOT / ".tools/idf-tools-v6.0.3"))) / "python_env"
 SCHEMA = "keyferry.file-layout-plan.v1"
 UNIT_KEYS = ("rom_mac", "chip", "soc_revision", "flash_manufacturer_id",
              "flash_device_id", "flash_size_bytes", "secure_boot",

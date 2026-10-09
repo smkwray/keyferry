@@ -209,6 +209,10 @@ messages:
     id: 0x58
     transport: network
     direction: device-to-host
+  - name: INPUT_COMMAND_RESULT_V2
+    id: 0x5B
+    transport: network
+    direction: device-to-host
   - name: GATEWAY_HANDOFF
     id: 0x59
     transport: network
@@ -312,6 +316,13 @@ command_kinds:
   - name: RELEASE_INPUT_ALL_V1
     id: 0x06
 
+  - name: EXECUTE_INPUT_CHUNK_V2
+    id: 0x07
+  - name: CANCEL_INPUT_SEQUENCE_V2
+    id: 0x08
+  - name: RELEASE_INPUT_ALL_V2
+    id: 0x09
+
 report_actions:
   - name: KEY_REPORT
     tag: 0x01
@@ -341,6 +352,23 @@ report_actions:
     tag: 0x07
     critical: true
     payload: empty
+
+  - name: POINTER_MOVE_ABSOLUTE
+    tag: 0x08
+    critical: true
+    payload: x_u16_le_y_u16_le
+  - name: POINTER_SCROLL
+    tag: 0x09
+    critical: true
+    payload: wheel_i8_pan_i8
+  - name: POINTER_BUTTON_DOWN
+    tag: 0x0A
+    critical: true
+    payload: button_usage_u8
+  - name: POINTER_BUTTON_UP
+    tag: 0x0B
+    critical: true
+    payload: button_usage_u8
 
 provisioning:
   version: 1
@@ -640,6 +668,9 @@ capabilities:
     bit: 0x02000000
   - name: USB_FILE_SET_V2
     bit: 0x04000000
+
+  - name: POINTER_EXTENDED_V1
+    bit: 0x08000000
 
 output_modes:
   - name: USB_HID

@@ -185,7 +185,9 @@ Production source under `apps/`, `crates/`, and `firmware/` must not contain:
 - aggregate `REJECTED` after any chunk may have started;
 - replay or coalescing of an accepted relative movement token;
 - mixed-input success or abort inferred without matching keyboard and mouse neutral completions;
-- pointer APIs that claim pixels, screen coordinates, target focus, or application success;
+- pointer APIs that infer target geometry or claim observed pixel placement, target focus, or
+  application success; explicit caller-supplied frame coordinates may normalize to capability-gated
+  absolute HID coordinates under Input Sequence v2;
 - command payload text, named-key arrays, source JSON, or script source in errors or diagnostics;
 - text-stream source bytes, filenames, child text, or low-entropy payload hashes in receipts, logs,
   events, errors, diagnostics, or crash output;

@@ -580,7 +580,12 @@ fn keyboard_action(action: &InputAction) -> Option<SequenceAction> {
         },
         InputAction::MoveRelative { .. }
         | InputAction::Click { .. }
-        | InputAction::DoubleClick { .. } => return None,
+        | InputAction::DoubleClick { .. }
+        | InputAction::MoveAbsolute { .. }
+        | InputAction::Scroll { .. }
+        | InputAction::ButtonDown { .. }
+        | InputAction::ButtonUp { .. }
+        | InputAction::Drag { .. } => return None,
     })
 }
 

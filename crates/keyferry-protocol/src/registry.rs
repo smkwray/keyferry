@@ -197,6 +197,7 @@ pub mod message {
     pub const ROUTE_PROOF_REQUEST: u8 = 0x56;
     pub const ROUTE_PROOF_RESPONSE: u8 = 0x57;
     pub const INPUT_COMMAND_RESULT_V1: u8 = 0x58;
+    pub const INPUT_COMMAND_RESULT_V2: u8 = 0x5B;
     pub const GATEWAY_HANDOFF: u8 = 0x59;
     pub const GATEWAY_HANDOFF_STATUS: u8 = 0x5A;
     pub const FILE_REQUEST: u8 = 0x60;
@@ -212,6 +213,9 @@ pub mod command_kind {
     pub const EXECUTE_INPUT_CHUNK_V1: u8 = 0x04;
     pub const CANCEL_INPUT_SEQUENCE_V1: u8 = 0x05;
     pub const RELEASE_INPUT_ALL_V1: u8 = 0x06;
+    pub const EXECUTE_INPUT_CHUNK_V2: u8 = 0x07;
+    pub const CANCEL_INPUT_SEQUENCE_V2: u8 = 0x08;
+    pub const RELEASE_INPUT_ALL_V2: u8 = 0x09;
 }
 
 pub mod action {
@@ -222,6 +226,10 @@ pub mod action {
     pub const MOUSE_MOVE_RELATIVE: u8 = 0x05;
     pub const MOUSE_CLICK: u8 = 0x06;
     pub const NEUTRAL_ALL: u8 = 0x07;
+    pub const POINTER_MOVE_ABSOLUTE: u8 = 0x08;
+    pub const POINTER_SCROLL: u8 = 0x09;
+    pub const POINTER_BUTTON_DOWN: u8 = 0x0A;
+    pub const POINTER_BUTTON_UP: u8 = 0x0B;
 }
 
 pub mod provisioning_operation {
@@ -356,6 +364,7 @@ pub mod capability {
     pub const USB_FILE_HANDOFF_V1: u32 = 0x01000000;
     pub const SCREEN_POWER_V1: u32 = 0x02000000;
     pub const USB_FILE_SET_V2: u32 = 0x04000000;
+    pub const POINTER_EXTENDED_V1: u32 = 0x08000000;
 }
 
 pub mod output_mode {

@@ -24,6 +24,10 @@ enum class InputActionKind : std::uint8_t {
     kMouseMove,
     kMouseClick,
     kNeutralAll,
+    kPointerAbsolute,
+    kPointerScroll,
+    kPointerDown,
+    kPointerUp,
 };
 
 struct InputActionRecord {
@@ -47,7 +51,7 @@ struct ParsedInputChunk {
 };
 
 bool ParseInputChunk(const std::uint8_t* body, std::size_t length,
-                     ParsedInputChunk* output) noexcept;
+                     ParsedInputChunk* output, bool extended = false) noexcept;
 std::uint16_t RelativeMovementPartCount(std::int16_t dx, std::int16_t dy) noexcept;
 std::int8_t RelativeMovementAxisPart(std::int16_t value, std::uint16_t index,
                                      std::uint16_t count) noexcept;
@@ -88,9 +92,13 @@ struct InputResultEvidence {
     std::uint8_t neutral_mask{};
     std::uint8_t effect_flags{};
     protocol::ErrorCode reason{protocol::ErrorCode::kInternal};
+    bool extended{};
 };
 
 bool EncodeInputResultPayload(const InputResultEvidence& evidence,
                               std::array<std::uint8_t, 21>* output) noexcept;
+
+bool EncodeInputResultPayloadV2(const InputResultEvidence& evidence,
+                                std::array<std::uint8_t, 22>* output) noexcept;
 
 }  // namespace keyferry::command

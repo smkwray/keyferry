@@ -1,0 +1,417 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keyferry.invalid/schema/input-sequence-v2.schema.json",
+  "title": "Keyferry Pointer Input Sequence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command_id",
+    "arm",
+    "start_within_ms",
+    "actions"
+  ],
+  "properties": {
+    "command_id": {
+      "$ref": "input-sequence-v1.schema.json#/properties/command_id"
+    },
+    "keyboard_profile": {
+      "$ref": "input-sequence-v1.schema.json#/properties/keyboard_profile"
+    },
+    "arm": {
+      "$ref": "input-sequence-v1.schema.json#/properties/arm"
+    },
+    "start_within_ms": {
+      "$ref": "input-sequence-v1.schema.json#/properties/start_within_ms"
+    },
+    "keyboard_timing": {
+      "$ref": "input-sequence-v1.schema.json#/properties/keyboard_timing"
+    },
+    "schema": {
+      "const": "keyferry.input-sequence.v2"
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/text_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/tap_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/chord_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/ordered_chord_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/wait_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/move_relative_action"
+          },
+          {
+            "$ref": "input-sequence-v1.schema.json#/$defs/repeat_action"
+          },
+          {
+            "$ref": "#/$defs/click"
+          },
+          {
+            "$ref": "#/$defs/double_click"
+          },
+          {
+            "$ref": "#/$defs/move_absolute"
+          },
+          {
+            "$ref": "#/$defs/scroll"
+          },
+          {
+            "$ref": "#/$defs/button_down"
+          },
+          {
+            "$ref": "#/$defs/button_up"
+          },
+          {
+            "$ref": "#/$defs/drag"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "click": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "button"
+      ],
+      "properties": {
+        "type": {
+          "const": "click"
+        },
+        "button": {
+          "enum": [
+            "button_1",
+            "button_2",
+            "button_3"
+          ]
+        },
+        "hold_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "release_gap_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        }
+      }
+    },
+    "double_click": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "button"
+      ],
+      "properties": {
+        "type": {
+          "const": "double_click"
+        },
+        "button": {
+          "enum": [
+            "button_1",
+            "button_2",
+            "button_3"
+          ]
+        },
+        "hold_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "release_gap_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        }
+      }
+    },
+    "move_absolute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "move_absolute"
+        },
+        "x": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "x_px": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "y_px": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "frame_w": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 65536
+        },
+        "frame_h": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 65536
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "x",
+            "y"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "x_px"
+                ]
+              },
+              {
+                "required": [
+                  "y_px"
+                ]
+              },
+              {
+                "required": [
+                  "frame_w"
+                ]
+              },
+              {
+                "required": [
+                  "frame_h"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "x_px",
+            "y_px",
+            "frame_w",
+            "frame_h"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "x"
+                ]
+              },
+              {
+                "required": [
+                  "y"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "scroll": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "vertical",
+        "horizontal"
+      ],
+      "properties": {
+        "type": {
+          "const": "scroll"
+        },
+        "vertical": {
+          "type": "integer",
+          "minimum": -127,
+          "maximum": 127
+        },
+        "horizontal": {
+          "type": "integer",
+          "minimum": -127,
+          "maximum": 127
+        }
+      }
+    },
+    "button_down": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "button"
+      ],
+      "properties": {
+        "type": {
+          "const": "button_down"
+        },
+        "button": {
+          "enum": [
+            "button_1",
+            "button_2",
+            "button_3"
+          ]
+        }
+      }
+    },
+    "button_up": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "button"
+      ],
+      "properties": {
+        "type": {
+          "const": "button_up"
+        },
+        "button": {
+          "enum": [
+            "button_1",
+            "button_2",
+            "button_3"
+          ]
+        }
+      }
+    },
+    "drag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "button"
+      ],
+      "properties": {
+        "type": {
+          "const": "drag"
+        },
+        "button": {
+          "enum": [
+            "button_1",
+            "button_2",
+            "button_3"
+          ]
+        },
+        "hold_ms": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "x": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "x_px": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "y_px": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "frame_w": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 65536
+        },
+        "frame_h": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 65536
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "x",
+            "y"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "x_px"
+                ]
+              },
+              {
+                "required": [
+                  "y_px"
+                ]
+              },
+              {
+                "required": [
+                  "frame_w"
+                ]
+              },
+              {
+                "required": [
+                  "frame_h"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "x_px",
+            "y_px",
+            "frame_w",
+            "frame_h"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "x"
+                ]
+              },
+              {
+                "required": [
+                  "y"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "$comment": "Compiler additionally validates pixel coordinate < frame dimension, nonzero scroll, balanced held spans and all existing budgets. Repeats retain V1 leaf grammar."
+}

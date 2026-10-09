@@ -24,6 +24,7 @@ struct FirmwareIdentity {
   std::uint32_t board_compatibility_id{};
   std::array<std::uint8_t, kSha256Length> elf_sha256{};
   bool mouse_relative_v1{};
+  bool pointer_extended_v1{};
   bool ble_hid_output_v1{};
   bool ble_hid_bond_reset_v1{};
   bool targeted_gateway_transfer_v1{};

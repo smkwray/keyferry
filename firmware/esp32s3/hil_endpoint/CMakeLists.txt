@@ -13,6 +13,7 @@ option(KEYFERRY_MSC_SIZE_PROBE
     "Unflashed, empty-medium MSC descriptor and resource measurement" OFF)
 option(KEYFERRY_MSC_MEMORY_PROBE
     "Unflashed MSC internal-memory qualification image and candidate layout" OFF)
+option(KEYFERRY_POINTER_EXTENDED "Opt-in F1 pointer report-ID personality" OFF)
 option(KEYFERRY_FILE_HANDOFF
     "Opt-in RAM-backed USB file handoff candidate" OFF)
 if(KEYFERRY_FILE_HANDOFF AND KEYFERRY_MSC_SIZE_PROBE)
@@ -33,6 +34,10 @@ if(KEYFERRY_MSC_MEMORY_PROBE)
 endif()
 if(KEYFERRY_FILE_HANDOFF)
     set(PROJECT_VER "0.2.0-file.3")
+endif()
+if(KEYFERRY_POINTER_EXTENDED)
+    set(PROJECT_VER "0.3.0-pointer.1")
+    add_compile_definitions(KEYFERRY_POINTER_EXTENDED=1)
 endif()
 set_property(CACHE KEYFERRY_BLE_HID_SPIKE PROPERTY STRINGS off security hid)
 set(KEYFERRY_WORKSPACE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")

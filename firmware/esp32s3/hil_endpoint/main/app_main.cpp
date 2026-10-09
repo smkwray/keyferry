@@ -62,7 +62,7 @@
 namespace {
 
 using keyferry::hid::BootKeyboardReport;
-using keyferry::hid::BootMouseReport;
+using keyferry::hid::PointerReport;
 
 constexpr char kTag[] = "keyferry_hil";
 constexpr std::uint8_t kKeyboardInterface = 0;
@@ -202,6 +202,51 @@ static constexpr std::uint8_t kMouseReportDescriptor[] = {
 };
 static_assert(sizeof(kMouseReportDescriptor) == 50);
 
+#if defined(KEYFERRY_POINTER_EXTENDED)
+static constexpr std::uint8_t kPointerReportDescriptor[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xA1, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+    0x95, 0x05, 0x81, 0x02, 0x75, 0x03, 0x95, 0x01, 0x81, 0x03, 0x05, 0x01,
+    0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08,
+    0x95, 0x03, 0x81, 0x06, 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x95, 0x01, 0x81,
+    0x06, 0xC0, 0xC0, 0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x04, 0x09,
+    0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25,
+    0x01, 0x75, 0x01, 0x95, 0x05, 0x81, 0x02, 0x75, 0x03, 0x95, 0x01, 0x81,
+    0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F,
+    0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F,
+    0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xC0,
+};
+static_assert(sizeof(kPointerReportDescriptor) == 128);
+constexpr auto kSelectedMouseReportDescriptor = kPointerReportDescriptor;
+constexpr auto kSelectedMouseReportDescriptorSize = sizeof(kPointerReportDescriptor);
+constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_NONE;
+constexpr std::uint16_t kInputDeviceRevision = 0x0102;
+#else
+constexpr auto kSelectedMouseReportDescriptor = kMouseReportDescriptor;
+constexpr auto kSelectedMouseReportDescriptorSize = sizeof(kMouseReportDescriptor);
+constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_MOUSE;
+constexpr std::uint16_t kInputDeviceRevision = 0x0101;
+#endif
+
+// Explicit serialized reports include the report ID. No C++ padding reaches USB.
+std::size_t PointerWire(const PointerReport& r, std::array<std::uint8_t, 8>* out) {
+    out->fill(0);
+    if (r.absolute) {
+        (*out)[0] = 4; (*out)[1] = r.buttons;
+        (*out)[2] = static_cast<std::uint8_t>(r.absolute_x);
+        (*out)[3] = static_cast<std::uint8_t>(r.absolute_x >> 8U);
+        (*out)[4] = static_cast<std::uint8_t>(r.absolute_y);
+        (*out)[5] = static_cast<std::uint8_t>(r.absolute_y >> 8U);
+        (*out)[6] = static_cast<std::uint8_t>(r.wheel);
+        return 7;
+    }
+    (*out)[0] = 1; (*out)[1] = r.buttons;
+    (*out)[2] = static_cast<std::uint8_t>(r.x); (*out)[3] = static_cast<std::uint8_t>(r.y);
+    (*out)[4] = static_cast<std::uint8_t>(r.wheel); (*out)[5] = static_cast<std::uint8_t>(r.pan);
+    return 6;
+}
+
+
 static constexpr std::uint8_t kConfigurationDescriptor[] = {
 #if defined(KEYFERRY_MSC_SIZE_PROBE) || defined(KEYFERRY_FILE_HANDOFF)
     TUD_CONFIG_DESCRIPTOR(1, 4, 0, kConfigurationLength, 0, kUsbPowerMilliamps),
@@ -219,8 +264,8 @@ static constexpr std::uint8_t kConfigurationDescriptor[] = {
         kProvisioningInEndpoint, kProvisioningEndpointSize,
         kHidPollIntervalMs),
     TUD_HID_DESCRIPTOR(kMouseInterface, kMouseString,
-                       HID_ITF_PROTOCOL_MOUSE,
-                       sizeof(kMouseReportDescriptor), kMouseEndpoint,
+                       kMouseProtocol,
+                       kSelectedMouseReportDescriptorSize, kMouseEndpoint,
                        kKeyboardEndpointSize, kHidPollIntervalMs),
 #if defined(KEYFERRY_MSC_SIZE_PROBE) || defined(KEYFERRY_FILE_HANDOFF)
     TUD_MSC_DESCRIPTOR(kMscInterface, kMscString, kMscOutEndpoint,
@@ -254,8 +299,13 @@ static_assert(kConfigurationDescriptor[63] == kProvisioningEndpointSize);
 static_assert(kConfigurationDescriptor[68] == kMouseInterface);
 static_assert(kConfigurationDescriptor[70] == 1);
 static_assert(kConfigurationDescriptor[71] == TUSB_CLASS_HID);
+#if defined(KEYFERRY_POINTER_EXTENDED)
+static_assert(kConfigurationDescriptor[72] == HID_SUBCLASS_NONE);
+static_assert(kConfigurationDescriptor[73] == HID_ITF_PROTOCOL_NONE);
+#else
 static_assert(kConfigurationDescriptor[72] == HID_SUBCLASS_BOOT);
 static_assert(kConfigurationDescriptor[73] == HID_ITF_PROTOCOL_MOUSE);
+#endif
 static_assert(kConfigurationDescriptor[86] == kMouseEndpoint);
 static_assert(kConfigurationDescriptor[88] == kKeyboardEndpointSize);
 
@@ -308,11 +358,11 @@ static constexpr tusb_desc_device_t kDeviceDescriptor = {
 #else
     0x4004,
 #endif
-    0x0101, 1,
+    kInputDeviceRevision, 1,
     2,                          3,                     1,
 };
 static_assert(kDeviceDescriptor.idVendor == TINYUSB_ESPRESSIF_VID);
-static_assert(kDeviceDescriptor.bcdDevice == 0x0101);
+static_assert(kDeviceDescriptor.bcdDevice == kInputDeviceRevision);
 #if defined(KEYFERRY_MSC_SIZE_PROBE)
 static_assert(kDeviceDescriptor.idProduct == 0x4006);
 #elif defined(KEYFERRY_FILE_HANDOFF)
@@ -354,7 +404,11 @@ static const char* kStringDescriptors[] = {
     kSerialDescriptor.data(),
     "Boot keyboard",
     "Authenticated provisioning",
+#if defined(KEYFERRY_POINTER_EXTENDED)
+    "Extended pointer",
+#else
     "Relative mouse",
+#endif
 #if defined(KEYFERRY_MSC_SIZE_PROBE)
     "Empty MSC size probe",
 #elif defined(KEYFERRY_FILE_HANDOFF)
@@ -457,7 +511,12 @@ class HilRuntime final : public keyferry::transport::Delegate,
       return false;
     }
     return output_mode_ == keyferry::protocol::OutputMode::kUsbHid
-               ? hid_.enable_mouse_interface()
+               ?
+#if defined(KEYFERRY_POINTER_EXTENDED)
+                 hid_.enable_extended_pointer()
+#else
+                 hid_.enable_mouse_interface()
+#endif
                : ble_hid_.Initialize();
   }
 
@@ -572,6 +631,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
       file_neutral_pending_ = false;
 #endif
       authenticated_epoch_ = 0;
+      peer_input_v2_ = false;
       peer_input_v1_ = false;
 #if defined(KEYFERRY_FILE_HANDOFF)
       file_negotiated_ = false;
@@ -600,12 +660,12 @@ class HilRuntime final : public keyferry::transport::Delegate,
     return report;
   }
 
-  BootMouseReport CurrentMouseReport() {
+  PointerReport CurrentMouseReport(const bool absolute = false) {
     if (!Lock()) {
       return {};
     }
     // Relative displacement is an event and is never cached for GET_REPORT or idle traffic.
-    const auto report = BootMouseReport{hid_.current_mouse_report().buttons, 0, 0};
+    const auto report = hid_.pointer_snapshot(absolute);
     Unlock();
     return report;
   }
@@ -646,7 +706,15 @@ class HilRuntime final : public keyferry::transport::Delegate,
     } else {
       const auto report = hid_.desired_mouse_report();
       const auto token = hid_.desired_mouse_logical_token();
-      queued = tud_hid_n_report(instance, 0, &report, sizeof(report));
+#if defined(KEYFERRY_POINTER_EXTENDED)
+      usb_transfer_pointer_length_ = PointerWire(report, &usb_transfer_pointer_bytes_);
+      queued = tud_hid_n_report(instance, 0, usb_transfer_pointer_bytes_.data(), usb_transfer_pointer_length_);
+#else
+      const keyferry::hid::BootMouseReport boot{report.buttons, report.x, report.y};
+      usb_transfer_pointer_length_ = sizeof(boot);
+      std::memcpy(usb_transfer_pointer_bytes_.data(), &boot, sizeof(boot));
+      queued = tud_hid_n_report(instance, 0, &boot, sizeof(boot));
+#endif
       if (queued) {
         usb_transfer_report_ = {};
         usb_transfer_mouse_report_ = report;
@@ -679,10 +747,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     const bool keyboard =
         usb_transfer_interface_ == keyferry::hid::InputInterface::keyboard;
     const auto expected_length = keyboard ? sizeof(BootKeyboardReport)
-                                          : sizeof(BootMouseReport);
+                                          : usb_transfer_pointer_length_;
     const void* expected_report = keyboard
                                       ? static_cast<const void*>(&usb_transfer_report_)
-                                      : static_cast<const void*>(&usb_transfer_mouse_report_);
+                                      : static_cast<const void*>(usb_transfer_pointer_bytes_.data());
     if (!usb_transfer_in_flight_ || report_bytes == nullptr ||
         instance != expected_instance || length != expected_length ||
         usb_transfer_generation_ != usb_attachment_generation_ ||
@@ -752,6 +820,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     ClearResults();
     authenticated_epoch_ = 0;
     peer_input_v1_ = false;
+    peer_input_v2_ = false;
 #if defined(KEYFERRY_FILE_HANDOFF)
     file_negotiated_ = false;
     file_set_negotiated_ = false;
@@ -788,11 +857,12 @@ class HilRuntime final : public keyferry::transport::Delegate,
             keyferry::protocol::Capability::kUsbFileSetV2)) != 0;
     file_neutral_pending_ = false;
 #endif
+    peer_input_v2_ = (ready.capability_mask & static_cast<std::uint32_t>(keyferry::protocol::Capability::kPointerExtendedV1)) != 0;
     peer_input_v1_ =
         (ready.capability_mask &
          static_cast<std::uint32_t>(
              keyferry::protocol::Capability::kMouseRelativeV1)) != 0;
-    command_.BeginSession(epoch, 0, peer_input_v1_);
+    command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);
     Unlock();
     return true;
   }
@@ -823,7 +893,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     const bool matched = epoch != 0 && epoch == authenticated_epoch_;
     if (matched) {
       command_.EndSession();
-      command_.BeginSession(epoch, 0, peer_input_v1_);
+      command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);
       disarm_waiting_ = true;
     }
     Unlock();
@@ -1298,6 +1368,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     hid_.request_dual_neutral();
     authenticated_epoch_ = 0;
     peer_input_v1_ = false;
+    peer_input_v2_ = false;
     disarm_waiting_ = false;
     session_abort_requested_ = true;
     ClearResults();
@@ -1449,6 +1520,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     ClearResults();
     authenticated_epoch_ = 0;
     peer_input_v1_ = false;
+    peer_input_v2_ = false;
     disarm_waiting_ = false;
     provisioning_active_ = false;
     provisioning_from_local_maintenance_ = false;
@@ -1956,6 +2028,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
 #endif
     authenticated_epoch_ = 0;
     peer_input_v1_ = false;
+    peer_input_v2_ = false;
     disarm_waiting_ = false;
     session_abort_requested_ = true;
     ClearResults();
@@ -1973,16 +2046,21 @@ class HilRuntime final : public keyferry::transport::Delegate,
   }
 
   bool SendResult(const PendingResult& pending) {
-    std::array<std::uint8_t, 21> payload{};
+    std::array<std::uint8_t, 22> payload{};
     std::size_t payload_length = 17;
     auto message_type = keyferry::protocol::MessageType::kCommandResult;
     if (pending.input) {
-      if (!keyferry::command::EncodeInputResultPayload(pending.input_evidence,
-                                                        &payload)) {
-        return false;
+      if (pending.input_evidence.extended) {
+        if (!keyferry::command::EncodeInputResultPayloadV2(pending.input_evidence, &payload)) { return false; }
+        payload_length = 22;
+        message_type = keyferry::protocol::MessageType::kInputCommandResultV2;
+      } else {
+        std::array<std::uint8_t, 21> legacy{};
+        if (!keyferry::command::EncodeInputResultPayload(pending.input_evidence, &legacy)) { return false; }
+        std::copy(legacy.begin(), legacy.end(), payload.begin());
+        payload_length = 21;
+        message_type = keyferry::protocol::MessageType::kInputCommandResultV1;
       }
-      payload_length = payload.size();
-      message_type = keyferry::protocol::MessageType::kInputCommandResultV1;
     } else {
       std::copy(pending.command_id.begin(), pending.command_id.end(), payload.begin());
       payload[16] = static_cast<std::uint8_t>(pending.result);
@@ -2142,6 +2220,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
   keyferry::transport::EspTransport* transport_{nullptr};
   std::uint64_t authenticated_epoch_{0};
   bool peer_input_v1_{false};
+  bool peer_input_v2_{false};
 #if defined(KEYFERRY_FILE_HANDOFF)
   bool file_negotiated_{false};
   bool file_set_negotiated_{false};
@@ -2152,7 +2231,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
   keyferry::hid::InputInterface usb_transfer_interface_{
       keyferry::hid::InputInterface::keyboard};
   BootKeyboardReport usb_transfer_report_{};
-  BootMouseReport usb_transfer_mouse_report_{};
+  std::array<std::uint8_t, 8> usb_transfer_pointer_bytes_{};
+  std::size_t usb_transfer_pointer_length_{};
+  PointerReport usb_transfer_mouse_report_{};
   std::uint64_t usb_transfer_mouse_token_{0};
   std::uint64_t usb_transfer_epoch_{0};
   std::uint64_t usb_transfer_generation_{0};
@@ -2237,8 +2318,12 @@ keyferry::endpoint::FirmwareIdentity BuildFirmwareIdentity(
   std::copy_n(reinterpret_cast<const std::uint8_t*>(description->version),
               identity.release.size(), identity.release.begin());
   identity.board_compatibility_id = keyferry::board::compatibility_id;
+#if defined(KEYFERRY_POINTER_EXTENDED)
+  identity.pointer_extended_v1 = output_mode == keyferry::protocol::OutputMode::kUsbHid;
+#else
   identity.mouse_relative_v1 =
       output_mode == keyferry::protocol::OutputMode::kUsbHid;
+#endif
   identity.ble_hid_output_v1 = true;
   identity.ble_hid_bond_reset_v1 = true;
   identity.targeted_gateway_transfer_v1 = true;
@@ -2804,7 +2889,7 @@ extern "C" std::uint8_t const* tud_hid_descriptor_report_cb(
     return kProvisioningReportDescriptor;
   }
   if (instance == keyferry::hil::kMouseHidInstance) {
-    return kMouseReportDescriptor;
+    return kSelectedMouseReportDescriptor;
   }
   return nullptr;
 }
@@ -2813,12 +2898,12 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
     const std::uint8_t instance, const std::uint8_t report_id,
     const hid_report_type_t report_type, std::uint8_t* buffer,
     const std::uint16_t requested_length) {
-  if (g_runtime == nullptr || report_id != 0 ||
+  if (g_runtime == nullptr ||
       report_type != HID_REPORT_TYPE_INPUT ||
       g_ble_control_usb.load(std::memory_order_acquire)) {
     return 0;
   }
-  if (instance == keyferry::hil::kKeyboardHidInstance) {
+  if (instance == keyferry::hil::kKeyboardHidInstance && report_id == 0) {
     const auto report = g_runtime->CurrentReport();
     const auto bytes = std::min<std::uint16_t>(requested_length, sizeof(report));
     if (buffer == nullptr && bytes != 0) {
@@ -2828,13 +2913,26 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
     return bytes;
   }
   if (instance == keyferry::hil::kMouseHidInstance) {
-    const auto report = g_runtime->CurrentMouseReport();
+#if defined(KEYFERRY_POINTER_EXTENDED)
+    if (report_id != 1 && report_id != 4) { return 0; }
+    const auto report = g_runtime->CurrentMouseReport(report_id == 4);
+    std::array<std::uint8_t, 8> wire{};
+    const auto wire_length = PointerWire(report, &wire);
+    const auto bytes = std::min<std::uint16_t>(requested_length, wire_length - 1);
+    if (buffer == nullptr && bytes != 0) { return 0; }
+    std::memcpy(buffer, wire.data() + 1, bytes);
+    return bytes;
+#else
+    if (report_id != 0) { return 0; }
+    const auto state = g_runtime->CurrentMouseReport();
+    const keyferry::hid::BootMouseReport report{state.buttons, 0, 0};
     const auto bytes = std::min<std::uint16_t>(requested_length, sizeof(report));
     if (buffer == nullptr && bytes != 0) {
       return 0;
     }
     std::memcpy(buffer, &report, bytes);
     return bytes;
+#endif
   }
   return 0;
 }
