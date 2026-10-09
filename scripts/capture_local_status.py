@@ -20,9 +20,10 @@ def status_document(raw: bytes, device: str) -> dict:
         return result
     document = json.loads(raw, object_pairs_hook=unique)
     pages = {"device", "safety", "network", "ble_hid", "policy", "last_receipt", "wifi_diagnostic"}
-    if (document.get("schema") != "keyferry.local-status.v1"
+    if (not isinstance(document, dict)
+            or document.get("schema") != "keyferry.local-status.v1"
             or document.get("device_id") != uuid.UUID(device).hex
-            or set(document) - pages != {"schema", "device_id"}):
+            or set(document) != pages | {"schema", "device_id"}):
         raise ValueError("unexpected status document")
     # The trusted Rust helper validates the wire. As a second persistence guard,
     # only scalar metadata, the bounded release, and registered reason may be strings.
