@@ -42,7 +42,7 @@ class CommandExecutor final {
                     const std::array<std::uint8_t, 32>& accepted_profile_hash);
 
     void BeginSession(std::uint64_t epoch, std::uint32_t first_sequence,
-                      bool input_v1_enabled = false);
+                      bool input_v1_enabled = false, bool input_v2_enabled = false);
     void EndSession();
     bool CommandScopedArm(std::uint64_t epoch, std::uint32_t command_sequence);
 
@@ -51,7 +51,7 @@ class CommandExecutor final {
                              std::uint64_t now_ms);
     void Poll(std::uint64_t now_ms);
     void UsbReportAccepted(const hid::BootKeyboardReport& report, std::uint64_t now_ms);
-    void UsbMouseReportAccepted(const hid::BootMouseReport& report,
+    void UsbMouseReportAccepted(const hid::PointerReport& report,
                                 std::uint64_t logical_token, std::uint64_t now_ms);
     void UsbFault();
 
@@ -80,6 +80,7 @@ class CommandExecutor final {
         kAwaitTapRelease,
         kTapGap,
         kAwaitMouseMove,
+        kAwaitPointer,
         kAwaitMouseClickPress,
         kMouseClickHold,
         kAwaitMouseClickRelease,
@@ -116,6 +117,8 @@ class CommandExecutor final {
     std::uint32_t expected_sequence_{0};
     bool sequence_exhausted_{false};
     bool input_v1_enabled_{false};
+    bool input_v2_enabled_{false};
+    bool input_extended_{false};
     bool command_arm_available_{false};
     bool active_{false};
     bool started_{false};

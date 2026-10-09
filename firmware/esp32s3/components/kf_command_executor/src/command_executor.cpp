@@ -71,7 +71,7 @@ CommandExecutor::CommandExecutor(hid::ExecutorState& hid, ResultSink& results,
 
 void CommandExecutor::BeginSession(const std::uint64_t epoch,
                                    const std::uint32_t first_sequence,
-                                   const bool input_v1_enabled) {
+                                   const bool input_v1_enabled, const bool input_v2_enabled) {
     EndSession();
     if (epoch == 0) {
         return;
@@ -80,6 +80,7 @@ void CommandExecutor::BeginSession(const std::uint64_t epoch,
     expected_sequence_ = first_sequence;
     sequence_exhausted_ = false;
     input_v1_enabled_ = input_v1_enabled;
+    input_v2_enabled_ = input_v2_enabled;
     command_arm_available_ = false;
     input_replay_.Reset();
     hid_.disarm();
@@ -118,6 +119,7 @@ void CommandExecutor::EndSession() {
     expected_sequence_ = 0;
     sequence_exhausted_ = false;
     input_v1_enabled_ = false;
+    input_v2_enabled_ = false;
     hid_.disarm();
 }
 
@@ -172,11 +174,16 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         return false;
     }
 
-    const bool input_kind = kind == kExecuteInputChunk || kind == kCancelInput ||
-                            kind == kReleaseInputAll;
+    const bool extended = kind == static_cast<std::uint8_t>(protocol::CommandKind::kExecuteInputChunkV2) ||
+                          kind == static_cast<std::uint8_t>(protocol::CommandKind::kCancelInputSequenceV2) ||
+                          kind == static_cast<std::uint8_t>(protocol::CommandKind::kReleaseInputAllV2);
+    if (extended) { kind = static_cast<std::uint8_t>(kind - 3); }
+    const bool input_kind = kind == kExecuteInputChunk || kind == kCancelInput || kind == kReleaseInputAll;
+    if (!active_) { input_extended_ = extended; }
     if (input_kind) {
         const bool clear_arm = kind == kExecuteInputChunk && command_arm_available_;
-        if (!input_v1_enabled_ || !hid_.mouse_enabled()) {
+        if (!(extended ? input_v2_enabled_ && hid_.extended_pointer_enabled() : input_v1_enabled_ && !hid_.extended_pointer_enabled()) ||
+            !hid_.mouse_enabled() || (active_ && input_extended_ != extended)) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kCapabilityRequired,
                         clear_arm);
             return false;
@@ -217,7 +224,8 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         }
 
         ParsedInputChunk parsed{};
-        if (!ParseInputChunk(body, body_length, &parsed)) {
+        if (!ParseInputChunk(body, body_length, &parsed, extended)) {
+            if (active_) { BeginTerminal(protocol::ResultCode::kAborted, protocol::ErrorCode::kMalformed); }
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kMalformed, clear_arm);
             return false;
         }
@@ -439,7 +447,7 @@ void CommandExecutor::UsbReportAccepted(const hid::BootKeyboardReport& report,
     Drive(now_ms);
 }
 
-void CommandExecutor::UsbMouseReportAccepted(const hid::BootMouseReport& report,
+void CommandExecutor::UsbMouseReportAccepted(const hid::PointerReport& report,
                                              const std::uint64_t logical_token,
                                              const std::uint64_t now_ms) {
     const bool previously_held = hid_.current_mouse_report().buttons != 0;
@@ -463,7 +471,7 @@ void CommandExecutor::UsbMouseReportAccepted(const hid::BootMouseReport& report,
         if (first_started_report) {
             EmitInput(protocol::ResultCode::kStarted, kNoInputError);
         }
-    } else if (hid::is_zero(report) && hid::is_zero(hid_.current_report())) {
+    } else if (hid::is_zero(report) && hid::is_zero(hid_.current_report()) && !hid_.report_needed()) {
         CancelHeldKeyWatchdog();
     }
 
@@ -476,7 +484,12 @@ void CommandExecutor::UsbMouseReportAccepted(const hid::BootMouseReport& report,
         }
         return;
     }
-    if (phase_ == Phase::kAwaitMouseMove && logical_token != 0) {
+    // A released pointer action drains both report IDs before the next gesture.
+    if (hid::is_zero(report) && hid_.report_needed()) { return; }
+    if (phase_ == Phase::kAwaitPointer) {
+        ++action_index_;
+        phase_ = Phase::kReady;
+    } else if (phase_ == Phase::kAwaitMouseMove && logical_token != 0) {
         const auto parts = input_chunk_.actions[action_index_].movement_parts;
         if (movement_part_index_ >= parts) {
             ++action_index_;
@@ -736,7 +749,8 @@ void CommandExecutor::DriveInput(const std::uint64_t now_ms) {
                 if (movement_part_index_ == 0) {
                     movement_part_index_ = 1;
                 }
-                hid::BootMouseReport report{};
+                hid::PointerReport report{};
+                report.buttons = hid_.current_mouse_report().buttons;
                 report.x = RelativeMovementAxisPart(action.dx_counts, movement_part_index_,
                                                     action.movement_parts);
                 report.y = RelativeMovementAxisPart(action.dy_counts, movement_part_index_,
@@ -752,13 +766,41 @@ void CommandExecutor::DriveInput(const std::uint64_t now_ms) {
                 return;
             }
             case InputActionKind::kMouseClick: {
-                const hid::BootMouseReport report{
+                const hid::PointerReport report{
                     static_cast<std::uint8_t>(1U << (action.button - 1U)), 0, 0};
                 if (hid_.submit_mouse_buttons(epoch_, report) != hid::SubmitResult::accepted) {
                     FailActive(started_);
                     return;
                 }
                 phase_ = Phase::kAwaitMouseClickPress;
+                return;
+            }
+            case InputActionKind::kPointerAbsolute:
+            case InputActionKind::kPointerScroll: {
+                hid::PointerReport report{};
+                report.buttons = hid_.current_mouse_report().buttons;
+                if (action.kind == InputActionKind::kPointerAbsolute) {
+                    report.absolute = true;
+                    report.position_event = true;
+                    report.absolute_x = static_cast<std::uint16_t>(action.dx_counts);
+                    report.absolute_y = static_cast<std::uint16_t>(action.dy_counts);
+                } else {
+                    report.wheel = static_cast<std::int8_t>(action.dx_counts);
+                    report.pan = static_cast<std::int8_t>(action.dy_counts);
+                }
+                ++movement_token_;
+                if (movement_token_ == 0 || hid_.submit_mouse_movement(epoch_, movement_token_, report) != hid::SubmitResult::accepted) {
+                    FailActive(started_); return;
+                }
+                phase_ = Phase::kAwaitPointer;
+                return;
+            }
+            case InputActionKind::kPointerDown:
+            case InputActionKind::kPointerUp: {
+                hid::PointerReport report{};
+                report.buttons = action.kind == InputActionKind::kPointerDown ? static_cast<std::uint8_t>(1U << (action.button - 1U)) : 0;
+                if (hid_.submit_mouse_buttons(epoch_, report) != hid::SubmitResult::accepted) { FailActive(started_); return; }
+                phase_ = Phase::kAwaitPointer;
                 return;
             }
             case InputActionKind::kNeutralAll:
@@ -846,6 +888,7 @@ void CommandExecutor::EmitInput(const protocol::ResultCode result,
                                 const protocol::ErrorCode reason) {
     InputResultEvidence evidence{};
     evidence.command_id = command_id_;
+    evidence.extended = input_extended_;
     evidence.result = result;
     evidence.neutral_mask =
         result == protocol::ResultCode::kAccepted || result == protocol::ResultCode::kStarted
@@ -866,6 +909,7 @@ void CommandExecutor::RejectInput(const std::array<std::uint8_t, 16>& command_id
     }
     InputResultEvidence evidence{};
     evidence.command_id = command_id;
+    evidence.extended = input_extended_;
     evidence.result = protocol::ResultCode::kRejected;
     evidence.reason = reason;
     results_.InputCommandResult(sequence, evidence);

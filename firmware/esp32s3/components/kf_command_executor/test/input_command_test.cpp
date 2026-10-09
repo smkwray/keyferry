@@ -140,9 +140,41 @@ void Encodes_the_exact_evidence_result_vector_and_rejects_dishonest_results() {
     assert(keyferry::command::EncodeInputResultPayload(release_only, &payload));
 }
 
+
+void Extended_vectors_and_bounded_malformed_inputs() {
+    const std::vector<std::uint8_t> body{0,0,1,0,8,4,0,64,0,64,9,2,255,1,10,1,3,8,4,255,127,255,127,11,1,3,7,0};
+    ParsedInputChunk parsed{};
+    assert(keyferry::command::ParseInputChunk(body.data(),body.size(),&parsed,true));
+    assert(parsed.action_count == 6 && parsed.duration_ms == 90);
+    assert(!keyferry::command::ParseInputChunk(body.data(),body.size(),&parsed));
+    for (std::size_t size = 0; size < body.size(); ++size) {
+        assert(!keyferry::command::ParseInputChunk(body.data(),size,&parsed,true));
+    }
+    for (std::size_t i = 0; i < body.size(); ++i) {
+        for (unsigned value = 0; value < 256; ++value) {
+            auto malformed = body;
+            malformed[i] = static_cast<std::uint8_t>(value);
+            (void)keyferry::command::ParseInputChunk(malformed.data(),malformed.size(),&parsed,true);
+        }
+    }
+    auto out_of_range = body; out_of_range[7] = 128;
+    assert(!keyferry::command::ParseInputChunk(out_of_range.data(),out_of_range.size(),&parsed,true));
+    auto unbalanced = body; unbalanced[24] = 2;
+    assert(!keyferry::command::ParseInputChunk(unbalanced.data(),unbalanced.size(),&parsed,true));
+    InputResultEvidence e{}; e.command_id = Id(1); e.extended = true;
+    e.result = keyferry::protocol::ResultCode::kEmitted;
+    e.neutral_mask = 3; e.effect_flags = 1; e.reason = keyferry::command::kNoInputError;
+    std::array<std::uint8_t,22> bytes{};
+    assert(keyferry::command::EncodeInputResultPayloadV2(e,&bytes));
+    assert(bytes[16] == 4 && bytes[17] == 3 && bytes[18] == 3 && bytes[19] == 1);
+    e.neutral_mask = 1;
+    assert(!keyferry::command::EncodeInputResultPayloadV2(e,&bytes));
+}
+
 }  // namespace
 
 int main() {
+    Extended_vectors_and_bounded_malformed_inputs();
     Parses_the_canonical_cross_language_body();
     Movement_splitting_is_exact_and_never_emits_negative_128();
     Parser_rejects_malformed_deferred_and_over_budget_chunks();

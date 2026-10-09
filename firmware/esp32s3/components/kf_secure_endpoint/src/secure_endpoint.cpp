@@ -11,6 +11,9 @@ namespace keyferry::endpoint {
 std::uint32_t FirmwareCapabilityMask(const FirmwareIdentity& identity) {
   return static_cast<std::uint32_t>(protocol::Capability::kKeyboard) |
          static_cast<std::uint32_t>(protocol::Capability::kFirmwareIdentityV1) |
+         (identity.pointer_extended_v1
+              ? static_cast<std::uint32_t>(protocol::Capability::kPointerExtendedV1)
+              : 0U) |
          (identity.mouse_relative_v1
               ? static_cast<std::uint32_t>(protocol::Capability::kMouseRelativeV1)
               : 0U) |

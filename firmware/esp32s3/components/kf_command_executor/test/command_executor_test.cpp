@@ -472,9 +472,114 @@ void Mixed_capability_rejection_clears_arm_and_release_confirms_both_zeros() {
            (keyferry::hid::kKeyboardNeutral | keyferry::hid::kMouseNeutral));
 }
 
+
+void Extended_drag_faults_release_every_report_role() {
+    // Cancel, connection loss, USB/reset, malformed input, watchdog and executor failure.
+    for (int fault = 0; fault < 7; ++fault) {
+        keyferry::hid::ExecutorState hid;
+        Results results;
+        Watchdog watchdog;
+        CommandExecutor executor(hid, results, watchdog, kProfileHash);
+        assert(hid.enable_extended_pointer());
+        assert(!hid.armed());
+        hid.on_transport_ready();
+        auto drain = [&](std::uint64_t now) {
+            for (int i = 0; i < 8 && hid.report_needed(); ++i) {
+                if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) {
+                    executor.UsbReportAccepted(hid.desired_report(), now);
+                } else {
+                    const auto r = hid.desired_mouse_report();
+                    assert(keyferry::hid::is_zero(r));
+                    executor.UsbMouseReportAccepted(r, 0, now);
+                }
+            }
+        };
+        drain(0);
+        executor.BeginSession(7, 2, false, true);
+        drain(0);
+        assert(executor.CommandScopedArm(7, 2));
+        // Move first, then hold across another absolute move and a wait; release is balanced.
+        const std::vector<std::uint8_t> body{0,0,1,0,8,4,0,64,0,64,10,1,1,8,4,255,127,255,127,2,2,100,0,11,1,1,7,0};
+        const auto payload = Envelope(Id(80), 5000, 7, body);
+        assert(executor.HandleAuthenticated(7, Frame(2,payload),10));
+        auto report = hid.desired_mouse_report();
+        executor.UsbMouseReportAccepted(report,hid.desired_mouse_logical_token(),11);
+        executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,12);
+        assert(hid.current_mouse_report().buttons == 1);
+        const auto original_deadline = watchdog.deadline_ms;
+        executor.UsbMouseReportAccepted(hid.desired_mouse_report(),hid.desired_mouse_logical_token(),13);
+        assert(watchdog.deadline_ms == original_deadline);
+        assert(watchdog.schedule_count == 1);
+        switch (fault) {
+            case 0: { const auto cancel = Envelope(Id(80),5000,8,{}); assert(executor.HandleAuthenticated(7,Frame(3,cancel),14)); break; }
+            case 1: executor.EndSession(); break;
+            case 2: executor.UsbFault(); break;
+            case 3: { const auto invalid = Envelope(Id(81),5000,7,{0,0,1,0,10,1,1,7,0}); assert(!executor.HandleAuthenticated(7,Frame(3,invalid),14)); break; }
+            case 4: executor.HeldKeyDeadlineFired(watchdog.token,watchdog.deadline_ms); break;
+            case 5: executor.UsbMouseReportAccepted({},99,14); break;
+            case 6: hid.on_transport_lost(); executor.EndSession(); hid.on_transport_ready(); break;
+        }
+        assert(!hid.armed());
+        // Keyboard completion alone and relative pointer zero alone never establish V2 release.
+        assert(hid.report_needed());
+        assert(hid.desired_interface() == keyferry::hid::InputInterface::keyboard);
+        executor.UsbReportAccepted({},15);
+        assert(hid.neutral_mask() != 3);
+        auto relative = hid.desired_mouse_report();
+        assert(!relative.absolute && keyferry::hid::is_zero(relative));
+        executor.UsbMouseReportAccepted(relative,0,16);
+        assert(hid.neutral_mask() != 3);
+        auto absolute = hid.desired_mouse_report();
+        assert(absolute.absolute && keyferry::hid::is_zero(absolute));
+        assert(absolute.absolute_x == 32767 && absolute.absolute_y == 32767);
+        executor.UsbMouseReportAccepted(absolute,0,17);
+        assert(hid.current_mouse_report().buttons == 0);
+        assert(!hid.armed());
+        // Loss/reset evidence never upgrades the already uncertain command.
+        if (fault == 1 || fault == 2 || fault == 5 || fault == 6) {
+            assert(results.input_events.back().evidence.result == ResultCode::kUnknown);
+        }
+    }
+}
+
+
+void Extended_button_up_drains_both_ids_before_a_following_click() {
+    keyferry::hid::ExecutorState hid;
+    Results results; Watchdog watchdog;
+    CommandExecutor executor(hid,results,watchdog,kProfileHash);
+    assert(hid.enable_extended_pointer()); hid.on_transport_ready();
+    auto zero = [&](std::uint64_t now) {
+        if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) executor.UsbReportAccepted({},now);
+        else executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,now);
+    };
+    zero(0); zero(0); zero(0);
+    executor.BeginSession(7,2,false,true); zero(0); zero(0); zero(0);
+    assert(executor.CommandScopedArm(7,2));
+    const auto payload = Envelope(Id(82),5000,7,{0,0,1,0,10,1,1,8,4,255,127,0,64,11,1,1,6,5,3,40,0,40,0,7,0});
+    assert(executor.HandleAuthenticated(7,Frame(2,payload),10));
+    executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,11);
+    executor.UsbMouseReportAccepted(hid.desired_mouse_report(),hid.desired_mouse_logical_token(),12);
+    assert(watchdog.token != 0);
+    zero(13); // relative button-up completion: absolute release is still outstanding
+    assert(watchdog.token != 0);
+    assert(hid.desired_mouse_report().absolute && hid.desired_mouse_report().buttons == 0);
+    auto wrong = hid.desired_mouse_report(); wrong.absolute_x = 0;
+    assert(!hid.mark_mouse_report_accepted(wrong,0));
+    zero(14); // absolute completion now permits the following middle click
+    assert(hid.desired_mouse_report().buttons == 4);
+    executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,15);
+    executor.Poll(56); zero(57); zero(58); executor.Poll(99);
+    zero(100); zero(101); zero(102);
+    assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
+    assert(results.input_events.back().evidence.neutral_mask == 3);
+    assert(!hid.armed());
+}
+
 }  // namespace
 
 int main() {
+    Extended_button_up_drains_both_ids_before_a_following_click();
+    Extended_drag_faults_release_every_report_role();
     Executes_with_exact_results_and_terminal_zero();
     Enforces_sequence_expiry_busy_and_arm_consumption();
     Cancellation_aborts_after_release();

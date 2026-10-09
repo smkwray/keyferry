@@ -18,17 +18,32 @@ struct BootMouseReport {
     std::int8_t x{};
     std::int8_t y{};
 };
+static_assert(sizeof(BootMouseReport) == 3);
 
-static_assert(sizeof(BootMouseReport) == 3, "boot-mouse reports must be exactly 3 bytes");
+// Logical pointer state. Serialize explicitly: this is never a USB wire struct.
+struct PointerReport {
+    std::uint8_t buttons{};
+    std::int8_t x{};
+    std::int8_t y{};
+    std::int8_t wheel{};
+    std::int8_t pan{};
+    bool absolute{};
+    bool position_event{};
+    std::uint16_t absolute_x{};
+    std::uint16_t absolute_y{};
+    PointerReport() = default;
+    PointerReport(std::uint8_t b, std::int8_t dx, std::int8_t dy) : buttons(b), x(dx), y(dy) {}
+    PointerReport(const BootMouseReport& r) : PointerReport(r.buttons, r.x, r.y) {}
+};
 
 bool operator==(const BootKeyboardReport& left, const BootKeyboardReport& right) noexcept;
 bool operator!=(const BootKeyboardReport& left, const BootKeyboardReport& right) noexcept;
 bool is_zero(const BootKeyboardReport& report) noexcept;
 bool is_valid(const BootKeyboardReport& report) noexcept;
-bool operator==(const BootMouseReport& left, const BootMouseReport& right) noexcept;
-bool operator!=(const BootMouseReport& left, const BootMouseReport& right) noexcept;
-bool is_zero(const BootMouseReport& report) noexcept;
-bool is_valid(const BootMouseReport& report) noexcept;
+bool operator==(const PointerReport& left, const PointerReport& right) noexcept;
+bool operator!=(const PointerReport& left, const PointerReport& right) noexcept;
+bool is_zero(const PointerReport& report) noexcept;
+bool is_valid(const PointerReport& report) noexcept;
 
 enum class InputInterface : std::uint8_t { keyboard, mouse };
 
@@ -59,20 +74,23 @@ class ExecutorState final {
     [[nodiscard]] InputInterface desired_interface() const noexcept;
     [[nodiscard]] const BootKeyboardReport& desired_report() const noexcept;
     [[nodiscard]] const BootKeyboardReport& current_report() const noexcept;
-    [[nodiscard]] const BootMouseReport& desired_mouse_report() const noexcept;
-    [[nodiscard]] const BootMouseReport& current_mouse_report() const noexcept;
+    [[nodiscard]] const PointerReport& desired_mouse_report() const noexcept;
+    [[nodiscard]] const PointerReport& current_mouse_report() const noexcept;
     [[nodiscard]] std::uint64_t desired_mouse_logical_token() const noexcept;
     [[nodiscard]] std::uint8_t neutral_mask() const noexcept;
+    [[nodiscard]] PointerReport pointer_snapshot(bool absolute) const noexcept;
 
     // Must be selected before the USB transport is made ready. The default remains keyboard-only.
     bool enable_mouse_interface() noexcept;
+    bool enable_extended_pointer() noexcept;
+    [[nodiscard]] bool extended_pointer_enabled() const noexcept;
     // Arming is rejected until the transport has accepted the mandatory zero report.
     bool arm(std::uint64_t epoch) noexcept;
     SubmitResult submit(std::uint64_t epoch, const BootKeyboardReport& report) noexcept;
     SubmitResult submit_mouse_movement(std::uint64_t epoch, std::uint64_t logical_token,
-                                       const BootMouseReport& report) noexcept;
+                                       const PointerReport& report) noexcept;
     SubmitResult submit_mouse_buttons(std::uint64_t epoch,
-                                      const BootMouseReport& report) noexcept;
+                                      const PointerReport& report) noexcept;
 
     void on_transport_ready() noexcept;
     void on_transport_lost() noexcept;
@@ -86,7 +104,7 @@ class ExecutorState final {
 
     // Returns false if the adapter acknowledges anything except the exact desired report.
     bool mark_report_accepted(const BootKeyboardReport& report) noexcept;
-    bool mark_mouse_report_accepted(const BootMouseReport& report,
+    bool mark_mouse_report_accepted(const PointerReport& report,
                                     std::uint64_t logical_token) noexcept;
 
   private:
@@ -94,6 +112,10 @@ class ExecutorState final {
 
     bool transport_ready_{false};
     bool mouse_enabled_{false};
+    bool extended_pointer_{false};
+    bool release_absolute_pending_{false};
+    std::uint16_t absolute_x_{};
+    std::uint16_t absolute_y_{};
     bool armed_{false};
     bool report_pending_{true};
     bool release_mouse_pending_{false};
@@ -109,8 +131,8 @@ class ExecutorState final {
     std::uint64_t last_movement_token_{0};
     BootKeyboardReport desired_{};
     BootKeyboardReport current_{};
-    BootMouseReport desired_mouse_{};
-    BootMouseReport current_mouse_{};
+    PointerReport desired_mouse_{};
+    PointerReport current_mouse_{};
 };
 
 }  // namespace keyferry::hid

@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_JOBS = max(1, int((os.cpu_count() or 1) * 0.60))
+BUILD_JOBS = min(4, max(1, int(os.environ.get("CARGO_BUILD_JOBS", "4"))))
 
 
 def run(
@@ -457,6 +457,7 @@ def main() -> None:
     run([sys.executable, "scripts/check_secure_endpoint.py"])
     run([sys.executable, "scripts/check_esp_transport.py"])
     run([sys.executable, "scripts/check_hil_mouse.py"])
+    run([sys.executable, "scripts/check_hil_pointer.py"])
     run([sys.executable, "scripts/check_provisioning.py"])
     run([sys.executable, "scripts/check_local_management.py"])
     run([sys.executable, "scripts/check_qualification.py"])
