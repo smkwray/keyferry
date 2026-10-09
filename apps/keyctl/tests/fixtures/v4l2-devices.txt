@@ -1,0 +1,3 @@
+Auto-detected sources for video4linux2,v4l2:
+  /dev/video0 [Integrated Camera] (none)
+  /dev/video2 [USB Video Capture] (none)

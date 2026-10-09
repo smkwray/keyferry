@@ -1,0 +1,9 @@
+[in#0 @ 0000010000000000] "Logitech Webcam C925e" (video)
+[in#0 @ 0000010000000000]   Alternative name "@device_pnp_example_webcam"
+[in#0 @ 0000010000000000] "Hagibis" (video)
+[in#0 @ 0000010000000000]   Alternative name "@device_pnp_example_capture"
+[in#0 @ 0000010000000000] "OBS Virtual Camera" (none)
+[in#0 @ 0000010000000000]   Alternative name "@device_sw_example_virtual"
+[in#0 @ 0000010000000000] "Microphone (Logitech Webcam C925e)" (audio)
+[in#0 @ 0000010000000000]   Alternative name "@device_cm_example_audio"
+Error opening input file dummy.

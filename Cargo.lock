@@ -2673,8 +2673,10 @@ dependencies = [
  "keyferry-core",
  "keyferry-layouts",
  "keyferry-protocol",
+ "png",
  "serde",
  "serde_json",
+ "time",
  "uuid",
 ]
 

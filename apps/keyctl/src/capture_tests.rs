@@ -1,0 +1,260 @@
+use super::*;
+
+fn args(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+#[test]
+fn arguments_are_strict_and_bounded() {
+    assert_eq!(parse(&args(&["list"])).unwrap(), Request::List);
+    assert_eq!(parse(&args(&["--help"])).unwrap(), Request::Help);
+    let Request::Frame(options) = parse(&args(&[
+        "frame",
+        "--out",
+        "screen.png",
+        "--source",
+        "Hagibis",
+        "--size",
+        "1920x1080",
+        "--scale",
+        "960x540",
+    ]))
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(options.size, Some((1920, 1080)));
+    assert_eq!(options.scale, Some((960, 540)));
+    for values in [
+        vec![],
+        vec!["list", "extra"],
+        vec!["frame"],
+        vec!["frame", "--out"],
+        vec!["frame", "--out", "a", "--out", "b"],
+        vec!["frame", "--out", ""],
+        vec!["frame", "--out", "a", "--size", "0x100"],
+        vec!["frame", "--out", "a", "--scale", "4097x1"],
+        vec!["frame", "--out", "a", "--size", "1920x1080x2"],
+        vec!["frame", "--out", "a", "--wat", "1"],
+    ] {
+        assert_eq!(parse(&args(&values)).unwrap_err().exit(), 20, "{values:?}");
+    }
+}
+
+#[test]
+fn real_listing_shapes_exclude_audio_and_desktop_sources() {
+    let devices = parse_devices(
+        Backend::Dshow,
+        include_str!("../tests/fixtures/dshow-devices.txt"),
+    )
+    .unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(devices[1].name, "Hagibis");
+    assert!(devices[1].id.starts_with("@device_pnp_"));
+    let devices = parse_devices(
+        Backend::Avfoundation,
+        include_str!("../tests/fixtures/avfoundation-devices.txt"),
+    )
+    .unwrap();
+    assert_eq!(
+        devices,
+        vec![
+            Device {
+                name: "FaceTime HD Camera".into(),
+                id: "0".into()
+            },
+            Device {
+                name: "USB Capture HDMI".into(),
+                id: "1".into()
+            }
+        ]
+    );
+    let devices = parse_devices(
+        Backend::V4l2,
+        include_str!("../tests/fixtures/v4l2-devices.txt"),
+    )
+    .unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(
+        devices[1],
+        Device {
+            name: "USB Video Capture".into(),
+            id: "/dev/video2".into()
+        }
+    );
+    for backend in [Backend::Dshow, Backend::Avfoundation, Backend::V4l2] {
+        assert_eq!(
+            parse_devices(backend, "Unknown input format")
+                .unwrap_err()
+                .code,
+            "capture.list_failed"
+        );
+    }
+    assert!(parse_devices(
+        Backend::V4l2,
+        "Auto-detected sources for video4linux2,v4l2:\n/dev/video0 broken"
+    )
+    .is_err());
+    assert!(parse_devices(
+        Backend::Avfoundation,
+        "AVFoundation video devices:\n[not-an-index] X"
+    )
+    .is_err());
+}
+
+#[test]
+fn default_selection_needs_one_recognized_non_webcam() {
+    let mut devices = parse_devices(
+        Backend::Dshow,
+        include_str!("../tests/fixtures/dshow-devices.txt"),
+    )
+    .unwrap();
+    assert_eq!(select_source(&devices, None).unwrap().name, "Hagibis");
+    assert_eq!(
+        select_source(&devices, Some(&devices[0].id)).unwrap().name,
+        "Logitech Webcam C925e"
+    );
+    assert_eq!(
+        select_source(&devices, Some("missing")).unwrap_err().code,
+        "capture.source_not_found"
+    );
+    devices.push(Device {
+        name: "HDMI Capture".into(),
+        id: "another".into(),
+    });
+    assert_eq!(
+        select_source(&devices, None).unwrap_err().candidates.len(),
+        3
+    );
+    assert!(select_source(&devices[..1], None).is_err());
+    assert!(select_source(&[], None).is_err());
+    let duplicates = vec![
+        devices[1].clone(),
+        Device {
+            name: "Hagibis".into(),
+            id: "unique".into(),
+        },
+    ];
+    assert!(select_source(&duplicates, Some("Hagibis")).is_err());
+    assert_eq!(
+        select_source(&duplicates, Some("unique")).unwrap().id,
+        "unique"
+    );
+}
+
+#[test]
+fn frame_arguments_select_backend_and_only_pipe_output() {
+    let options = FrameOptions {
+        out: "private.png".into(),
+        source: None,
+        size: Some((1920, 1080)),
+        scale: Some((960, 540)),
+    };
+    let device = Device {
+        name: "capture".into(),
+        id: "3".into(),
+    };
+    for (backend, input) in [
+        (Backend::Dshow, "video=3"),
+        (Backend::Avfoundation, "3:none"),
+        (Backend::V4l2, "3"),
+    ] {
+        let values = frame_args(backend, &device, &options);
+        assert!(values.windows(2).any(|pair| pair == ["-i", input]));
+        assert!(values.windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(values
+            .windows(2)
+            .any(|pair| pair == ["-vf", "scale=960:540"]));
+        assert_eq!(values.last().unwrap(), "pipe:1");
+        assert!(!values.iter().any(|value| value.contains("private.png")));
+        if backend == Backend::Dshow {
+            assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "256M"]));
+        }
+    }
+}
+
+#[test]
+fn signal_detects_near_uniform_black_blue_but_keeps_other_screens() {
+    for pixel in [[0, 0, 0], [16, 16, 16], [0, 0, 255], [10, 25, 180]] {
+        assert_eq!(signal(&pixel.repeat(100)).0, "no-signal");
+    }
+    let noisy_black = [[0, 0, 0], [8, 8, 8]].concat().repeat(100);
+    assert_eq!(signal(&noisy_black), ("no-signal", 4.0));
+    for pixel in [[255, 255, 255], [255, 0, 0], [60, 60, 60], [0, 255, 0]] {
+        assert_eq!(signal(&pixel.repeat(100)).0, "present");
+    }
+    assert_eq!(signal(&[[0, 0, 0], [255, 255, 255]].concat()).0, "present");
+    assert_eq!(signal(&[255, 255, 255]).1, 255.0);
+}
+
+#[test]
+fn decode_rejects_truncated_or_unbounded_images() {
+    assert_eq!(
+        decode(b"not a PNG").unwrap_err().code,
+        "capture.invalid_frame"
+    );
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&[0; 6])
+        .unwrap();
+    let (w, h, rgb) = decode(&bytes).unwrap();
+    assert_eq!((w, h, rgb.len()), (2, 1, 6));
+    assert!(decode(&bytes[..bytes.len() / 2]).is_err());
+    assert!(read_bounded(Cursor::new([0; 10]), 9).is_err());
+    assert_eq!(read_bounded(Cursor::new([0; 10]), 10).unwrap().len(), 10);
+    let mut oversized = Vec::new();
+    let mut encoder = png::Encoder::new(&mut oversized, 4097, 1);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&vec![0; 4097 * 3])
+        .unwrap();
+    assert!(decode(&oversized).is_err());
+}
+
+#[test]
+fn fake_ffmpeg_wait() {
+    if std::env::var_os("KEYCTL_UNIT_FFMPEG_SLEEP").is_some() {
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+#[test]
+fn process_deadline_kills_a_fake_ffmpeg() {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "capture::tests::fake_ffmpeg_wait", "--nocapture"])
+        .env("KEYCTL_UNIT_FFMPEG_SLEEP", "1");
+    let start = Instant::now();
+    let error = bounded_output(
+        command,
+        Duration::from_millis(150),
+        MAX_LIST_BYTES,
+        Backend::current(),
+    )
+    .err()
+    .expect("sleeping fake must time out");
+    assert_eq!(error.code, "capture.timeout");
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn error_exit_codes_are_explicit() {
+    for (code, exit) in [
+        ("capture.arguments", 20),
+        ("capture.source_required", 20),
+        ("capture.source_not_found", 20),
+        ("capture.ffmpeg_missing", 23),
+        ("capture.timeout", 24),
+        ("capture.output", 25),
+        ("capture.frame_failed", 25),
+    ] {
+        assert_eq!(Error::new(code, "test").exit(), exit);
+    }
+}
