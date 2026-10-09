@@ -14,7 +14,11 @@ option(KEYFERRY_MSC_SIZE_PROBE
     "Unflashed, empty-medium MSC descriptor and resource measurement" OFF)
 option(KEYFERRY_MSC_MEMORY_PROBE
     "Unflashed MSC internal-memory qualification image and candidate layout" OFF)
-option(KEYFERRY_POINTER_EXTENDED "Opt-in F1 pointer report-ID personality" OFF)
+set(KEYFERRY_POINTER_DEFAULT OFF)
+if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite")
+    set(KEYFERRY_POINTER_DEFAULT ON)
+endif()
+option(KEYFERRY_POINTER_EXTENDED "F1 pointer report-ID personality" ${KEYFERRY_POINTER_DEFAULT})
 option(KEYFERRY_FILE_HANDOFF
     "Opt-in RAM-backed USB file handoff candidate" OFF)
 if(KEYFERRY_FILE_HANDOFF AND KEYFERRY_MSC_SIZE_PROBE)
@@ -46,8 +50,13 @@ set(KEYFERRY_PRIVATE_CONFIG_DIR "${CMAKE_BINARY_DIR}/private-config")
 
 include("${CMAKE_CURRENT_LIST_DIR}/../boards/load_board_profile.cmake")
 
-if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite" AND KEYFERRY_FILE_HANDOFF)
-    message(FATAL_ERROR "AtomS3 Lite file capacity is unmeasured; qualification required")
+if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite")
+    if(KEYFERRY_FILE_HANDOFF OR KEYFERRY_MSC_SIZE_PROBE)
+        message(FATAL_ERROR "AtomS3 Lite file capacity is unmeasured; qualification required")
+    endif()
+    if(NOT KEYFERRY_POINTER_EXTENDED)
+        message(FATAL_ERROR "AtomS3 Lite requires the extended pointer personality")
+    endif()
 endif()
 if(KEYFERRY_RESOURCE_ONLY)
     if(KEYFERRY_PRIVATE_HEADER)

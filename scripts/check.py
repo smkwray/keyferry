@@ -475,7 +475,7 @@ def main() -> None:
     run([sys.executable, "scripts/check_usb_executor.py"])
     run([sys.executable, "scripts/check_secure_endpoint.py"])
     run([sys.executable, "scripts/check_esp_transport.py"])
-    run([sys.executable, "-m", "unittest", "tests.test_board_profiles", "tests.test_flash_backup"])
+    run([sys.executable, "-m", "unittest", "tests.test_board_profiles", "tests.test_flash_backup", "tests.test_first_install_freeze", "tests.test_hil_pointer"])
     run([sys.executable, "scripts/check_hil_mouse.py"])
     run([sys.executable, "scripts/check_hil_pointer.py"])
     run([sys.executable, "scripts/check_provisioning.py"])

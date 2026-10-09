@@ -15,7 +15,7 @@ BOARDS = ROOT / "firmware/esp32s3/boards"
 class BoardProfileTests(unittest.TestCase):
     def test_existing_generated_headers_match_base(self):
         # Frozen producer, not a mirror of the new implementation.
-        original = subprocess.check_output(["git", "show", "d0d8bf7:scripts/gen_board_profile.py"], cwd=ROOT).decode()
+        original = subprocess.check_output(["git", "show", "71104ff:scripts/gen_board_profile.py"], cwd=ROOT).decode()
         old = {}
         exec(compile(original, "baseline_generator", "exec"), old)
         for name in ("lilygo_t_dongle_s3", "waveshare_geek_v1_1_reference"):
@@ -23,7 +23,7 @@ class BoardProfileTests(unittest.TestCase):
             self.assertEqual(boards.render(boards.load_profile(path), path),
                              old["render"](old["load_profile"](path), path))
             for filename in ("board.json", "sdkconfig.defaults"):
-                expected = subprocess.check_output(["git", "show", f"d0d8bf7:firmware/esp32s3/boards/{name}/{filename}"], cwd=ROOT)
+                expected = subprocess.check_output(["git", "show", f"71104ff:firmware/esp32s3/boards/{name}/{filename}"], cwd=ROOT)
                 self.assertEqual((BOARDS/name/filename).read_bytes().replace(b"\r\n",b"\n"), expected)
 
     def test_atoms3_pins_and_flash(self):

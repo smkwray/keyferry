@@ -20,6 +20,8 @@ param(
 
     [switch]$FileHandoff,
 
+    [switch]$PointerExtended,
+
     [string]$BaselineDir = '',
 
     [ValidateRange(0, 256)]
@@ -86,6 +88,7 @@ try {
     $mscMemoryArg = if ($MscMemoryProbe) { 'ON' } else { 'OFF' }
     $fileHandoffArg = if ($FileHandoff) { 'ON' } else { 'OFF' }
     $resourceOnlyArg = if ($ResourceOnly) { 'ON' } else { 'OFF' }
+    $pointerExtendedArg = if ($PointerExtended -or $BoardProfile -eq 'm5stack_atoms3_lite') { 'ON' } else { 'OFF' }
     idf.py -C firmware/esp32s3/hil_endpoint -B $BuildDir `
         "-DKEYFERRY_BOARD=$BoardProfile" `
         "-DKEYFERRY_RESOURCE_ONLY=$resourceOnlyArg" `
@@ -94,6 +97,7 @@ try {
         "-DKEYFERRY_MSC_SIZE_PROBE=$mscProbeArg" `
         "-DKEYFERRY_MSC_MEMORY_PROBE=$mscMemoryArg" `
         "-DKEYFERRY_FILE_HANDOFF=$fileHandoffArg" `
+        "-DKEYFERRY_POINTER_EXTENDED=$pointerExtendedArg" `
         @privateHeaderArgument build
     if ($LASTEXITCODE -ne 0) { throw 'First-HIL firmware build failed.' }
     if ($FileHandoff) {
@@ -113,6 +117,10 @@ try {
     } else {
         python scripts/check_ble_hid_spike.py --build-dir $BuildDir --level $BleHidSpike
         if ($LASTEXITCODE -ne 0) { throw 'BLE HID spike inspection failed.' }
+    }
+    if ($pointerExtendedArg -eq 'ON') {
+        python scripts/check_hil_pointer.py --build-dir $BuildDir
+        if ($LASTEXITCODE -ne 0) { throw 'Extended pointer inspection failed.' }
     }
 } finally {
     Pop-Location
