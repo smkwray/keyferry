@@ -206,7 +206,17 @@ def check_decisions(root: Path, rep: Report) -> dict[str, str]:
     """Returns {decision_id: status} for the reference checker."""
     p = root / "do" / "decisions.md"
     if not p.is_file():
-        return {}
+        # Private controls are not checked out into linked worktrees. Read the
+        # main checkout's ledger; never copy or create a second authority.
+        common = _git(root, "rev-parse", "--git-common-dir")
+        if common:
+            common_dir = (root / common.strip()).resolve()
+            inherited = common_dir.parent / "do" / "decisions.md"
+            if common_dir.name == ".git" and common_dir.parent != root.resolve() and inherited.is_file():
+                p = inherited
+                rep.add("WARN", "control_decisions", "reading main checkout's private decision ledger")
+        if not p.is_file():
+            return {}
     text = p.read_text(encoding="utf-8", errors="replace")
     records, levels = parse_decisions(text)
     if not records:
@@ -540,6 +550,27 @@ def selftest_worktrees() -> int:
         rep = Report()
         check_worktrees(root, rep)
         cases.append(("a worktree never blocks a commit", not rep.counts().get("FAIL")))
+        wt = root / ".worktrees" / "w"
+        (root / "do").mkdir()
+        ledger = root / "do" / "decisions.md"
+        ledger.write_text("## D-20260801-01 — a\n\nDecision: x\nSource: owner chat.\nStatus: active\n", encoding="utf-8")
+        rep = Report()
+        fixture_id = parse_decisions(ledger.read_text(encoding="utf-8"))[0][0]["id"]
+        cases.append(("linked worktree reads main private ledger without copying it",
+                      check_decisions(wt, rep) == {fixture_id: "active"}
+                      and not (wt / "do" / "decisions.md").exists()))
+        ledger.write_text(ledger.read_text(encoding="utf-8") * 2, encoding="utf-8")
+        rep = Report()
+        check_decisions(wt, rep)
+        cases.append(("malformed inherited ledger still fails", rep.counts().get("FAIL", 0) > 0))
+        (wt / "do").mkdir()
+        (wt / "do" / "decisions.md").write_text("", encoding="utf-8")
+        cases.append(("existing local ledger is never replaced by inherited data",
+                      check_decisions(wt, Report()) == {}))
+        ledger.unlink()
+        (wt / "do" / "decisions.md").unlink()
+        cases.append(("missing main ledger does not fabricate decisions",
+                      check_decisions(wt, Report()) == {}))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
