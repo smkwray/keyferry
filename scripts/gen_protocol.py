@@ -54,6 +54,7 @@ VALUE_FIELD = {
     "local_management_operations": "id",
     "local_management_statuses": "id",
     "local_management_status_pages": "id",
+    "wifi_reject_reasons": "id",
     "local_management_probe_phases": "id",
     "local_management_probe_outcomes": "id",
     "local_management_bond_states": "id",
@@ -436,6 +437,7 @@ def generate_rust(registry: Registry) -> str:
         ("local_management_operation", "local_management_operations", "u8", 8),
         ("local_management_status", "local_management_statuses", "u8", 8),
         ("local_management_status_page", "local_management_status_pages", "u8", 8),
+        ("wifi_reject_reason", "wifi_reject_reasons", "u8", 8),
         ("local_management_probe_phase", "local_management_probe_phases", "u8", 8),
         ("local_management_probe_outcome", "local_management_probe_outcomes", "u8", 8),
         ("local_management_bond_state", "local_management_bond_states", "u8", 8),
@@ -628,6 +630,11 @@ def generate_rust(registry: Registry) -> str:
             lines.append(
                 f"    pub const {entry.name}: {rust_type} = {rust_number(entry.value, bits)};"
             )
+        if module == "wifi_reject_reason":
+            lines.extend(["", "    #[must_use]", "    pub const fn name(value: u8) -> Option<&'static str> {", "        match value {"])
+            for entry in registry.sections[section]:
+                lines.append(f'            {entry.name} => Some("{entry.name.lower()}"),')
+            lines.extend(["            _ => None,", "        }", "    }"])
         lines.extend(["}", ""])
     return "\n".join(lines)
 
@@ -822,6 +829,7 @@ def generate_cpp(registry: Registry) -> str:
         ("LocalManagementOperation", "local_management_operations", "std::uint8_t", 2),
         ("LocalManagementStatus", "local_management_statuses", "std::uint8_t", 2),
         ("LocalManagementStatusPage", "local_management_status_pages", "std::uint8_t", 2),
+        ("WifiRejectReason", "wifi_reject_reasons", "std::uint8_t", 2),
         ("LocalManagementProbePhase", "local_management_probe_phases", "std::uint8_t", 2),
         ("LocalManagementProbeOutcome", "local_management_probe_outcomes", "std::uint8_t", 2),
         ("LocalManagementBondState", "local_management_bond_states", "std::uint8_t", 2),

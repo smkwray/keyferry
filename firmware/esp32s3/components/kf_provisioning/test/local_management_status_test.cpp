@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 
 namespace {
 
@@ -170,9 +171,42 @@ void TestProbePagesAreUnavailableAndExact() {
   for (const auto byte : payload) assert(byte == 0);
 }
 
+void TestWifiDiagnosticVectorAndBounds(const char* vector_path) {
+  local::StatusSnapshot snapshot{};
+  snapshot.wifi_diagnostic = {protocol::WifiRejectReason::kWifiPreferenceExpired,
+                              true, true, true, 0x01020304, 5000, 15000};
+  local::ResponsePayload payload{};
+  assert(local::EncodeStatusPage(protocol::LocalManagementStatusPage::kWifiDiagnostic,
+                                 snapshot, &payload));
+  std::ifstream vector(vector_path);
+  unsigned expected = 0;
+  for (const auto byte : payload) {
+    assert(vector >> std::hex >> expected);
+    assert(byte == expected);
+  }
+  assert(!(vector >> expected));
+  for (unsigned reason = 0; reason <= 255; ++reason) {
+    snapshot.wifi_diagnostic.last_wifi_reject_reason =
+        static_cast<protocol::WifiRejectReason>(reason);
+    const bool encoded = local::EncodeStatusPage(
+        protocol::LocalManagementStatusPage::kWifiDiagnostic, snapshot, &payload);
+    assert(encoded == (reason <= static_cast<unsigned>(protocol::WifiRejectReason::kOther)));
+    if (!encoded) for (const auto byte : payload) assert(byte == 0);
+  }
+  snapshot.wifi_diagnostic.last_wifi_reject_reason = protocol::WifiRejectReason::kNone;
+  snapshot.wifi_diagnostic.identity_checked = false;
+  assert(!local::EncodeStatusPage(protocol::LocalManagementStatusPage::kWifiDiagnostic,
+                                  snapshot, &payload));
+  snapshot.wifi_diagnostic = {};
+  assert(local::EncodeStatusPage(protocol::LocalManagementStatusPage::kWifiDiagnostic,
+                                 snapshot, &payload));
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  assert(argc == 2);
+  TestWifiDiagnosticVectorAndBounds(argv[1]);
   TestEveryPageHasOneExactBoundedEncoding();
   TestInvalidSnapshotsClearOutputAndFailClosed();
   TestProbePagesAreUnavailableAndExact();

@@ -147,6 +147,27 @@ bool EncodeStatusPage(const protocol::LocalManagementStatusPage page,
             static_cast<std::uint32_t>(snapshot.network.nvs_error));
       return true;
     }
+    case protocol::LocalManagementStatusPage::kWifiDiagnostic: {
+      const auto& wifi = snapshot.wifi_diagnostic;
+      if (wifi.last_wifi_reject_reason > protocol::WifiRejectReason::kOther ||
+          (wifi.beacon_tls_identity_equal && !wifi.identity_checked) ||
+          (wifi.identity_checked && !wifi.tls_verified) ||
+          (!wifi.tls_verified && wifi.elapsed_to_tls_ms != 0) ||
+          wifi.elapsed_to_tls_ms > wifi.elapsed_to_close_ms ||
+          (wifi.attempt_count == 0 &&
+           (wifi.last_wifi_reject_reason != protocol::WifiRejectReason::kNone ||
+            wifi.tls_verified || wifi.elapsed_to_close_ms != 0))) {
+        output->fill(0);
+        return false;
+      }
+      (*output)[1] = static_cast<std::uint8_t>(wifi.last_wifi_reject_reason);
+      (*output)[2] = (wifi.beacon_tls_identity_equal ? 1 : 0) |
+                     (wifi.identity_checked ? 2 : 0) | (wifi.tls_verified ? 4 : 0);
+      Put32(output->data() + 4, wifi.attempt_count);
+      Put32(output->data() + 8, wifi.elapsed_to_tls_ms);
+      Put32(output->data() + 12, wifi.elapsed_to_close_ms);
+      return true;
+    }
     case protocol::LocalManagementStatusPage::kBleHid:
       if (snapshot.ble_hid.bond_state >
               protocol::LocalManagementBondState::kStoreError ||

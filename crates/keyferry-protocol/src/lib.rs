@@ -26,7 +26,7 @@ pub use registry::{
     local_management_probe_phase, local_management_receipt_state, local_management_status,
     local_management_status_page, message, operational_mode, output_mode, provisioning,
     provisioning_operation, provisioning_policy_state, provisioning_status, result_code, roaming,
-    screen_power,
+    screen_power, wifi_reject_reason,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

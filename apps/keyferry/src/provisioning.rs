@@ -44,6 +44,8 @@ struct LocalStatusDocument {
     device: LocalDeviceStatus,
     safety: LocalSafetyStatus,
     network: LocalNetworkStatus,
+    #[serde(default)]
+    wifi_diagnostic: Option<LocalWifiDiagnostic>,
     ble_hid: LocalBleStatus,
     policy: LocalPolicyStatus,
     last_receipt: Option<LocalReceiptStatus>,
@@ -71,6 +73,18 @@ struct LocalSafetyStatus {
     restart_pending: bool,
     receipt_storage_healthy: bool,
     usb_attachment_generation: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalWifiDiagnostic {
+    last_wifi_reject_reason: String,
+    beacon_tls_identity_equal: bool,
+    identity_checked: bool,
+    tls_verified: bool,
+    attempt_count: u32,
+    elapsed_to_tls_ms: u32,
+    elapsed_to_close_ms: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,8 +287,23 @@ fn format_local_status(status: LocalStatusDocument) -> Result<String, String> {
             )
         })
         .unwrap_or_else(|| "none".to_owned());
+    let wifi_diagnostic = match &status.wifi_diagnostic {
+        Some(wifi) => {
+            if !(0..=keyferry_protocol::wifi_reject_reason::OTHER).any(|value| {
+                keyferry_protocol::wifi_reject_reason::name(value)
+                    == Some(wifi.last_wifi_reject_reason.as_str())
+            }) {
+                return Err("The local Wi-Fi diagnostic response was invalid.".to_owned());
+            }
+            format!("\nWi-Fi last close: {} · attempt {} · TLS {} ({} ms) · identity checked {} / equal {} · close {} ms.",
+                wifi.last_wifi_reject_reason, wifi.attempt_count, yes_no(wifi.tls_verified),
+                wifi.elapsed_to_tls_ms, yes_no(wifi.identity_checked),
+                yes_no(wifi.beacon_tls_identity_equal), wifi.elapsed_to_close_ms)
+        }
+        None => "\nWi-Fi reject diagnostics: unsupported by this firmware.".to_owned(),
+    };
     Ok(format!(
-        "Connected directly to {}. Firmware {} · board {} · output {} (stored {}).\nSafety: maintenance {} · command {} · armed {} · USB {} · keyboard {} · mouse {} · restart {} · receipts {} · attachment {}.\nNetwork: runtime {} · Wi-Fi {} · control BLE {} · endpoint auth {} · config {} · profiles {} · hosts {} · stage {} · path {} · policy state {} · Wi-Fi error {} · NVS error {}.\nBluetooth keyboard: bond {} · ready {} · connected {} · authenticated {} · subscribed {} · advertising {} · enrollment {} ({} ms) · stage {} · error {} · generation {}.\nPolicy: state {} · sequence {} · last receipt {} · capabilities 0x{:08x}.",
+        "Connected directly to {}. Firmware {} · board {} · output {} (stored {}).\nSafety: maintenance {} · command {} · armed {} · USB {} · keyboard {} · mouse {} · restart {} · receipts {} · attachment {}.\nNetwork: runtime {} · Wi-Fi {} · control BLE {} · endpoint auth {} · config {} · profiles {} · hosts {} · stage {} · path {} · policy state {} · Wi-Fi error {} · NVS error {}.\nBluetooth keyboard: bond {} · ready {} · connected {} · authenticated {} · subscribed {} · advertising {} · enrollment {} ({} ms) · stage {} · error {} · generation {}.\nPolicy: state {} · sequence {} · last receipt {} · capabilities 0x{:08x}.{}",
         status.device_id,
         status.device.release,
         status.device.board_compatibility_id,
@@ -316,6 +345,7 @@ fn format_local_status(status: LocalStatusDocument) -> Result<String, String> {
         status.policy.sequence,
         receipt,
         status.device.capabilities,
+        wifi_diagnostic,
     ))
 }
 

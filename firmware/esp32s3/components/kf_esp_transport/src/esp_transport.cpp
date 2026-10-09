@@ -24,6 +24,8 @@
 namespace keyferry::transport {
 namespace {
 
+using WifiReject = protocol::WifiRejectReason;
+
 constexpr char kTag[] = "kf_transport";
 constexpr EventBits_t kStationGotIp = BIT0;
 constexpr EventBits_t kStationDisconnected = BIT1;
@@ -184,12 +186,15 @@ void EspTransport::Run() {
 }
 
 TransportDiagnostics EspTransport::diagnostics() const {
+  portENTER_CRITICAL(&wifi_diagnostic_mux_);
+  const auto wifi_attempt = wifi_attempt_.completed();
+  portEXIT_CRITICAL(&wifi_diagnostic_mux_);
   return {running_.load(std::memory_order_acquire),
           wifi_available_.load(std::memory_order_acquire),
           ble_available_.load(std::memory_order_acquire),
           wifi_stage_.load(std::memory_order_acquire),
           wifi_error_.load(std::memory_order_acquire), nvs_result_,
-          ble_peripheral_.status()};
+          ble_peripheral_.status(), wifi_attempt};
 }
 
 void EspTransport::FailClosed(std::uint64_t epoch) { delegate_.FailClosed(epoch); }
@@ -615,6 +620,7 @@ bool EspTransport::StartWifiCandidate() {
   candidate_path_ = Path::kWifi;
   candidate_started_ms_ = NowMs();
   selection_started_ms_ = candidate_started_ms_;
+  wifi_attempt_.Start(candidate_started_ms_);
   endpoint_tls_started_ = false;
   endpoint_authenticated_ = false;
   if (StationReadyForTls()) {
@@ -627,6 +633,8 @@ bool EspTransport::StartWifiCandidate() {
   const esp_err_t result = esp_wifi_connect();
   if (result != ESP_OK) {
     RecordWifi(WifiStage::kConnecting, result);
+    RejectWifi(WifiReject::kTransportFailed);
+    CloseWifiAttempt();
     candidate_path_ = Path::kNone;
     return false;
   }
@@ -654,11 +662,13 @@ bool EspTransport::PollWifiCandidate(std::uint64_t now_ms) {
   if ((result & kStationDisconnected) != 0) {
     xEventGroupClearBits(events, kStationDisconnected);
     wifi_connecting_ = false;
+    RejectWifi(WifiReject::kStationDisconnected);
     return false;
   }
   if ((result & kStationGotIp) == 0) {
     if (now_ms >= candidate_started_ms_ &&
         now_ms - candidate_started_ms_ >= config_.wifi_connect_timeout_ms) {
+      RejectWifi(WifiReject::kStationTimeout);
       wifi_connecting_ = false;
       return false;
     }
@@ -670,13 +680,17 @@ bool EspTransport::PollWifiCandidate(std::uint64_t now_ms) {
   if (esp_wifi_sta_get_ap_info(&access_point) != ESP_OK ||
       (access_point.authmode != WIFI_AUTH_WPA2_PSK &&
        access_point.authmode != WIFI_AUTH_WPA2_WPA3_PSK)) {
+    RejectWifi(WifiReject::kEndpointPolicyRejected);
     return false;
   }
 
   auto remaining_ms = WifiPreferenceRemainingMs(now_ms);
-  if (remaining_ms == 0 ||
-      !ResolveHostAddress(
-          std::min(config_.discovery_timeout_ms, remaining_ms))) {
+  if (remaining_ms == 0) {
+    RejectWifi(WifiReject::kWifiPreferenceExpired);
+    return false;
+  }
+  if (!ResolveHostAddress(std::min(config_.discovery_timeout_ms, remaining_ms))) {
+    RejectWifi(WifiReject::kDiscoveryTimeout);
     return false;
   }
   now_ms = NowMs();
@@ -684,13 +698,17 @@ bool EspTransport::PollWifiCandidate(std::uint64_t now_ms) {
   endpoint::TlsObservation observation{};
   config::RoamingPeerAuthorization authorization{};
   RecordWifi(WifiStage::kTls);
-  if (remaining_ms == 0 ||
-      !ConnectAndVerifyWifiTls(
-          std::min(config_.tls_connect_timeout_ms, remaining_ms),
-          &observation, &authorization) ||
-      !BeginEndpointTls(observation, authorization)) {
+  if (remaining_ms == 0) {
+    RejectWifi(WifiReject::kWifiPreferenceExpired);
     return false;
   }
+  if (!ConnectAndVerifyWifiTls(
+          std::min(config_.tls_connect_timeout_ms, remaining_ms),
+          &observation, &authorization)) {
+    RejectWifi(WifiReject::kTlsFailed);
+    return false;
+  }
+  if (!BeginEndpointTls(observation, authorization)) return false;
   endpoint_tls_started_ = true;
   candidate_started_ms_ = now_ms;
   return true;
@@ -786,6 +804,7 @@ bool EspTransport::StartGatewayHandoffCandidate(const std::uint64_t now_ms) {
   }
 
   candidate_path_ = path;
+  if (path == Path::kWifi) wifi_attempt_.Start(now_ms);
   advertised_installation_id_ = *expected_installation;
   handoff_candidate_installation_id_ = *expected_installation;
   candidate_started_ms_ = now_ms;
@@ -801,6 +820,7 @@ bool EspTransport::StartGatewayHandoffCandidate(const std::uint64_t now_ms) {
     xEventGroupClearBits(events, kStationGotIp | kStationDisconnected);
     RecordWifi(WifiStage::kConnecting);
     if (esp_wifi_connect() != ESP_OK) {
+      RejectWifi(WifiReject::kTransportFailed);
       return false;
     }
     wifi_connecting_ = true;
@@ -811,11 +831,15 @@ bool EspTransport::StartGatewayHandoffCandidate(const std::uint64_t now_ms) {
   RecordWifi(WifiStage::kTls);
   const auto timeout_ms =
       std::min(kGatewayHandoffAttemptTimeoutMs, remaining_ms);
-  if (!ConnectAndVerifyWifiTls(timeout_ms, &observation, &authorization) ||
-      authorization.installation_id != *expected_installation ||
-      !BeginEndpointTls(observation, authorization)) {
+  if (!ConnectAndVerifyWifiTls(timeout_ms, &observation, &authorization)) {
+    RejectWifi(WifiReject::kTlsFailed);
     return false;
   }
+  if (authorization.installation_id != *expected_installation) {
+    RejectWifi(WifiReject::kHandoffIdentityMismatch);
+    return false;
+  }
+  if (!BeginEndpointTls(observation, authorization)) return false;
   endpoint_tls_started_ = true;
   candidate_started_ms_ = NowMs();
   return true;
@@ -840,6 +864,7 @@ void EspTransport::ServiceGatewayHandoffTransport(
                                           : handoff_status.previous_installation_id;
   if (candidate_path_ != Path::kNone &&
       handoff_candidate_installation_id_ != expected_installation) {
+    RejectWifi(WifiReject::kHandoffTransition);
     session_.TransportFault();
     CloseCurrentTls();
     if (candidate_path_ == Path::kBluetooth) {
@@ -880,6 +905,7 @@ void EspTransport::ServiceGatewayHandoffTransport(
     if ((result & kStationDisconnected) != 0) {
       xEventGroupClearBits(events, kStationDisconnected);
       wifi_connecting_ = false;
+      RejectWifi(WifiReject::kStationDisconnected);
       GatewayHandoffCandidateFailed(
           now_ms, protocol::GatewayHandoffReason::kTransportFailed);
       return;
@@ -887,6 +913,7 @@ void EspTransport::ServiceGatewayHandoffTransport(
     if ((result & kStationGotIp) == 0 && !StationReadyForTls()) {
       if (now_ms >= candidate_started_ms_ &&
           now_ms - candidate_started_ms_ >= kGatewayHandoffAttemptTimeoutMs) {
+        RejectWifi(WifiReject::kStationTimeout);
         wifi_connecting_ = false;
         GatewayHandoffCandidateFailed(
             now_ms, protocol::GatewayHandoffReason::kTransportFailed);
@@ -901,12 +928,20 @@ void EspTransport::ServiceGatewayHandoffTransport(
     const auto remaining_ms = gateway_handoff_.targeting()
                                   ? handoff_status.remaining_phase_ms
                                   : handoff_status.remaining_recovery_ms;
-    if (remaining_ms == 0 ||
-        !ConnectAndVerifyWifiTls(
+    bool admitted = remaining_ms != 0;
+    if (!admitted) RejectWifi(WifiReject::kWifiPreferenceExpired);
+    if (admitted && !ConnectAndVerifyWifiTls(
             std::min(kGatewayHandoffAttemptTimeoutMs, remaining_ms),
-            &observation, &authorization) ||
-        authorization.installation_id != expected_installation ||
-        !BeginEndpointTls(observation, authorization)) {
+            &observation, &authorization)) {
+      RejectWifi(WifiReject::kTlsFailed);
+      admitted = false;
+    }
+    if (admitted && authorization.installation_id != expected_installation) {
+      RejectWifi(WifiReject::kHandoffIdentityMismatch);
+      admitted = false;
+    }
+    if (admitted) admitted = BeginEndpointTls(observation, authorization);
+    if (!admitted) {
       GatewayHandoffCandidateFailed(
           NowMs(), protocol::GatewayHandoffReason::kTransportFailed);
       return;
@@ -943,6 +978,8 @@ void EspTransport::GatewayHandoffCandidateFailed(
     const std::uint64_t now_ms,
     const protocol::GatewayHandoffReason reason) {
   const Path failed_path = candidate_path_;
+  RejectWifi(reason == protocol::GatewayHandoffReason::kIdentityFailed
+                 ? WifiReject::kHandoffIdentityMismatch : WifiReject::kTransportFailed);
   session_.TransportFault();
   CloseCurrentTls();
   if (failed_path == Path::kBluetooth) {
@@ -966,6 +1003,7 @@ void EspTransport::GatewayHandoffCandidateFailed(
 }
 
 void EspTransport::FailClosedGatewayHandoff() {
+  RejectWifi(WifiReject::kHandoffTransition);
   session_.TransportFault();
   delegate_.FailClosed(session_.epoch());
   CloseCurrentTls();
@@ -988,6 +1026,7 @@ void EspTransport::BeginCommittedGatewayHandoff(
     const std::uint64_t now_ms) {
   handoff_start_committed_ = false;
   const Path previous_path = candidate_path_;
+  RejectWifi(WifiReject::kHandoffTransition);
   session_.TransportFault();
   CloseCurrentTls();
   if (previous_path == Path::kBluetooth) {
@@ -1011,7 +1050,7 @@ bool EspTransport::ConnectAndVerifyWifiTls(
     return false;
   }
   *authorization = {};
-  CloseCurrentTls();
+  CloseCurrentTls(false);
   auto* tls = esp_tls_init();
   if (tls == nullptr) {
     return false;
@@ -1042,9 +1081,11 @@ bool EspTransport::ConnectAndVerifyWifiTls(
   auto* ssl =
       static_cast<mbedtls_ssl_context*>(esp_tls_get_ssl_context(tls));
   if (config_.authority_mode == AuthorityMode::kPinnedPeer) {
-    return VerifyMbedTlsPeer(ssl, config_.tls, observation);
+    const bool verified = VerifyMbedTlsPeer(ssl, config_.tls, observation);
+    if (verified) wifi_attempt_.TlsVerified(NowMs());
+    return verified;
   }
-  return config_.roaming_policy != nullptr &&
+  const bool verified = config_.roaming_policy != nullptr &&
          config_.roaming_recovery_secret != nullptr &&
          config_.roaming_crypto != nullptr &&
          config_.roaming_verification_workspace != nullptr &&
@@ -1052,6 +1093,8 @@ bool EspTransport::ConnectAndVerifyWifiTls(
              ssl, *config_.roaming_policy, *config_.roaming_recovery_secret,
              *config_.roaming_crypto, observation, authorization,
              config_.roaming_verification_workspace);
+  if (verified) wifi_attempt_.TlsVerified(NowMs());
+  return verified;
 }
 
 bool EspTransport::BeginEndpointTls(
@@ -1065,14 +1108,20 @@ bool EspTransport::BeginEndpointTls(
   } else {
     const bool handoff_candidate = gateway_handoff_.targeting() ||
                                    gateway_handoff_.restoring();
-    if (authorization.installation_id ==
-            std::array<std::uint8_t, 16>{} ||
-        authorization.link_secret == std::array<std::uint8_t, 32>{} ||
-        (handoff_candidate &&
-         authorization.installation_id !=
-             handoff_candidate_installation_id_) ||
-        (candidate_path_ == Path::kWifi &&
-         authorization.installation_id != advertised_installation_id_)) {
+    WifiReject reject = WifiReject::kNone;
+    if (authorization.installation_id == std::array<std::uint8_t, 16>{} ||
+        authorization.link_secret == std::array<std::uint8_t, 32>{}) {
+      reject = WifiReject::kRoamingAuthorizationEmpty;
+    } else if (handoff_candidate && authorization.installation_id !=
+                                      handoff_candidate_installation_id_) {
+      reject = WifiReject::kHandoffIdentityMismatch;
+    } else if (candidate_path_ == Path::kWifi) {
+      const bool equal = authorization.installation_id == advertised_installation_id_;
+      wifi_attempt_.IdentityCompared(equal);
+      if (!equal) reject = WifiReject::kBeaconTlsIdentityMismatch;
+    }
+    if (reject != WifiReject::kNone) {
+      RejectWifi(reject);
       ClearPeerAuthorization();
       advertised_installation_id_.fill(0);
       return false;
@@ -1082,6 +1131,7 @@ bool EspTransport::BeginEndpointTls(
     accepted_tls_policy_.peer_spki_sha256 = observation.peer_spki_sha256;
   }
   if (!session_.BeginTls(accepted_tls_policy_, observation)) {
+    RejectWifi(WifiReject::kEndpointPolicyRejected);
     ClearPeerAuthorization();
     advertised_installation_id_.fill(0);
     return false;
@@ -1144,6 +1194,7 @@ bool EspTransport::ServiceEndpointRead(std::uint64_t now_ms) {
     auto events = static_cast<EventGroupHandle_t>(wifi_events_);
     const EventBits_t wifi_state = xEventGroupGetBits(events);
     if ((wifi_state & kStationDisconnected) != 0) {
+      RejectWifi(WifiReject::kStationDisconnected);
       xEventGroupClearBits(events, kStationDisconnected);
       return false;
     }
@@ -1163,6 +1214,7 @@ bool EspTransport::ServiceEndpointRead(std::uint64_t now_ms) {
         session_.ConsumeTls(input.data(), static_cast<std::size_t>(result));
     SecureClear(input.data(), input.size());
     if (!consumed) {
+      RejectWifi(WifiReject::kEndpointRejected);
       return false;
     }
     if (endpoint_authenticated_) {
@@ -1178,10 +1230,12 @@ bool EspTransport::ServiceEndpointRead(std::uint64_t now_ms) {
     if (!session_.authenticated() && now_ms >= candidate_started_ms_ &&
         now_ms - candidate_started_ms_ >=
             protocol::kBleAuthenticationTimeoutMs) {
+      RejectWifi(WifiReject::kEndpointAuthenticationTimeout);
       return false;
     }
     return true;
   }
+  RejectWifi(WifiReject::kTransportFailed);
   return false;
 }
 
@@ -1237,6 +1291,8 @@ void EspTransport::ApplyActions(const ArbitrationActions& actions,
     (void)esp_wifi_disconnect();
     if (candidate_path_ == Path::kWifi &&
         arbiter_.active_path() != Path::kWifi) {
+      RejectWifi(WifiPreferenceRemainingMs(NowMs()) == 0
+                     ? WifiReject::kWifiPreferenceExpired : WifiReject::kOther);
       session_.TransportFault();
       CloseCurrentTls();
       candidate_path_ = Path::kNone;
@@ -1324,6 +1380,7 @@ void EspTransport::PromoteAuthenticatedCandidate(std::uint64_t now_ms) {
 
 void EspTransport::CandidateFailed(std::uint64_t now_ms) {
   const Path failed_path = candidate_path_;
+  RejectWifi(WifiReject::kOther);
   if (failed_path == Path::kBluetooth) {
     // BleTlsLink::Start can fail before it owns initialized TLS contexts. The
     // physical GATT candidate still must be evicted before advertising again.
@@ -1349,6 +1406,7 @@ void EspTransport::CandidateFailed(std::uint64_t now_ms) {
 }
 
 void EspTransport::ActiveTransportLost(std::uint64_t now_ms) {
+  RejectWifi(WifiReject::kTransportFailed);
   session_.TransportFault();
   CloseCurrentTls();
   candidate_path_ = Path::kNone;
@@ -1362,6 +1420,7 @@ void EspTransport::ActiveTransportLost(std::uint64_t now_ms) {
 }
 
 void EspTransport::RestartRuntime(const std::uint64_t now_ms) {
+  RejectWifi(WifiReject::kRuntimeRestart);
   session_.TransportFault();
   CloseCurrentTls();
   wifi_connecting_ = false;
@@ -1397,7 +1456,21 @@ void EspTransport::RestartRuntime(const std::uint64_t now_ms) {
       now_ms);
 }
 
-void EspTransport::CloseCurrentTls() {
+void EspTransport::RejectWifi(const WifiReject reason) {
+  if (candidate_path_ == Path::kWifi) wifi_attempt_.Reject(reason);
+}
+
+void EspTransport::CloseWifiAttempt() {
+  // Only the completed metadata copy is shared with the USB task. Never hold
+  // this critical section across TLS destruction, Wi-Fi calls, or crypto.
+  wifi_attempt_.Reject(WifiReject::kOther);
+  portENTER_CRITICAL(&wifi_diagnostic_mux_);
+  wifi_attempt_.Close(NowMs());
+  portEXIT_CRITICAL(&wifi_diagnostic_mux_);
+}
+
+void EspTransport::CloseCurrentTls(const bool finish_wifi_attempt) {
+  if (finish_wifi_attempt && candidate_path_ == Path::kWifi) CloseWifiAttempt();
   if (tls_ != nullptr) {
     esp_tls_conn_destroy(static_cast<esp_tls_t*>(tls_));
     tls_ = nullptr;
