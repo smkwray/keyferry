@@ -5,6 +5,7 @@ set(PROJECT_VER "0.1.0")
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../components")
 set(KEYFERRY_BOARD "" CACHE STRING "Compile-time keyferry board profile")
+option(KEYFERRY_RESOURCE_ONLY "Non-installable resource build with zero authority" OFF)
 set(KEYFERRY_PRIVATE_HEADER "" CACHE FILEPATH
     "Optional pre-materialized private device header")
 set(KEYFERRY_BLE_HID_SPIKE "off" CACHE STRING
@@ -45,6 +46,16 @@ set(KEYFERRY_PRIVATE_CONFIG_DIR "${CMAKE_BINARY_DIR}/private-config")
 
 include("${CMAKE_CURRENT_LIST_DIR}/../boards/load_board_profile.cmake")
 
+if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite" AND KEYFERRY_FILE_HANDOFF)
+    message(FATAL_ERROR "AtomS3 Lite file capacity is unmeasured; qualification required")
+endif()
+if(KEYFERRY_RESOURCE_ONLY)
+    if(KEYFERRY_PRIVATE_HEADER)
+        message(FATAL_ERROR "Resource-only builds cannot use private credentials")
+    endif()
+    set(PROJECT_VER "0.0.0-probe.resources")
+    set(KEYFERRY_PRIVATE_HEADER "${CMAKE_CURRENT_LIST_DIR}/spikes/resource_only.h")
+endif()
 find_program(KEYFERRY_CARGO_EXECUTABLE cargo REQUIRED)
 if(KEYFERRY_PRIVATE_HEADER)
     get_filename_component(KEYFERRY_PRIVATE_HEADER
@@ -103,6 +114,10 @@ if(KEYFERRY_FILE_HANDOFF)
         list(APPEND SDKCONFIG_DEFAULTS
             "${CMAKE_CURRENT_LIST_DIR}/spikes/sdkconfig.file-waveshare.defaults")
     endif()
+endif()
+
+if(EXISTS "${KEYFERRY_BOARD_DIR}/partitions.csv")
+    list(APPEND SDKCONFIG_DEFAULTS "${KEYFERRY_BOARD_DIR}/sdkconfig.partitions.defaults")
 endif()
 
 if(KEYFERRY_BLE_HID_SPIKE STREQUAL "security" OR

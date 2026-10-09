@@ -1,0 +1,6 @@
+# App-only updates preserve bootloader/table, config and NVS. No OTA or payload storage.
+# Name, Type, SubType, Offset, Size, Flags
+factory, app, factory, 0x10000, 3M,
+kf_cfg_a, data, 0x40, 0x310000, 0x4000,
+kf_cfg_b, data, 0x41, 0x314000, 0x4000,
+nvs, data, nvs, 0x318000, 0x3000,

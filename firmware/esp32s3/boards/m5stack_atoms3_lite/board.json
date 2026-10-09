@@ -1,0 +1,33 @@
+{
+  "schema": "keyferry.board-profile.v1",
+  "id": "m5stack_atoms3_lite",
+  "compatibility_id": 3,
+  "qualified": false,
+  "flash": {
+    "size_mb": 8
+  },
+  "display": {
+    "present": false
+  },
+  "capabilities": {
+    "display": false,
+    "touch": false,
+    "button": true,
+    "led": true,
+    "removable_storage": false,
+    "uart0_header": false
+  },
+  "pins": {
+    "usb_dm_gpio": 19,
+    "usb_dp_gpio": 20,
+    "boot_gpio": 0,
+    "uart0_rx_gpio": 44,
+    "uart0_tx_gpio": 43
+  },
+  "indicators": {
+    "rgb_gpio": 35,
+    "button_gpio": 41,
+    "ir_gpio": 4,
+    "max_channel": 8
+  }
+}
