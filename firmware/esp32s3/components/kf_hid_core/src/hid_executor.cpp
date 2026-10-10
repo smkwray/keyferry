@@ -139,10 +139,29 @@ PointerReport ExecutorState::pointer_snapshot(const bool absolute) const noexcep
 }
 
 bool ExecutorState::extended_pointer_enabled() const noexcept { return extended_pointer_; }
+bool ExecutorState::absolute_pointer_only() const noexcept { return absolute_only_; }
+bool ExecutorState::pointer_position_known() const noexcept { return absolute_button_target_; }
 bool ExecutorState::enable_extended_pointer() noexcept {
     if (!enable_mouse_interface()) { return false; }
     extended_pointer_ = true;
     return true;
+}
+bool ExecutorState::enable_absolute_pointer() noexcept {
+    if (!enable_extended_pointer()) { return false; }
+    absolute_only_ = true;
+    return true;
+}
+
+// The mouse release barrier. Absolute-only interfaces declare no report 1, so their zero is
+// report 4 at the retained position; macOS drops a move to an unchanged or (0,0) position.
+PointerReport ExecutorState::mouse_zero() const noexcept {
+    PointerReport r{};
+    if (absolute_only_) {
+        r.absolute = true;
+        r.absolute_x = absolute_x_;
+        r.absolute_y = absolute_y_;
+    }
+    return r;
 }
 
 bool ExecutorState::enable_mouse_interface() noexcept {
@@ -195,7 +214,9 @@ SubmitResult ExecutorState::submit_mouse_movement(const std::uint64_t epoch,
                                                   const PointerReport& report) noexcept {
     if (!mouse_enabled_ || !is_valid(report) ||
         (!extended_pointer_ && (report.buttons != 0 || report.absolute || report.wheel != 0 || report.pan != 0)) ||
-        (report.x == 0 && report.y == 0 && report.wheel == 0 && report.pan == 0 && !report.position_event)) {
+        (report.x == 0 && report.y == 0 && report.wheel == 0 && report.pan == 0 && !report.position_event) ||
+        (absolute_only_ && !report.absolute &&
+         (report.x != 0 || report.y != 0 || !absolute_button_target_))) {
         return SubmitResult::invalid_report;
     }
     if (!armed_) {
@@ -236,7 +257,8 @@ SubmitResult ExecutorState::submit_mouse_buttons(const std::uint64_t epoch,
                                                  const PointerReport& report) noexcept {
     if (!mouse_enabled_ || !is_valid(report) || report.x != 0 || report.y != 0 ||
         report.wheel != 0 || report.pan != 0 || report.position_event ||
-        (!extended_pointer_ && (report.buttons & ~0x03U) != 0)) {
+        (!extended_pointer_ && (report.buttons & ~0x03U) != 0) ||
+        (absolute_only_ && report.buttons != 0 && !absolute_button_target_)) {
         return SubmitResult::invalid_report;
     }
     if (!armed_) {
@@ -260,7 +282,11 @@ SubmitResult ExecutorState::submit_mouse_buttons(const std::uint64_t epoch,
         desired_mouse_.absolute_x = absolute_x_;
         desired_mouse_.absolute_y = absolute_y_;
     }
-    if (extended_pointer_ && report.buttons == 0) { release_absolute_pending_ = true; }
+    if (absolute_only_ && report.buttons == 0) {
+        desired_mouse_ = mouse_zero();
+    } else if (extended_pointer_ && report.buttons == 0) {
+        release_absolute_pending_ = true;
+    }
     absolute_buttons_unreleased_ |= desired_mouse_.absolute && desired_mouse_.buttons != 0;
     desired_interface_ = InputInterface::mouse;
     pending_mouse_movement_ = false;
@@ -283,7 +309,7 @@ void ExecutorState::request_release() noexcept {
     desired_ = BootKeyboardReport{};
     desired_interface_ = InputInterface::keyboard;
     release_mouse_pending_ = mouse_enabled_;
-    release_absolute_pending_ = extended_pointer_;
+    release_absolute_pending_ = extended_pointer_ && !absolute_only_;
     pending_mouse_movement_ = false;
     pending_movement_token_ = 0;
     report_pending_ = true;
@@ -344,7 +370,7 @@ bool ExecutorState::mark_report_accepted(const BootKeyboardReport& report) noexc
             neutral_mask_ |= kKeyboardNeutral;
         }
         if (release_mouse_pending_) {
-            desired_mouse_ = PointerReport{};
+            desired_mouse_ = mouse_zero();
             desired_interface_ = InputInterface::mouse;
             pending_mouse_movement_ = false;
             pending_movement_token_ = 0;

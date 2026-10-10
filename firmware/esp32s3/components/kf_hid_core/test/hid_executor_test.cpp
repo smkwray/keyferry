@@ -383,9 +383,87 @@ void barrier_never_repositions_without_held_absolute_button() {
     assert(drain() == 0);  // report-4 button already released: no further reposition
 }
 
+// macOS DriverKit gives Button elements to the absolute pointer only when IF2 declares no
+// relative X/Y, so the absolute-only personality never emits report 1: presses, held moves,
+// scroll, releases and every barrier ride report 4 at the retained position.
+void absolute_only_routes_every_pointer_report_through_report4() {
+    using keyferry::hid::PointerReport;
+    ExecutorState state;
+    assert(state.enable_absolute_pointer());
+    assert(state.extended_pointer_enabled() && state.absolute_pointer_only());
+    std::array<std::uint8_t, 8> wire{};
+    auto serialized = [&](const PointerReport& report) {
+        assert(keyferry::hid::SerializePointerReport(report, &wire) == 8);
+        return wire;
+    };
+    auto drain = [&]() {
+        int reports = 0;
+        while (state.report_needed()) {
+            if (state.desired_interface() == InputInterface::keyboard) {
+                assert(state.mark_report_accepted({}));
+                continue;
+            }
+            const auto report = state.desired_mouse_report();
+            assert(keyferry::hid::is_zero(report) && report.absolute);
+            ++reports;
+            assert(state.mark_mouse_report_accepted(report, 0));
+        }
+        return reports;
+    };
+    state.on_transport_ready();
+    assert(drain() == 1);
+    assert(state.arm(121));
+    assert(!state.pointer_position_known());
+    // Before a position exists a press, wheel or pan would invent one; relative has no report.
+    PointerReport scroll{};
+    scroll.wheel = 1;
+    assert(state.submit_mouse_buttons(121, BootMouseReport{1, 0, 0}) == SubmitResult::invalid_report);
+    assert(state.submit_mouse_movement(121, 1, scroll) == SubmitResult::invalid_report);
+    assert(state.submit_mouse_movement(121, 1, PointerReport{0, 5, 0}) == SubmitResult::invalid_report);
+    PointerReport position{};
+    position.absolute = true; position.position_event = true;
+    position.absolute_x = 100; position.absolute_y = 200;
+    assert(state.submit_mouse_movement(121, 1, position) == SubmitResult::accepted);
+    assert(state.mark_mouse_report_accepted(position, 1));
+    assert(state.pointer_position_known());
+    assert(state.submit_mouse_movement(121, 2, PointerReport{0, 5, 0}) == SubmitResult::invalid_report);
+
+    // Drag: the press, the held absolute move and the release each carry report 4.
+    assert(state.submit_mouse_buttons(121, BootMouseReport{1, 0, 0}) == SubmitResult::accepted);
+    assert((serialized(state.desired_mouse_report()) == std::array<std::uint8_t, 8>{4,1,100,0,200,0,0,0}));
+    assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 0));
+    auto held = position;
+    held.buttons = 1; held.absolute_x = 300;
+    assert(state.submit_mouse_movement(121, 2, held) == SubmitResult::accepted);
+    assert((serialized(state.desired_mouse_report()) == std::array<std::uint8_t, 8>{4,1,0x2c,1,200,0,0,0}));
+    assert(state.mark_mouse_report_accepted(held, 2));
+    assert(state.submit_mouse_buttons(121, {}) == SubmitResult::accepted);
+    assert((serialized(state.desired_mouse_report()) == std::array<std::uint8_t, 8>{4,0,0x2c,1,200,0,0,0}));
+    assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 0));
+    assert(!state.report_needed());
+    assert((state.neutral_mask() & keyferry::hid::kMouseNeutral) != 0);
+
+    // Scroll rides report 4 at the retained position.
+    assert(state.submit_mouse_movement(121, 3, scroll) == SubmitResult::accepted);
+    assert((serialized(state.desired_mouse_report()) == std::array<std::uint8_t, 8>{4,0,0x2c,1,200,0,1,0}));
+    assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 3));
+
+    // A fault with a press in flight releases on report 4 alone, at the same position.
+    assert(state.submit_mouse_buttons(121, BootMouseReport{2, 0, 0}) == SubmitResult::accepted);
+    state.fault();
+    assert(drain() == 1);
+    assert(state.neutral_mask() ==
+           (keyferry::hid::kKeyboardNeutral | keyferry::hid::kMouseNeutral));
+    assert((serialized(state.pointer_snapshot(true)) == std::array<std::uint8_t, 8>{4,0,0x2c,1,200,0,0,0}));
+    state.watchdog_release();
+    assert(drain() == 1);
+    assert(state.arm(122));
+}
+
 }  // namespace
 
 int main() {
+    absolute_only_routes_every_pointer_report_through_report4();
     scroll_selection_survives_neutral_and_consumes_each_token_once();
     barrier_never_repositions_without_held_absolute_button();
     starts_disarmed_and_requires_release();

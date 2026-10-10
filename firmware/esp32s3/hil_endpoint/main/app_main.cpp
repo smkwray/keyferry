@@ -212,11 +212,11 @@ static constexpr std::uint8_t kMouseReportDescriptor[] = {
 static_assert(sizeof(kMouseReportDescriptor) == 50);
 
 #if defined(KEYFERRY_POINTER_EXTENDED)
-// Report 4's buttons and absolute X/Y share a Digitizer Stylus logical collection. macOS
-// (IOHIDEventDriver::parseElements) otherwise gives every Button element to the relative
-// pointer once report 1 declares relative X/Y, and dispatches each absolute move from a
-// button-less transducer: a held button released on the first move, so drags never formed.
-// Windows and Linux read the Mouse application collection; report bytes are unchanged.
+// Relative report 1 plus absolute report 4 (pointer.9 bytes, proven on Windows). Report 4's
+// buttons and X/Y sit in a Digitizer Stylus collection, which macOS dispatches as digitizer
+// events only: the cursor never moves. Without that collection macOS gives report 4's buttons
+// to the relative pointer and every absolute move releases a drag. Use the absolute-only
+// personality below for macOS targets.
 static constexpr std::uint8_t kPointerReportDescriptor[] = {
     0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xA1, 0x00,
     0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
@@ -232,10 +232,30 @@ static constexpr std::uint8_t kPointerReportDescriptor[] = {
     0x06, 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x81, 0x06, 0xC0, 0xC0,
 };
 static_assert(sizeof(kPointerReportDescriptor) == 142);
+#if defined(KEYFERRY_POINTER_ABSOLUTE_ONLY)
+// Report 4 alone: buttons, absolute X/Y, wheel and AC Pan in one Mouse/Pointer collection, same
+// bytes as above. macOS's DriverKit IOUserHIDEventDriver gives Button elements to the absolute
+// pointer only when the interface declares no relative X/Y, and dispatches a Digitizer
+// collection as digitizer events that never move the cursor (pointer.9). With no report 1,
+// every absolute event carries the held buttons, so a drag survives absolute motion.
+static constexpr std::uint8_t kAbsolutePointerReportDescriptor[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x04, 0x09, 0x01, 0xA1, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+    0x95, 0x05, 0x81, 0x02, 0x75, 0x03, 0x95, 0x01, 0x81, 0x03, 0x05, 0x01,
+    0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95,
+    0x02, 0x81, 0x02, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95,
+    0x01, 0x81, 0x06, 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x81, 0x06, 0xC0, 0xC0,
+};
+static_assert(sizeof(kAbsolutePointerReportDescriptor) == 72);
+constexpr auto kSelectedMouseReportDescriptor = kAbsolutePointerReportDescriptor;
+constexpr auto kSelectedMouseReportDescriptorSize = sizeof(kAbsolutePointerReportDescriptor);
+constexpr std::uint16_t kInputDeviceRevision = 0x0105;
+#else
 constexpr auto kSelectedMouseReportDescriptor = kPointerReportDescriptor;
 constexpr auto kSelectedMouseReportDescriptorSize = sizeof(kPointerReportDescriptor);
-constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_NONE;
 constexpr std::uint16_t kInputDeviceRevision = 0x0104;
+#endif
+constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_NONE;
 #else
 constexpr auto kSelectedMouseReportDescriptor = kMouseReportDescriptor;
 constexpr auto kSelectedMouseReportDescriptorSize = sizeof(kMouseReportDescriptor);
@@ -503,7 +523,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
     }
     return output_mode_ == keyferry::protocol::OutputMode::kUsbHid
                ?
-#if defined(KEYFERRY_POINTER_EXTENDED)
+#if defined(KEYFERRY_POINTER_ABSOLUTE_ONLY)
+                 hid_.enable_absolute_pointer()
+#elif defined(KEYFERRY_POINTER_EXTENDED)
                  hid_.enable_extended_pointer()
 #else
                  hid_.enable_mouse_interface()
@@ -2953,7 +2975,11 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
   }
   if (instance == keyferry::hil::kMouseHidInstance) {
 #if defined(KEYFERRY_POINTER_EXTENDED)
+#if defined(KEYFERRY_POINTER_ABSOLUTE_ONLY)
+    if (report_id != 4) { return 0; }
+#else
     if (report_id != 1 && report_id != 4) { return 0; }
+#endif
     const auto report = g_runtime->CurrentMouseReport(report_id == 4);
     std::array<std::uint8_t, 8> wire{};
     const auto wire_length = keyferry::hid::SerializePointerReport(report, &wire);

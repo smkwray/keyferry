@@ -124,6 +124,72 @@ class AtomPointerDescriptorTests(unittest.TestCase):
                 pointer.descriptor(bytes(bad))
 
 
+POINTER6 = bytes.fromhex(
+    "05010902a10185010901a1000509190129051500250175019505810275039501810305010930"
+    "093109381581257f750895038106050c0a380295018106c0c005010902a10185040901a10005"
+    "091901290515002501750195058102750395018103050109300931150026ff7f751095028102"
+    "09381581257f750895018106050c0a38028106c0c0")
+
+
+class AbsoluteOnlyPointerDescriptorTests(unittest.TestCase):
+    def setUp(self):
+        self.report = pointer.descriptor(absolute_only=True)
+        self.config = bytes.fromhex(
+            "09025b000301008032"
+            "0904000001030101040921110100012241000705810308000a"
+            "0904010002030000050921110100012222000705020340000a0705820340000a"
+            "0904020001030000060921110100012248000705830308000a")
+        self.device = bytes.fromhex("12010002000000403a300440050101020301")
+
+    def test_exact_report4_only_layout(self):
+        self.assertEqual(self.report, bytes.fromhex(
+            "05010902a10185040901a100"
+            "05091901290515002501750195058102750395018103"
+            "050109300931150026ff7f75109502" "8102"
+            "09381581257f750895018106"
+            "050c0a38028106c0c0"))
+        pointer.no_msc_usb_descriptors(self.config + self.device, self.report, absolute_only=True)
+
+    def test_pointer6_and_pointer9_layouts_are_rejected(self):
+        # pointer.6: report 1's relative X/Y took every button, so absolute moves released drags.
+        # pointer.9: the Stylus collection made report 4 a digitizer; the cursor never moved.
+        pointer9 = pointer.descriptor()
+        for live in (POINTER6, pointer9):
+            with self.subTest(size=len(live)), self.assertRaises(SystemExit):
+                pointer.descriptor(live, absolute_only=True)
+
+    def test_stylus_collection_around_report4_is_rejected(self):
+        start = self.report.index(bytes.fromhex("0509"))
+        end = self.report.index(bytes.fromhex("0938"))
+        wrapped = (self.report[:start] + bytes.fromhex("050d0920a102") + self.report[start:end] +
+                   bytes.fromhex("c0") + self.report[end:])
+        with self.assertRaises(SystemExit):
+            pointer.descriptor(wrapped, absolute_only=True)
+
+    def test_any_item_value_change_is_rejected(self):
+        values, offset = [], 0
+        while offset < len(self.report):
+            size = (0, 1, 2, 4)[self.report[offset] & 3]
+            values += range(offset + 1, offset + 1 + size)
+            offset += 1 + size
+        for offset in values:
+            bad = bytearray(self.report)
+            bad[offset] ^= 1
+            try:
+                pointer.descriptor(bytes(bad), absolute_only=True)
+            except SystemExit:
+                continue
+            self.fail(f"byte {offset} change accepted")
+
+    def test_relative_revision_or_report_length_is_rejected(self):
+        old = self.device.replace(bytes.fromhex("0501"), bytes.fromhex("0401"))
+        with self.assertRaises(SystemExit):
+            pointer.no_msc_usb_descriptors(self.config + old, self.report, absolute_only=True)
+        with self.assertRaises(SystemExit):
+            pointer.no_msc_usb_descriptors(self.config.replace(bytes.fromhex("2248"), bytes.fromhex("228e")) +
+                                           self.device, self.report, absolute_only=True)
+
+
 class UsbIdentityTests(unittest.TestCase):
     def setUp(self):
         self.source = (ROOT / "firmware/esp32s3/hil_endpoint/main/app_main.cpp").read_text()
