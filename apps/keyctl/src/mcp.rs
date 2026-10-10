@@ -752,7 +752,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             }
             self.screenshot_geometry =
                 Some((frame.width, frame.height, frame.native, frame.generation));
-            let metadata = json!({"width":frame.width,"height":frame.height,"native_width":frame.native.0,"native_height":frame.native.1,
+            let (signal, mean_luma) = keyferry_capture::capture::signal(&frame.rgb);
+            let metadata = json!({"signal":signal,"mean_luma":mean_luma,"width":frame.width,"height":frame.height,"native_width":frame.native.0,"native_height":frame.native.1,
                 "frame_id":frame.serial,"capture_generation":frame.generation,"frame_age_ms":frame.at.elapsed().as_millis(),"calibrated":self.bound_generation==Some(frame.generation),
                 "geometry":self.geometry,"active_video_rectangle":self.geometry.as_ref().map(Geometry::active_rectangle),"capture":self.frames.status()});
             let mut result = tool_result(metadata, false);

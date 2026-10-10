@@ -3,7 +3,7 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use keyferry_capture::{
     capture,
-    frames::{Capture, Frame, FrameSource, Region, Retry, MAX_SIDE},
+    frames::{Capture, Frame, FrameSource, Region, Retry, FRAME_WAIT, MAX_SIDE},
     ocr::{NativeOcr, Ocr},
 };
 use std::sync::atomic::AtomicBool;
@@ -113,9 +113,9 @@ impl Service {
             .source
             .strip_prefix("local:")
             .ok_or("capture.source_not_found")?;
-        let devices = self.devices()?;
-        capture::select_source(&devices, Some(id)).map_err(|_| "capture.source_unavailable")?;
         if !self.streams.contains_key(id) {
+            let devices = self.devices()?;
+            capture::select_source(&devices, Some(id)).map_err(|_| "capture.source_unavailable")?;
             if self.streams.len() >= 4 {
                 return Err("capture.stream_limit");
             }
@@ -123,11 +123,7 @@ impl Service {
                 .insert(id.to_owned(), Capture::start(Some(id.to_owned())));
         }
         let capture = self.streams.get_mut(id).expect("stream");
-        let frame = capture.latest(
-            request.after,
-            Duration::from_secs(2),
-            &AtomicBool::new(false),
-        )?;
+        let frame = capture.latest(request.after, FRAME_WAIT, &AtomicBool::new(false))?;
         encode(&frame, request, capture.status())
     }
 }
@@ -185,7 +181,8 @@ fn encode(
     } else {
         None
     };
-    let result = serde_json::json!({"schema":"keyferry.capture-live.v1","png":STANDARD.encode(png),
+    let (signal, mean_luma) = capture::signal(&frame.rgb);
+    let result = serde_json::json!({"signal":signal,"mean_luma":mean_luma,"schema":"keyferry.capture-live.v1","png":STANDARD.encode(png),
         "width":width,"height":height,"native":frame.native,"serial":frame.serial,"generation":frame.generation,
         "age_ms":frame.at.elapsed().as_millis(),"region":region,"capture":status,"boxes":boxes});
     if serde_json::to_vec(&result)

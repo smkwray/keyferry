@@ -433,7 +433,7 @@ impl Forwarder {
             "POST",
             &path,
             Some(&body),
-            CONTROL_TIMEOUT,
+            keyferry_capture::frames::FRAME_WAIT + Duration::from_secs(5),
             crate::capture::MAX_WIRE + MAX_RESPONSE_HEADER,
         )
         .await

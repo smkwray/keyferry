@@ -58,11 +58,17 @@ fn map_device(name: String, link: String) -> Result<Device, &'static str> {
     if name.is_empty() || !link.starts_with(r"\\?\") || name.contains('\0') || link.contains('\0') {
         return Err("capture.list_failed");
     }
-    // DirectShow's PnP moniker prefixes the driver symbolic link and replaces colons.
+    // MF uses the video-camera interface category; DirectShow uses KSCATEGORY_CAPTURE.
+    // Preserve the unique device path, translating the category before prefixing the moniker.
     // See FFmpeg libavdevice/dshow.c dshow_cycle_devices.
     Ok(Device {
         name,
-        id: format!("@device_pnp_{link}").replace(':', "_"),
+        id: format!("@device_pnp_{link}")
+            .replace(
+                "{e5323777-f976-4f5b-9b55-b94699c46e44}",
+                "{65e8773d-8f56-11d0-a3b9-00a0c9223196}",
+            )
+            .replace(':', "_"),
     })
 }
 
@@ -113,9 +119,13 @@ mod tests {
     use super::*;
     #[test]
     fn maps_driver_symbolic_link_to_unique_dshow_moniker() {
-        let link = r"\\?\usb#vid_345f&pid_2130&mi_00#unit#{video-guid}\global";
+        let link =
+            r"\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
         let device = map_device("Hagibis".into(), link.into()).unwrap();
-        assert_eq!(device.id, format!("@device_pnp_{link}"));
+        assert_eq!(
+            device.id,
+            r"@device_pnp_\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"
+        );
         assert!(super::super::capture::recognized(&device));
         assert!(map_device(String::new(), link.into()).is_err());
         assert!(map_device("Camera".into(), "".into()).is_err());

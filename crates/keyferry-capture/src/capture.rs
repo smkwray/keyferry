@@ -15,7 +15,7 @@ const MAX_PIXELS: usize = 4096 * 4096;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_LIST_BYTES: usize = 256 * 1024;
 
-pub const HELP: &str = "keyctl capture calibrate DEVICE [--source NAME_OR_ID] (moves pointer through daemon; see keyctl mcp --help)\nkeyctl capture list\nkeyctl capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  list/frame: local USB HDMI/UVC video capture using ffmpeg on PATH; never contacts a stick or daemon.\n  Default source: the single recognized capture device; otherwise supply --source from list.\n  --size selects the input mode; --scale resizes the output (each at most 4096x4096 pixels).\n  Writes one PNG only to --out; refuses an existing path. Screens may contain secrets: keep and delete it privately.\n  Each ffmpeg process has a 15-second deadline; no retries or temporary frames.\n  signal=no-signal is a near-uniform black/blue heuristic, not proof of HDMI signal loss.\n  On macOS grant Camera permission to the terminal/app in System Settings > Privacy & Security.\n  Exit: 0 success (including no-signal), 20 arguments/source selection, 23 ffmpeg missing,\n        24 timeout (child killed), 25 capture/list/decode/output failure. Output/errors are compact JSON.";
+pub const HELP: &str = "keyctl capture calibrate DEVICE [--source NAME_OR_ID] (moves pointer through daemon; see keyctl mcp --help)\nkeyctl capture list\nkeyctl capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  list/frame: local USB HDMI/UVC video capture using ffmpeg on PATH; never contacts a stick or daemon.\n  Default source: the single recognized capture device; otherwise supply --source from list.\n  --size selects the input mode; --scale resizes the output (each at most 4096x4096 pixels).\n  Writes one PNG only to --out; refuses an existing path. Screens may contain secrets: keep and delete it privately.\n  One continuous stream warms up for up to 6 seconds; 15-second request deadline; no retries or temporary frames.\n  signal=no-signal is a near-uniform black/blue heuristic, not proof of HDMI signal loss.\n  On macOS grant Camera permission to the terminal/app in System Settings > Privacy & Security.\n  Exit: 0 success (including no-signal), 20 arguments/source selection, 23 ffmpeg missing,\n        24 timeout (child killed), 25 capture/list/decode/output failure. Output/errors are compact JSON.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Backend {
@@ -208,11 +208,15 @@ fn execute(
             let device = select_source(&devices, options.source.as_deref())?;
             let mut child = command();
             child.args(frame_args(backend, device, &options));
-            let output = bounded_output(child, timeout, MAX_FRAME_BYTES, backend)?;
-            if !output.status.success() {
-                return Err(Error::new("capture.frame_failed", "Cannot capture a frame; check source, mode, device permissions and macOS Camera permission."));
-            }
-            let (width, height, rgb) = decode(&output.stdout)?;
+            let frame =
+                super::frames::one_shot(child, timeout).map_err(|code| {
+                    Error::new(code,
+                "Cannot capture a frame; check source, mode, permissions and device ownership.")
+                })?;
+            let (width, height, rgb) = (frame.width, frame.height, &frame.rgb);
+            let png = frame
+                .png()
+                .map_err(|code| Error::new(code, "Cannot encode frame."))?;
             if options
                 .scale
                 .or(options.size)
@@ -223,7 +227,7 @@ fn execute(
                     "Capture did not produce the requested dimensions.",
                 ));
             }
-            let (signal, mean_luma) = signal(&rgb);
+            let (signal, mean_luma) = signal(rgb);
             let captured_at = time::OffsetDateTime::now_utc()
                 .format(&time::format_description::well_known::Rfc3339)
                 .map_err(|_| {
@@ -241,11 +245,7 @@ fn execute(
                         "Cannot create --out; choose a new path in an existing writable directory.",
                     )
                 })?;
-            if file
-                .write_all(&output.stdout)
-                .and_then(|()| file.flush())
-                .is_err()
-            {
+            if file.write_all(&png).and_then(|()| file.flush()).is_err() {
                 drop(file);
                 std::fs::remove_file(&options.out)
                     .map_err(|_| Error::new("capture.output_cleanup", "Output write failed and the incomplete --out could not be removed; delete it privately."))?;
@@ -530,7 +530,7 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
     .map(str::to_owned)
     .to_vec();
     if backend == Backend::Dshow {
-        args.extend(["-rtbufsize".into(), "256M".into()]);
+        args.extend(["-rtbufsize".into(), "16M".into()]);
     }
     if backend == Backend::Avfoundation {
         args.extend(["-framerate".into(), "30".into()]);
@@ -543,17 +543,12 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
         Backend::Avfoundation => format!("{}:none", device.id),
         Backend::V4l2 => device.id.clone(),
     };
-    args.extend([
-        "-i".into(),
-        input,
-        "-map".into(),
-        "0:v:0".into(),
-        "-frames:v".into(),
-        "1".into(),
-    ]);
-    if let Some((w, h)) = options.scale {
-        args.extend(["-vf".into(), format!("scale={w}:{h}")]);
-    }
+    args.extend(["-i".into(), input, "-map".into(), "0:v:0".into()]);
+    let filter = options.scale.map_or_else(
+        || "fps=5".to_owned(),
+        |(w, h)| format!("fps=5,scale={w}:{h}"),
+    );
+    args.extend(["-vf".into(), filter]);
     args.extend(
         [
             "-an",
@@ -565,6 +560,8 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
             "1",
             "-c:v",
             "png",
+            "-compression_level",
+            "1",
             "-pix_fmt",
             "rgb24",
             "-f",
@@ -576,7 +573,7 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
     args
 }
 
-fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Error> {
+pub(super) fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Error> {
     let invalid = || {
         Error::new(
             "capture.invalid_frame",
@@ -612,7 +609,7 @@ fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Error> {
     Ok((width, height, rgb))
 }
 
-fn signal(rgb: &[u8]) -> (&'static str, f64) {
+pub fn signal(rgb: &[u8]) -> (&'static str, f64) {
     let count = (rgb.len() / 3) as f64;
     let mut sums = [0.0; 3];
     let mut squares = [0.0; 3];
@@ -638,9 +635,8 @@ fn signal(rgb: &[u8]) -> (&'static str, f64) {
     )
 }
 
-/// Enumerate and probe in memory, then return arguments for one continuous raw RGB pipe.
-/// The probe bounds the native geometry; showinfo detects a later input-mode change.
-pub fn stream_setup(source: Option<&str>) -> Result<(String, u32, u32, Vec<String>), &'static str> {
+/// Enumerate without activating the card; geometry comes from the same continuous pipe.
+pub fn stream_setup(source: Option<&str>) -> Result<(String, Vec<String>), &'static str> {
     let backend = Backend::current();
     let devices = devices()?;
     let device = select_source(&devices, source).map_err(|e| e.code)?;
@@ -650,46 +646,7 @@ pub fn stream_setup(source: Option<&str>) -> Result<(String, u32, u32, Vec<Strin
         size: None,
         scale: None,
     };
-    let mut command = keyferry_core::process::command("ffmpeg");
-    command.args(frame_args(backend, device, &options));
-    let output = bounded_output(command, TIMEOUT, MAX_FRAME_BYTES, backend).map_err(|e| e.code)?;
-    if !output.status.success() {
-        return Err("capture.frame_failed");
-    }
-    let (w, h, _) = decode(&output.stdout).map_err(|e| e.code)?;
-    let mut args = frame_args(backend, device, &options);
-    let end = args
-        .iter()
-        .position(|s| s == "-frames:v")
-        .ok_or("capture.arguments")?;
-    args.truncate(end);
-    // Keep aspect ratio; bound both dimensions, preserving screenshot pixel coordinates.
-    let (sw, sh) = super::frames::scaled_size((w, h));
-    let level = args
-        .iter()
-        .position(|s| s == "-loglevel")
-        .ok_or("capture.arguments")?;
-    args[level + 1] = "info".into();
-    if let Some(buffer) = args.iter().position(|s| s == "-rtbufsize") {
-        args[buffer + 1] = "16M".into();
-    }
-    args.extend([
-        "-vf".into(),
-        format!("showinfo,scale={sw}:{sh}"),
-        "-an".into(),
-        "-sn".into(),
-        "-dn".into(),
-        "-threads".into(),
-        "1".into(),
-        "-filter_threads".into(),
-        "1".into(),
-        "-pix_fmt".into(),
-        "rgb24".into(),
-        "-f".into(),
-        "rawvideo".into(),
-        "pipe:1".into(),
-    ]);
-    Ok((device.id.clone(), w, h, args))
+    Ok((device.id.clone(), frame_args(backend, device, &options)))
 }
 
 #[cfg(test)]

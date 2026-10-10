@@ -954,7 +954,7 @@ impl Client {
         body: Option<&str>,
     ) -> Result<HttpResponse, ClientError> {
         let mut stream = self.connect()?;
-        if path == "/v1/capture/sources" {
+        if path == "/v1/capture/sources" || path == "/v1/capture/frame" {
             stream
                 .set_read_timeout(Some(Duration::from_secs(25)))
                 .map_err(|error| ClientError(error.to_string()))?;

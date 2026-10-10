@@ -107,6 +107,7 @@ impl DaemonFrames {
                     | "capture.peer_offline_or_select_source"
                     | "capture.peer_offline_or_fresh_proof_failed",
                 ) => "capture.peer_offline",
+                Some("capture.source_busy") => "capture.source_busy",
                 Some("capture.source_not_found") => "capture.source_not_found",
                 Some("capture.source_unavailable") => "capture.source_unavailable",
                 Some("ocr.unsupported_platform") => "ocr.unsupported_platform",
@@ -232,7 +233,6 @@ impl FrameSource for DaemonFrames {
                 return Err("request.cancelled");
             }
             let request = json!({"device":self.device,"source":self.source,"after":after,"epoch":self.epoch,"ocr":self.ocr});
-            let requested_at = Instant::now();
             let value = match self.request("POST", "/v1/capture/frame", Some(&request.to_string()))
             {
                 Err("capture.busy" | "capture.frame_unavailable")
@@ -243,6 +243,7 @@ impl FrameSource for DaemonFrames {
                 }
                 other => other?,
             };
+            let received_at = Instant::now();
             let png = STANDARD
                 .decode(value["png"].as_str().ok_or("capture.invalid_frame")?)
                 .map_err(|_| "capture.invalid_frame")?;
@@ -293,7 +294,7 @@ impl FrameSource for DaemonFrames {
                 .as_u64()
                 .filter(|age| *age < 2000)
                 .ok_or("capture.stale_frame")?;
-            if requested_at.elapsed() + Duration::from_millis(age) >= Duration::from_secs(2) {
+            if received_at.elapsed() + Duration::from_millis(age) >= Duration::from_secs(2) {
                 return Err("capture.stale_frame");
             }
             if self.epoch.as_deref() == value["epoch"].as_str()
@@ -320,7 +321,7 @@ impl FrameSource for DaemonFrames {
                 rgb,
                 serial,
                 generation,
-                at: requested_at - Duration::from_millis(age),
+                at: received_at - Duration::from_millis(age),
             }));
         }
     }
