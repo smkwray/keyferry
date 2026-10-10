@@ -45,6 +45,9 @@ struct Visual {
     pointer: [f64; 2],
     revision: u8,
     at: Instant,
+    /// Every absolute report requested, in order; read by the daemon-backed MCP tests.
+    #[allow(dead_code)]
+    path: Vec<[f64; 2]>,
 }
 impl FakeFrames {
     fn new() -> Self {
@@ -57,6 +60,7 @@ impl FakeFrames {
                 pointer: [0.5, 0.5],
                 revision: 0,
                 at: Instant::now(),
+                path: Vec::new(),
             },
             delay: Duration::ZERO,
             animate: false,
