@@ -22,6 +22,13 @@ const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// [`keyferryd::Daemon::shutdown`], then dropping every task closes the remaining sockets and
 /// kills the macOS Bluetooth helper, whose handle is `kill_on_drop`.
 fn main() -> std::process::ExitCode {
+    // The Windows service has no console and its launcher discards stderr.
+    #[cfg(windows)]
+    if let Some(path) = keyferryd::logging::default_file() {
+        if let Err(error) = keyferryd::logging::persist_to(path) {
+            keyferryd::daemon_log!("keyferryd log file unavailable: {error}");
+        }
+    }
     match run_main() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
