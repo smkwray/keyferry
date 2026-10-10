@@ -46,6 +46,13 @@ class BudgetTests(unittest.TestCase):
                                  text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(printed.stdout.split(), [str(PERCENT), str(CEILING)])
 
+    def test_remote_builder_is_governed_and_verifies_transfers(self):
+        script = (ROOT / "scripts/remote_build.ps1").read_text()
+        self.assertIn("python scripts/build_governor.py --receipt", script)
+        self.assertIn("SHA256 mismatch after transfer", script)
+        self.assertIn("Copy-Verified 'Cargo.lock'", script)
+        self.assertIn("if ($code) { throw", script)
+
 
 @unittest.skipUnless(os.name == "nt", "Windows Job Objects")
 class GovernorTests(unittest.TestCase):
