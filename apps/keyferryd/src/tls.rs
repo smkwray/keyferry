@@ -2428,6 +2428,11 @@ where
                 .await;
             };
             let evidence = result?;
+            if evidence.result == DeviceCommandResult::Rejected {
+                if let Some(diagnostic) = input_rejection_diagnostic(evidence.reason) {
+                    progress(TransportProgress::Diagnostic(diagnostic));
+                }
+            }
             match evidence.result {
                 DeviceCommandResult::Accepted if !accepted && !started => {
                     accepted = true;
@@ -3958,6 +3963,16 @@ fn valid_input_evidence(evidence: InputCommandEvidence) -> bool {
     }
 }
 
+fn input_rejection_diagnostic(reason: u16) -> Option<TransportDiagnostic> {
+    match reason {
+        keyferry_protocol::error_code::CAPABILITY_REQUIRED => {
+            Some(TransportDiagnostic::InputCapabilityRequired)
+        }
+        keyferry_protocol::error_code::INVALID_MODE => Some(TransportDiagnostic::InputInvalidMode),
+        _ => None,
+    }
+}
+
 fn known_input_reason(reason: u16) -> bool {
     reason == 0
         || matches!(
@@ -4925,6 +4940,66 @@ pub(crate) mod tests {
             *progress.lock().unwrap(),
             vec![TransportProgress::Accepted, TransportProgress::Started]
         );
+    }
+
+    #[tokio::test]
+    async fn pointer_rejection_reasons_survive_without_claiming_started() {
+        for (reason, diagnostic) in [
+            (
+                keyferry_protocol::error_code::CAPABILITY_REQUIRED,
+                TransportDiagnostic::InputCapabilityRequired,
+            ),
+            (
+                keyferry_protocol::error_code::INVALID_MODE,
+                TransportDiagnostic::InputInvalidMode,
+            ),
+        ] {
+            let (mut host, mut device) = duplex(4096);
+            let command_id = uuid::Uuid::now_v7();
+            let command = pointer_wire_command(mixed_input_command(command_id), true);
+            let device = tokio::spawn(async move {
+                let arm = read_frame(&mut device).await.unwrap();
+                send_frame(
+                    &mut device,
+                    Frame::v1(
+                        keyferry_protocol::message::ACK,
+                        arm.sequence,
+                        vec![keyferry_protocol::message::ARM, 0, 0],
+                    ),
+                )
+                .await
+                .unwrap();
+                let request = read_frame(&mut device).await.unwrap();
+                send_pointer_evidence(
+                    &mut device,
+                    request.sequence,
+                    command_id,
+                    keyferry_protocol::result_code::REJECTED,
+                    0,
+                    0,
+                    reason,
+                )
+                .await;
+            });
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = Arc::clone(&events);
+            let progress: ProgressHandler = Arc::new(move |e| observed.lock().unwrap().push(e));
+            assert_eq!(
+                execute_connection(&mut host, &mut 2, &command, Cancellation::new(), &progress)
+                    .await
+                    .unwrap(),
+                TransportOutcome::Rejected
+            );
+            device.await.unwrap();
+            assert_eq!(
+                *events.lock().unwrap(),
+                vec![TransportProgress::Diagnostic(diagnostic)]
+            );
+            assert_eq!(
+                TransportDiagnostic::from_code(diagnostic.code()),
+                Some(diagnostic)
+            );
+        }
     }
 
     #[tokio::test]

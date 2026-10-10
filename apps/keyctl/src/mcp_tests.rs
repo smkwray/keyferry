@@ -196,7 +196,7 @@ fn probe_prediction_excludes_pillar_bars_and_prefers_agreeing_probes() {
     assert_eq!(geometry::expected(&f, &[], [0.5, 0.25]), [159.5, 59.75]);
     let mut dark = f.clone();
     dark.rgb.fill(0);
-    assert_eq!(geometry::active_video(&dark), [80.0, 60.0, 160.0, 120.0]);
+    assert_eq!(geometry::active_video(&dark), [0.0, 0.0, 320.0, 240.0]);
     let mut samples = vec![
         ([0.1, 0.1], [50.0, 40.0]),
         ([0.9, 0.2], [250.0, 60.0]),
@@ -474,4 +474,74 @@ fn no_argument_options_and_unselected_action_errors_are_clear() {
     ] {
         assert!(listed.iter().any(|t| t["name"] == name));
     }
+}
+
+#[test]
+fn screen_area_preserves_dark_wallpaper_and_recognizes_letterbox() {
+    let mut f = frame(1280, 720, 1);
+    // The reported dark-desktop regression: asymmetric top/bottom and slightly uneven pillars.
+    for y in 0..720 {
+        for x in 0..1280 {
+            if !(66..1215).contains(&x) || !(5..718).contains(&y) {
+                let i = (y * 1280 + x) as usize * 3;
+                f.rgb[i..i + 3].fill(0);
+            }
+        }
+    }
+    assert_eq!(geometry::active_video(&f), [64.0, 0.0, 1152.0, 720.0]);
+    let mut dark = frame(1280, 720, 1);
+    dark.rgb.fill(0);
+    for y in 680..720 {
+        for x in 0..1280 {
+            let i = (y * 1280 + x) as usize * 3;
+            dark.rgb[i..i + 3].fill(60);
+        }
+    }
+    assert_eq!(geometry::active_video(&dark), [0.0, 0.0, 1280.0, 720.0]);
+    let mut letter = frame(640, 480, 1);
+    for y in (0..60).chain(420..480) {
+        let i = (y * 640) as usize * 3;
+        letter.rgb[i..i + 640 * 3].fill(0);
+    }
+    assert_eq!(geometry::active_video(&letter), [0.0, 60.0, 640.0, 360.0]);
+    // A few symmetric dark rows on a source already at 16:9 are real desktop pixels.
+    let mut wide = frame(1280, 720, 1);
+    for y in (0..2).chain(718..720) {
+        let i = (y * 1280) as usize * 3;
+        wide.rgb[i..i + 1280 * 3].fill(0);
+    }
+    assert_eq!(geometry::active_video(&wide), [0.0, 0.0, 1280.0, 720.0]);
+    // Symmetry alone is insufficient for arbitrary dark margins.
+    letter.rgb.fill(60);
+    for y in (0..5).chain(475..480) {
+        let i = (y * 640) as usize * 3;
+        letter.rgb[i..i + 640 * 3].fill(0);
+    }
+    assert_eq!(geometry::active_video(&letter), [0.0, 0.0, 640.0, 480.0]);
+}
+
+#[test]
+fn input_rejections_and_unknown_keys_have_actionable_messages() {
+    for code in ["input.capability_required", "input.invalid_mode"] {
+        let error = failure(code);
+        assert_eq!(error["code"], code);
+        assert!(error["message"].as_str().unwrap().contains("absolute"));
+        let result: Value = serde_json::from_str(&super::super::sequence_result_json(
+            "test-device",
+            None,
+            super::super::SequenceOutcome::Rejected,
+            Some(code),
+        ))
+        .unwrap();
+        assert_eq!(result["error"], error);
+    }
+    let raw = br#"{"schema":"keyferry.input-sequence.v1","keyboard_profile":"windows-us","arm":"command-scoped","start_within_ms":5000,"actions":[{"type":"tap","key":"enter"}]}"#;
+    assert_eq!(
+        super::super::prepare_input_sequence(raw).unwrap_err(),
+        "key.unknown"
+    );
+    assert!(failure("key.unknown")["message"]
+        .as_str()
+        .unwrap()
+        .contains("keyctl keys"));
 }
