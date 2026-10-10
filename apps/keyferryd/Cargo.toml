@@ -46,5 +46,4 @@ windows = { version = "=0.62.2", default-features = false, features = [
 windows-future = { version = "=0.3.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-keyferry = { path = "../keyferry" }
 tower-service = { version = "=0.3.3", default-features = false }

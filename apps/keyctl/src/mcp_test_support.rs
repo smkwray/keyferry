@@ -1,0 +1,202 @@
+use super::super::ocr::TextBox;
+use super::*;
+use std::{collections::VecDeque, fs};
+
+fn frame(w: u32, h: u32, serial: u64) -> Frame {
+    Frame {
+        width: w,
+        height: h,
+        native: (w * 2, h * 2),
+        rgb: vec![60; w as usize * h as usize * 3],
+        serial,
+        generation: 1,
+        at: Instant::now(),
+    }
+}
+fn cursor_frame(p: [f64; 2], serial: u64) -> Frame {
+    let mut f = frame(320, 240, serial);
+    let x = (20.0 + p[0] * 280.0).round() as u32;
+    let y = (30.0 + p[1] * 180.0).round() as u32;
+    for dy in 0..9 {
+        for dx in 0..=dy / 2 {
+            let i = ((y + dy) * f.width + x + dx) as usize * 3;
+            f.rgb[i..i + 3].fill(255);
+        }
+    }
+    f
+}
+
+struct FakeFrames {
+    next: u64,
+    scripted: VecDeque<Frame>,
+    change_after: Option<u64>,
+    pointer: Option<Arc<Mutex<Visual>>>,
+    visible: Visual,
+    delay: Duration,
+    animate: bool,
+    busy: bool,
+    never_change: bool,
+    started: Instant,
+}
+#[derive(Clone)]
+struct Visual {
+    pointer: [f64; 2],
+    revision: u8,
+    at: Instant,
+}
+impl FakeFrames {
+    fn new() -> Self {
+        Self {
+            next: 0,
+            scripted: VecDeque::new(),
+            change_after: None,
+            pointer: None,
+            visible: Visual {
+                pointer: [0.5, 0.5],
+                revision: 0,
+                at: Instant::now(),
+            },
+            delay: Duration::ZERO,
+            animate: false,
+            busy: false,
+            never_change: false,
+            started: Instant::now(),
+        }
+    }
+}
+impl FrameSource for FakeFrames {
+    fn latest(
+        &mut self,
+        after: Option<u64>,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<Arc<Frame>, &'static str> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("request.cancelled");
+        }
+        if let Some(mut f) = self.scripted.pop_front() {
+            self.next = self.next.max(after.unwrap_or(0)) + 1;
+            f.serial = self.next;
+            f.at = Instant::now();
+            return Ok(Arc::new(f));
+        }
+        if timeout < Duration::from_millis(50) {
+            thread::sleep(timeout);
+            return Err("capture.frame_timeout");
+        }
+        if after.is_some() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        self.next = self.next.max(after.unwrap_or(0)) + 1;
+        if let Some(pointer) = &self.pointer {
+            let desired = pointer.lock().unwrap();
+            if !self.never_change && desired.at.elapsed() >= self.delay {
+                self.visible = desired.clone();
+            }
+        }
+        let mut f = if self.pointer.is_some() {
+            cursor_frame(self.visible.pointer, self.next)
+        } else {
+            frame(320, 240, self.next)
+        };
+        if self.visible.revision != 0 {
+            for y in 208..214 {
+                for x in 20..28 {
+                    let i = (y * f.width + x) as usize * 3;
+                    f.rgb[i..i + 3].fill(if self.visible.revision % 2 == 1 {
+                        200
+                    } else {
+                        100
+                    });
+                }
+            }
+        }
+        if self.animate {
+            let elapsed = self.started.elapsed().as_millis();
+            // Blink every 200 ms and advance a clock glyph every second, away from probes.
+            for (x, width, value) in [
+                (
+                    280,
+                    3,
+                    if (elapsed / 200).is_multiple_of(2) {
+                        255
+                    } else {
+                        60
+                    },
+                ),
+                (288, 8, 100 + (elapsed / 1000 % 4) as u8 * 40),
+            ] {
+                for y in 8..20 {
+                    for x in x..x + width {
+                        let i = (y * f.width + x) as usize * 3;
+                        f.rgb[i..i + 3].fill(value);
+                    }
+                }
+            }
+        }
+        if self.busy {
+            // Notification panel plus a late-changing unlearned glyph, away from probe targets.
+            let value = if (self.started.elapsed().as_millis() / 200).is_multiple_of(2) {
+                200
+            } else {
+                60
+            };
+            for y in 25..85 {
+                for x in 270..310 {
+                    let i = (y * f.width + x) as usize * 3;
+                    f.rgb[i..i + 3].fill(value);
+                }
+            }
+        }
+        if self.change_after.is_some_and(|n| self.next >= n) {
+            f.rgb.fill(255);
+        }
+        Ok(Arc::new(f))
+    }
+    fn status(&self) -> Value {
+        json!({"source":"fake-hdmi","generation":1,"restarts":0})
+    }
+}
+struct FakeOcr;
+impl Ocr for FakeOcr {
+    fn recognize(&mut self, f: &Frame) -> Result<Vec<TextBox>, &'static str> {
+        assert_eq!((f.width, f.height), (320, 240));
+        Ok(vec![
+            TextBox {
+                text: "Safe test target".into(),
+                x: 32.0,
+                y: 24.0,
+                width: 128.0,
+                height: 20.0,
+            },
+            TextBox {
+                text: "Another label".into(),
+                x: 2.0,
+                y: 2.0,
+                width: 80.0,
+                height: 15.0,
+            },
+        ])
+    }
+}
+fn server() -> Server<FakeFrames, FakeOcr> {
+    Server::new(
+        "simulator-1".into(),
+        Some("fake-hdmi".into()),
+        "http://127.0.0.1:9",
+        Path::new("missing-token"),
+        std::env::temp_dir().join(format!("kf-mcp-{}", uuid::Uuid::now_v7())),
+        |_| FakeFrames::new(),
+        FakeOcr,
+    )
+}
+fn init(s: &mut Server<FakeFrames, FakeOcr>) {
+    let c = AtomicBool::new(false);
+    assert_eq!(s.dispatch(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"},"capabilities":{}}}),&c).unwrap()["result"]["serverInfo"]["name"],"keyferry");
+    assert!(s
+        .dispatch(
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            &c
+        )
+        .is_none());
+}

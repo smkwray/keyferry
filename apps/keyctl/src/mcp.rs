@@ -1331,6 +1331,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(keyferry_daemon_tests)))]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(all(test, keyferry_daemon_tests))]
+#[path = "../../../tools/keyferry-integration-tests/tests/mcp_tests.rs"]
+mod integration_tests;

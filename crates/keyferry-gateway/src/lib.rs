@@ -11,6 +11,7 @@ use ring::{
 use std::{fmt, net::IpAddr};
 
 mod installation;
+pub mod probe;
 pub mod roaming;
 pub mod tailnet;
 pub use installation::{
