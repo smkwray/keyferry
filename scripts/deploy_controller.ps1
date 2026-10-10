@@ -1,33 +1,47 @@
 # Fast program-only deploy of controller programs on this Windows host. Builds only the named
-# programs with [profile.deploy] in the shared warm target dir, runs only their crates' tests, then
+# programs with [profile.deploy] in a worktree-local target dir, runs their crates' tests, then
 # reuses the standard installer with existing credentials and LAN/Bluetooth settings.
 # Published packages still go through check_windows_package.ps1 and [profile.release].
 param(
     [Parameter(Mandatory)]
     [ValidateSet('keyctl', 'keyferryd', 'keyferry', 'keyferry-pairing')]
     [string[]]$Program,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$BuildOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$root = Split-Path -Parent $PSScriptRoot
-$toml = Get-Content -LiteralPath (Join-Path $root 'project.toml') -Raw
-$cpuPercent = [int]([regex]::Match($toml, '(?m)^cpu_percent\s*=\s*([0-9]+)').Groups[1].Value)
-$jobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * $cpuPercent / 100))
-if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = 'C:\tools\kf-target-final' }
-$packages = @($Program | ForEach-Object { '-p'; $_ })
 
-Push-Location -LiteralPath $root
-try {
-    python scripts/check_process_spawns.py
-    if ($LASTEXITCODE) { throw 'Process spawning policy failed.' }
-    if (-not $SkipTests) {
-        cargo test --locked --jobs $jobs @packages
-        if ($LASTEXITCODE) { throw 'Tests failed; nothing deployed.' }
-    }
-    cargo build --locked --profile deploy --jobs $jobs @packages
-    if ($LASTEXITCODE) { throw 'Build failed; nothing deployed.' }
-} finally { Pop-Location }
+$root = Split-Path -Parent $PSScriptRoot
+if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = Join-Path $root 'target' }
+python (Join-Path $PSScriptRoot 'build_governor.py') --probe
+if ($LASTEXITCODE -ne 0) {
+    $buildParameters = @{} + $PSBoundParameters
+    $buildParameters['BuildOnly'] = $true
+    $parameters = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $buildParameters -Compress)))
+    python (Join-Path $PSScriptRoot 'build_governor.py') -- pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build_governor.ps1') -Script $PSCommandPath -Parameters $parameters
+    if ($LASTEXITCODE) { throw 'Governed build failed; nothing deployed.' }
+    if ($BuildOnly) { return }
+} else {
+    $toml = Get-Content -LiteralPath (Join-Path $root 'project.toml') -Raw
+    $cpuPercent = [int]([regex]::Match($toml, '(?m)^cpu_percent\s*=\s*([0-9]+)').Groups[1].Value)
+    $jobs = [Math]::Min([int]$env:CARGO_BUILD_JOBS, [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * $cpuPercent / 100)))
+    $packages = @($Program | ForEach-Object { '-p'; $_ })
+
+    Push-Location -LiteralPath $root
+    try {
+        python scripts/check_process_spawns.py
+        if ($LASTEXITCODE) { throw 'Process spawning policy failed.' }
+        if (-not $SkipTests) {
+            cargo test --locked --jobs $jobs @packages
+            if ($LASTEXITCODE) { throw 'Tests failed; nothing deployed.' }
+        }
+        cargo build --locked --profile deploy --jobs $jobs @packages
+        if ($LASTEXITCODE) { throw 'Build failed; nothing deployed.' }
+    } finally { Pop-Location }
+    if ($BuildOnly) { return }
+    throw 'Deployment must run outside the build Job Object.'
+}
 
 $installed = Join-Path $env:LOCALAPPDATA 'Programs\Keyferry'
 $stage = Join-Path 'C:\tools' ('kf-deploy-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))

@@ -1,6 +1,13 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+python (Join-Path $PSScriptRoot 'build_governor.py') --probe
+if ($LASTEXITCODE -ne 0) {
+    $parameters = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $PSBoundParameters -Compress)))
+    python (Join-Path $PSScriptRoot 'build_governor.py') -- pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build_governor.ps1') -Script $PSCommandPath -Parameters $parameters
+    exit $LASTEXITCODE
+}
+
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'check_windows_package.ps1 must run on Windows.'
 }
@@ -25,7 +32,7 @@ $env:CARGO_ENCODED_RUSTFLAGS = @(
     "--remap-path-prefix=$projectRoot=."
 ) -join [char]0x1f
 
-cargo test --locked --release -p keyferryd
+cargo test --locked -p keyferryd
 if ($LASTEXITCODE -ne 0) { throw 'Windows daemon tests failed.' }
 cargo build --locked --release -p keyferry -p keyferryd -p keyferry-pairing -p keyctl
 if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }

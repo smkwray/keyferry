@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+import build_governor
 
 ROOT = Path(__file__).resolve().parents[1]
 CPU_PERCENT = int(re.search(r"(?m)^cpu_percent\s*=\s*(\d+)", (ROOT / "project.toml").read_text(encoding="utf-8")).group(1))
@@ -571,4 +572,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if os.name == "nt" and not build_governor.governed():
+        raise SystemExit(build_governor.run([sys.executable, __file__, *sys.argv[1:]]))
     main()
