@@ -88,6 +88,16 @@ pub(super) fn cursor(
     c: &Frame,
     ignored: &MotionMask,
 ) -> Result<[f64; 2], &'static str> {
+    cursor_near(a, b, c, ignored, None)
+}
+
+pub(super) fn cursor_near(
+    a: &Frame,
+    b: &Frame,
+    c: &Frame,
+    ignored: &MotionMask,
+    target: Option<[f64; 2]>,
+) -> Result<[f64; 2], &'static str> {
     let key = |f: &Frame| (f.width, f.height, f.native, f.generation);
     if key(a) != key(b) || key(b) != key(c) {
         return Err("capture.geometry_changed");
@@ -96,16 +106,25 @@ pub(super) fn cursor(
     let mut mask = vec![false; count];
     // Validates the mask's frame binding before indexing it.
     ignored.changed(a, b)?;
-    if !ignored.small() {
+    if target.is_none() && !ignored.small() {
         return Err("calibration.animated_or_ambiguous");
     }
     for (i, marked) in mask.iter_mut().enumerate() {
         let k = i * 3;
-        *marked = !ignored.ignored(i)
+        let in_roi = target.is_none_or(|target| {
+            let x = (i % b.width as usize) as f64;
+            let y = (i / b.width as usize) as f64;
+            x >= target[0] - 16.0
+                && x <= target[0] + 96.0
+                && y >= target[1] - 16.0
+                && y <= target[1] + 96.0
+        });
+        *marked = in_roi
+            && !ignored.ignored(i)
             && pixel_changed(&a.rgb[k..k + 3], &b.rgb[k..k + 3])
             && pixel_changed(&b.rgb[k..k + 3], &c.rgb[k..k + 3]);
     }
-    if mask.iter().filter(|v| **v).count() > count / 50 {
+    if target.is_none() && mask.iter().filter(|v| **v).count() > count / 50 {
         return Err("calibration.animated_or_ambiguous");
     }
     let mut candidates = Vec::new();
@@ -143,7 +162,12 @@ pub(super) fn cursor(
             && x1 - x0 <= 80
             && y1 - y0 <= 80
         {
-            candidates.push([f64::from(x0), f64::from(y0)]);
+            let point = [f64::from(x0), f64::from(y0)];
+            if target
+                .is_none_or(|target| (0..2).all(|axis| (target[axis] - point[axis]).abs() <= 12.0))
+            {
+                candidates.push(point);
+            }
         }
     }
     match candidates.as_slice() {
@@ -151,6 +175,67 @@ pub(super) fn cursor(
         [] => Err("calibration.cursor_not_seen"),
         _ => Err("calibration.animated_or_ambiguous"),
     }
+}
+
+pub(super) fn residual(g: &Geometry, samples: &[([f64; 2], [f64; 2])]) -> f64 {
+    samples
+        .iter()
+        .map(|(p, q)| {
+            (0..2)
+                .map(|axis| (q[axis] - g.origin[axis] - g.extent[axis] * p[axis]).powi(2))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / samples.len() as f64
+}
+
+/// Bounded consensus fit: at most two contaminated probes may be rejected, with at least
+/// four agreeing points and an independent verification move still required by the caller.
+pub(super) fn robust_fit(
+    device: &str,
+    source: &str,
+    frame: &Frame,
+    samples: &[([f64; 2], [f64; 2])],
+) -> Result<(Geometry, usize, f64), &'static str> {
+    if !(4..=10).contains(&samples.len()) {
+        return Err("calibration.insufficient_samples");
+    }
+    let mut best = None;
+    for subset in 0_u16..(1 << samples.len()) {
+        if subset.count_ones() != 4 {
+            continue;
+        }
+        let chosen: Vec<_> = samples
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| subset & (1 << i) != 0)
+            .map(|(_, s)| *s)
+            .collect();
+        let Ok(g) = fit(device, source, frame, &chosen) else {
+            continue;
+        };
+        let inliers: Vec<_> = samples
+            .iter()
+            .filter(|(p, q)| {
+                (0..2)
+                    .all(|axis| (q[axis] - g.origin[axis] - g.extent[axis] * p[axis]).abs() <= 5.0)
+            })
+            .copied()
+            .collect();
+        if inliers.len() < 4.max(samples.len().saturating_sub(2)) {
+            continue;
+        }
+        let Ok(g) = fit(device, source, frame, &inliers) else {
+            continue;
+        };
+        let rms = residual(&g, &inliers).sqrt();
+        if best.as_ref().is_none_or(|(_, count, error)| {
+            inliers.len() > *count || (inliers.len() == *count && rms < *error)
+        }) {
+            best = Some((g, inliers.len(), rms));
+        }
+    }
+    best.ok_or("calibration.mapping_mismatch")
 }
 
 /// Fit independent affine axes. Scaling, bars and capture overscan become one geometry.

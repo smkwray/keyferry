@@ -262,15 +262,21 @@ fn tools() -> Vec<Value> {
                    properties: Value,
                    required: &[&str],
                    read_only: bool| {
-        let description = if !read_only && name != "calibrate" {
-            format!("{description} Returns settled after visible change and 350 ms quiet (3 s observation bound), latency_ms to first change or timeout, and frame_id. settled:false never authorizes replay.")
+        let action = ["move", "click", "drag", "scroll", "key", "type_text"].contains(&name);
+        let mut properties = properties;
+        if action {
+            properties["return_screenshot"] = json!({"type":"boolean","default":true});
+            properties["format"] = json!({"type":"string","enum":["png","jpeg"],"default":"png"});
+        }
+        let description = if action {
+            format!("{description} Returns the observed post-action image by default (return_screenshot:false opts out), settled, latency_ms from EMITTED to visible change, and frame_id. Moves return when a compact cursor change is seen near the target; other actions require adaptive quiet on fresh frames within 3 s. settled:false never authorizes replay.")
         } else {
             description.to_owned()
         };
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
     };
-    add("screenshot","Latest HDMI frame as a bounded PNG image plus pixel/native geometry. Memory only; save_path explicitly saves a new file.",json!({"save_path":{"type":"string","minLength":1,"maxLength":4096}}),&[],true);
+    add("screenshot","Latest HDMI frame as a bounded PNG or JPEG image plus pixel/native geometry. Memory only; save_path explicitly saves a new file.",json!({"format":{"type":"string","enum":["png","jpeg"],"default":"png"},"save_path":{"type":"string","minLength":1,"maxLength":4096}}),&[],true);
     add("move","Move absolute pointer to screenshot pixels; requires calibrated binding or explicit uncalibrated:true.",json!({"x":pixel,"y":pixel,"uncalibrated":boolean}),&["x","y"],false);
     add(
         "click",
@@ -317,10 +323,18 @@ fn tools() -> Vec<Value> {
         &["source"],
         true,
     );
+    let actions: Vec<Value> = result.iter().filter(|t| ["move", "click", "drag", "scroll", "key", "type_text"].contains(&t["name"].as_str().unwrap_or("")))
+        .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"]}})).collect();
+    result.push(json!({"name":"batch","description":"Execute up to 32 ordered actions, observing each before the next. Stops at the first failed/non-EMITTED command or unsettled observation; never retries. Returns receipts and one final observed image by default.",
+        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":"png"}}},
+        "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}));
     result
 }
 
 fn validate(value: &Value, schema: &Value) -> bool {
+    if let Some(choices) = schema["anyOf"].as_array() {
+        return choices.iter().any(|choice| validate(value, choice));
+    }
     let typed = match schema["type"].as_str() {
         Some("object") => value.is_object(),
         Some("integer") => value.as_i64().is_some(),
@@ -397,6 +411,9 @@ struct Server<F: FrameSource, O: Ocr> {
     initialized: bool,
     ready: bool,
     seen: HashSet<String>,
+    animation: Option<(Arc<Frame>, frames::MotionMask, Instant)>,
+    observed_latency: Duration,
+    last_observed: Option<Arc<Frame>>,
 }
 
 impl<F: FrameSource, O: Ocr> Server<F, O> {
@@ -429,6 +446,9 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             initialized: false,
             ready: false,
             seen: HashSet::new(),
+            animation: None,
+            observed_latency: SETTLE,
+            last_observed: None,
         }
     }
     fn dispatch(&mut self, request: Value, cancelled: &AtomicBool) -> Option<Value> {
@@ -534,6 +554,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         Ok(())
     }
     fn clear_binding(&mut self) {
+        self.animation = None;
+        self.last_observed = None;
         self.geometry = None;
         self.bound_generation = None;
         self.screenshot_geometry = None;
@@ -608,6 +630,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         let prepared = super::prepare_input_sequence(raw.as_bytes()).map_err(failure)?;
         let client = self.client()?;
         let mut result = None;
+        let started = Instant::now();
         let exit = super::submit_prepared_with_interrupt(
             &client,
             &self.device,
@@ -619,6 +642,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             |s| result = serde_json::from_str::<Value>(&s).ok(),
         );
         let mut result = result.ok_or_else(|| failure("protocol.invalid_response"))?;
+        result["submission_ms"] = json!(started.elapsed().as_millis());
         if result["terminal"] == false && result["possible_start"] == true {
             result["outcome"] = json!("UNKNOWN");
             result["terminal"] = json!(true);
@@ -648,6 +672,9 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             .map_err(failure)
     }
     fn call(&mut self, name: &str, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
+        if name == "batch" {
+            return self.batch(args, cancelled);
+        }
         match name {
             "list_devices" => return self.devices().map(|v| tool_result(v, false)),
             "select_device" => {
@@ -728,8 +755,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             let (before, mask) = self.stationary(cancelled)?;
             let mut result =
                 self.submission(vec![json!({"type":"text","value":text})], false, cancelled)?;
-            self.settle_result(&before, &mask, &mut result, cancelled);
-            return Ok(tool_result(result, false));
+            return self.finish_action(&before, &mask, &mut result, args, None, cancelled);
         }
         if name == "key" {
             let keys = args["keys"]
@@ -742,20 +768,21 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             };
             let (before, mask) = self.stationary(cancelled)?;
             let mut result = self.submission(vec![action], false, cancelled)?;
-            self.settle_result(&before, &mask, &mut result, cancelled);
-            return Ok(tool_result(result, false));
+            return self.finish_action(&before, &mask, &mut result, args, None, cancelled);
         }
         self.frames.request_ocr(name == "find_text");
         let frame = self.frame(cancelled)?;
         if name == "screenshot" {
-            let png = frame.png().map_err(failure)?;
             if let Some(path) = args["save_path"].as_str() {
+                let (image, _) = frame
+                    .image(args["format"].as_str().unwrap_or("png"))
+                    .map_err(failure)?;
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(path)
                     .map_err(|_| failure("capture.output"))?;
-                if file.write_all(&png).and_then(|()| file.flush()).is_err() {
+                if file.write_all(&image).and_then(|()| file.flush()).is_err() {
                     drop(file);
                     let _ = std::fs::remove_file(path);
                     return Err(failure("capture.output"));
@@ -767,15 +794,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             let metadata = json!({"signal":signal,"mean_luma":mean_luma,"width":frame.width,"height":frame.height,"native_width":frame.native.0,"native_height":frame.native.1,
                 "frame_id":frame.serial,"capture_generation":frame.generation,"frame_age_ms":frame.at.elapsed().as_millis(),"calibrated":self.bound_generation==Some(frame.generation),
                 "geometry":self.geometry,"active_video_rectangle":self.geometry.as_ref().map(Geometry::active_rectangle),"capture":self.frames.status()});
-            let mut result = tool_result(metadata, false);
-            result["content"]
-                .as_array_mut()
-                .expect("tool content")
-                .insert(
-                    0,
-                    json!({"type":"image","mimeType":"image/png","data":STANDARD.encode(png)}),
-                );
-            return Ok(result);
+            return self.image_result(&frame, args, metadata);
         }
         if name == "find_text" {
             let boxes = ocr::filter(
@@ -835,8 +854,13 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         mask.changed(&frame, &before).map_err(failure)?;
         let command = self.submission(actions, true, cancelled)?;
         let mut result = json!({"command":command,"uncalibrated":uncalibrated,"mapping":if uncalibrated{"linear-full-frame"}else{"calibrated"}});
-        self.settle_result(&before, &mask, &mut result, cancelled);
-        Ok(tool_result(result, false))
+        let target = (name == "move").then(|| {
+            [
+                args["x"].as_f64().unwrap_or(-1.0),
+                args["y"].as_f64().unwrap_or(-1.0),
+            ]
+        });
+        self.finish_action(&before, &mask, &mut result, args, target, cancelled)
     }
 
     fn stationary(
@@ -845,6 +869,15 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     ) -> Result<(Arc<Frame>, frames::MotionMask), Value> {
         self.frames.request_ocr(false);
         let first = self.frame(cancelled)?;
+        if let Some((prior, mut mask, at)) = self.animation.take() {
+            if at.elapsed() < Duration::from_secs(30)
+                && mask.learn(&prior, &first).is_ok()
+                && mask.small()
+            {
+                self.animation = Some((first.clone(), mask.clone(), at));
+                return Ok((first, mask));
+            }
+        }
         let mut mask = frames::MotionMask::new(&first);
         let start = Instant::now();
         let mut previous = first;
@@ -865,6 +898,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                 Err(code) => return Err(failure(code)),
             }
         }
+        self.animation = Some((previous.clone(), mask.clone(), Instant::now()));
         Ok((previous, mask))
     }
 
@@ -874,6 +908,17 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         &mut self,
         before: &Arc<Frame>,
         mask: &frames::MotionMask,
+        cancelled: &AtomicBool,
+    ) -> Result<(Arc<Frame>, Value), Value> {
+        self.observe_target(before, mask, None, None, cancelled)
+    }
+
+    fn observe_target(
+        &mut self,
+        before: &Arc<Frame>,
+        mask: &frames::MotionMask,
+        target: Option<[f64; 2]>,
+        region: Option<Region>,
         cancelled: &AtomicBool,
     ) -> Result<(Arc<Frame>, Value), Value> {
         let start = Instant::now();
@@ -903,45 +948,218 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             if next.serial <= previous.serial || next.at <= previous.at {
                 return Err(failure("capture.stale_frame"));
             }
-            let changed = mask.changed(before, &next).map_err(failure)? >= 6;
+            if let Some(target) = target {
+                if next.at >= start {
+                    if let Ok(cursor) =
+                        geometry::cursor_near(before, &next, before, mask, Some(target))
+                    {
+                        let elapsed = start.elapsed();
+                        self.observed_latency = elapsed;
+                        return Ok((
+                            next.clone(),
+                            json!({"settled":true,"latency_ms":elapsed.as_millis(),"frame_id":next.serial,"cursor_px":cursor,"settle_method":"cursor-at-target","stability_window_ms":0}),
+                        ));
+                    }
+                }
+                previous = next;
+                continue;
+            }
+            let changed = mask
+                .changed_region(before, &next, region)
+                .map_err(failure)?
+                >= 6;
             if next.at >= start && changed && latency.is_none() {
                 latency = Some(start.elapsed().as_millis());
+                self.observed_latency = start.elapsed();
                 stable_since = Instant::now();
                 anchor = next.clone();
             }
-            if mask.changed(&anchor, &next).map_err(failure)? >= 6 {
+            if mask
+                .changed_region(&anchor, &next, region)
+                .map_err(failure)?
+                >= 6
+            {
                 stable_since = Instant::now();
                 anchor = next.clone();
             }
-            if next.at >= start && latency.is_some() && stable_since.elapsed() >= SETTLE {
+            let quiet = self
+                .observed_latency
+                .mul_f64(0.15)
+                .clamp(Duration::from_millis(100), SETTLE);
+            if next.at >= start && latency.is_some() && stable_since.elapsed() >= quiet {
                 return Ok((
                     next.clone(),
-                    json!({"settled":true,"latency_ms":latency,"frame_id":next.serial}),
+                    json!({"settled":true,"latency_ms":latency,"frame_id":next.serial,"settle_method":"adaptive-quiet","stability_window_ms":quiet.as_millis(),"settle_region":region}),
                 ));
             }
             previous = next;
         }
     }
 
-    fn settle_result(
+    fn finish_action(
         &mut self,
         before: &Arc<Frame>,
         mask: &frames::MotionMask,
         result: &mut Value,
+        args: &Value,
+        target: Option<[f64; 2]>,
         cancelled: &AtomicBool,
-    ) {
+    ) -> Result<Value, Value> {
         let start = Instant::now();
-        let observation = match self.observe_action(before, mask, cancelled) {
-            Ok((_, observation)) => observation,
+        let region = if target.is_none() {
+            let point = args
+                .get("to_x")
+                .zip(args.get("to_y"))
+                .or_else(|| args.get("x").zip(args.get("y")));
+            point.map(|(x, y)| {
+                let width = 256.min(before.width);
+                let height = 192.min(before.height);
+                Region {
+                    x: (x.as_u64().unwrap_or(0) as u32)
+                        .saturating_sub(width / 2)
+                        .min(before.width - width),
+                    y: (y.as_u64().unwrap_or(0) as u32)
+                        .saturating_sub(height / 2)
+                        .min(before.height - height),
+                    width,
+                    height,
+                }
+            })
+        } else {
+            None
+        };
+        let (frame, observation) = match self
+            .observe_target(before, mask, target, region, cancelled)
+        {
+            Ok((frame, observation)) => (Some(frame), observation),
             // Input has already completed: preserve its receipt and never suggest replay.
-            Err(error) => {
-                json!({"settled":false,"latency_ms":start.elapsed().as_millis(),"frame_id":null,"settle_error":error})
-            }
+            Err(error) => (
+                None,
+                json!({"settled":false,"latency_ms":start.elapsed().as_millis(),"frame_id":null,"settle_error":error}),
+            ),
         };
         result
             .as_object_mut()
             .expect("action result")
             .extend(observation.as_object().expect("observation").clone());
+        if let Some(frame) = frame {
+            self.last_observed = Some(frame.clone());
+            if let Some((prior, _, _)) = self.animation.as_mut() {
+                *prior = frame.clone();
+            }
+            if result["settled"] != true {
+                self.animation = None;
+            }
+            if args["return_screenshot"] != false {
+                // Encoding/observation failure cannot erase an EMITTED receipt.
+                return match self.image_result(&frame, args, result.clone()) {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        result["screenshot_error"] = error;
+                        Ok(tool_result(result.clone(), false))
+                    }
+                };
+            }
+        } else {
+            self.animation = None;
+        }
+        Ok(tool_result(result.clone(), false))
+    }
+
+    fn image_result(
+        &mut self,
+        frame: &Frame,
+        args: &Value,
+        mut metadata: Value,
+    ) -> Result<Value, Value> {
+        let started = Instant::now();
+        let (bytes, mime) = frame
+            .image(args["format"].as_str().unwrap_or("png"))
+            .map_err(failure)?;
+        metadata["image_bytes"] = json!(bytes.len());
+        metadata["mime_type"] = json!(mime);
+        metadata["image_encode_ms"] = json!(started.elapsed().as_millis());
+        metadata["width"] = json!(frame.width);
+        metadata["height"] = json!(frame.height);
+        metadata["native_width"] = json!(frame.native.0);
+        metadata["native_height"] = json!(frame.native.1);
+        metadata["frame_id"] = json!(frame.serial);
+        metadata["capture_generation"] = json!(frame.generation);
+        metadata["frame_age_ms"] = json!(frame.at.elapsed().as_millis());
+        self.screenshot_geometry =
+            Some((frame.width, frame.height, frame.native, frame.generation));
+        let mut result = tool_result(metadata, false);
+        result["content"]
+            .as_array_mut()
+            .expect("tool content")
+            .insert(
+                0,
+                json!({"type":"image","mimeType":mime,"data":STANDARD.encode(bytes)}),
+            );
+        Ok(result)
+    }
+
+    fn batch(&mut self, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
+        let mut receipts = Vec::new();
+        let mut final_frame = None;
+        let mut stopped = None;
+        for (index, action) in args["actions"]
+            .as_array()
+            .ok_or_else(|| failure("input.tool_arguments"))?
+            .iter()
+            .enumerate()
+        {
+            let mut arguments = action["arguments"].clone();
+            // Keep raw observations; encode only once after the last attempted action.
+            arguments["return_screenshot"] = json!(false);
+            arguments["format"] = args.get("format").cloned().unwrap_or(json!("png"));
+            self.last_observed = None;
+            match self.call(action["tool"].as_str().unwrap_or(""), &arguments, cancelled) {
+                Ok(value) => {
+                    let receipt = value["structuredContent"].clone();
+                    let command = receipt.get("command").unwrap_or(&receipt);
+                    let complete = command["outcome"] == "EMITTED" && receipt["settled"] == true;
+                    final_frame = self.last_observed.clone();
+                    receipts.push(receipt);
+                    if !complete {
+                        stopped = Some(index);
+                        break;
+                    }
+                }
+                Err(error) => {
+                    receipts.push(json!({"error":error}));
+                    stopped = Some(index);
+                    break;
+                }
+            }
+        }
+        let mut capture_error = None;
+        if stopped.is_some() && args["return_screenshot"] != false {
+            // Inspection is safe after uncertainty; no action is resubmitted.
+            match self.frames.latest(
+                final_frame.as_ref().map(|f| f.serial),
+                ACTION_WAIT,
+                cancelled,
+            ) {
+                Ok(frame) => final_frame = Some(frame),
+                Err(code) => capture_error = Some(failure(code)),
+            }
+        }
+        let mut metadata = json!({"actions":receipts,"completed":receipts.len() - usize::from(stopped.is_some()),"stopped_at":stopped,"settled":stopped.is_none(),"never_retried":true,"screenshot_error":capture_error});
+        let mut result =
+            if let Some(frame) = final_frame.filter(|_| args["return_screenshot"] != false) {
+                match self.image_result(&frame, args, metadata.clone()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        metadata["screenshot_error"] = error;
+                        tool_result(metadata, false)
+                    }
+                }
+            } else {
+                tool_result(metadata, false)
+            };
+        result["isError"] = json!(stopped.is_some());
+        Ok(result)
     }
     fn wait(
         &mut self,
@@ -1025,6 +1243,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.frames.device(&self.device);
         self.bound_generation = None;
         self.geometry = None;
+        self.animation = None;
         self.loaded = true;
         self.require_pointer()?;
         let (_, mask) = self.stationary(cancelled)?;
@@ -1038,6 +1257,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             [0.73, 0.72],
             [0.45, 0.42],
             [0.60, 0.60],
+            [0.18, 0.62],
+            [0.68, 0.35],
         ];
         let mut captured = Vec::new();
         let mut receipts = Vec::new();
@@ -1048,9 +1269,26 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             receipts.push(json!({"position":p,"frame_id":f.serial,"command":receipt}));
             captured.push(f);
             if captured.len() == 3 {
-                let point = geometry::cursor(&captured[0], &captured[1], &captured[2], &mask)
-                    .map_err(failure)?;
-                samples.push((positions[i - 1], point));
+                let middle = &captured[1];
+                let approximate = [
+                    positions[i - 1][0] * f64::from(middle.width - 1),
+                    positions[i - 1][1] * f64::from(middle.height - 1),
+                ];
+                let point =
+                    geometry::cursor(&captured[0], middle, &captured[2], &mask).or_else(|_| {
+                        geometry::cursor_near(
+                            &captured[0],
+                            middle,
+                            &captured[2],
+                            &mask,
+                            Some(approximate),
+                        )
+                    });
+                match point {
+                    Ok(point) => samples.push((positions[i - 1], point)),
+                    Err("calibration.cursor_not_seen" | "calibration.animated_or_ambiguous") => {}
+                    Err(code) => return Err(failure(code)),
+                }
                 captured.remove(0);
             }
         }
@@ -1058,14 +1296,20 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             .last()
             .ok_or_else(|| failure("calibration.insufficient_samples"))?;
         let source = self.source.as_deref().unwrap_or("auto");
-        let fitted = geometry::fit(&self.device, source, last, &samples).map_err(failure)?;
+        let (fitted, inliers, rms) =
+            geometry::robust_fit(&self.device, source, last, &samples).map_err(failure)?;
         let before = last.clone();
         let check = [0.35, 0.55];
         let (middle, receipt) = self.probe(check, &mask, cancelled)?;
         receipts.push(json!({"position":check,"frame_id":middle.serial,"command":receipt}));
         let (after, receipt) = self.probe(positions[0], &mask, cancelled)?;
         receipts.push(json!({"position":positions[0],"frame_id":after.serial,"command":receipt}));
-        let observed = geometry::cursor(&before, &middle, &after, &mask).map_err(failure)?;
+        let expected = [
+            fitted.origin[0] + fitted.extent[0] * check[0],
+            fitted.origin[1] + fitted.extent[1] * check[1],
+        ];
+        let observed = geometry::cursor_near(&before, &middle, &after, &mask, Some(expected))
+            .map_err(failure)?;
         if (0..2)
             .any(|a| (observed[a] - fitted.origin[a] - fitted.extent[a] * check[a]).abs() > 5.0)
         {
@@ -1074,12 +1318,13 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         geometry::save(&self.root, &fitted).map_err(failure)?;
         self.bound_generation = Some(after.generation);
         self.geometry = Some(fitted.clone());
+        self.animation = Some((after.clone(), mask, Instant::now()));
         let latency_ms = receipts
             .iter()
             .filter_map(|r| r["command"]["latency_ms"].as_u64())
             .max();
         Ok(
-            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"latency_ms":latency_ms,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
+            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"latency_ms":latency_ms,"residual_rms_px":rms,"inlier_samples":inliers,"rejected_samples":positions.len()-2-inliers,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
         )
     }
 }
