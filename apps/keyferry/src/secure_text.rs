@@ -426,7 +426,10 @@ mod tests {
             matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
         );
         let request = sequence("Test password!", true).unwrap();
-        assert!(matches!(&request.actions[1], SequenceAction::Wait { ms: 400 }));
+        assert!(matches!(
+            &request.actions[1],
+            SequenceAction::Wait { ms: 400 }
+        ));
         assert!(matches!(&request.actions[2], SequenceAction::Tap { key, .. } if key == "ENTER"));
     }
 
