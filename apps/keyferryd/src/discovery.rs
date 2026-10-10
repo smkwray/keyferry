@@ -57,10 +57,10 @@ pub struct BeaconPlan {
 
 impl BeaconPlan {
     #[cfg(test)]
-    pub(crate) fn loopback_test(address: Ipv4Addr) -> Self {
+    pub(crate) fn loopback_test(port: u16) -> Self {
         Self {
-            bind: SocketAddrV4::new(address, 0),
-            destination: SocketAddrV4::new(address, keyferry_protocol::discovery::PORT),
+            bind: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+            destination: SocketAddrV4::new(Ipv4Addr::LOCALHOST, keyferry_protocol::discovery::PORT),
         }
     }
 
@@ -146,6 +146,10 @@ impl BeaconPlan {
 
     #[must_use]
     pub fn listener_address(self) -> SocketAddr {
+        #[cfg(test)]
+        if self.bind.port() != 0 {
+            return self.bind.into();
+        }
         SocketAddrV4::new(*self.bind.ip(), keyferry_protocol::roaming::DEVICE_TLS_PORT).into()
     }
 }

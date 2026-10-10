@@ -2578,8 +2578,15 @@ mod tests {
             vec![transport.clone()],
         );
         let mut listeners = Vec::new();
-        let first = BeaconPlan::loopback_test("127.0.0.91".parse().unwrap());
-        let second = BeaconPlan::loopback_test("127.0.0.92".parse().unwrap());
+        // macOS does not route arbitrary 127/8 aliases. Use two reserved local
+        // ports so the real accept/session lifetime check runs on every OS.
+        let reservations = [
+            std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap(),
+            std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap(),
+        ];
+        let first = BeaconPlan::loopback_test(reservations[0].local_addr().unwrap().port());
+        let second = BeaconPlan::loopback_test(reservations[1].local_addr().unwrap().port());
+        drop(reservations);
         assert!(
             refresh_interfaces(
                 &mut listeners,
