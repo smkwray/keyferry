@@ -269,9 +269,53 @@ void cancellation_during_pending_mouse_zero_restarts_dual_neutral() {
            (keyferry::hid::kKeyboardNeutral | keyferry::hid::kMouseNeutral));
 }
 
+void scroll_selection_survives_neutral_and_consumes_each_token_once() {
+    ExecutorState state;
+    assert(state.enable_extended_pointer());
+    auto neutral = [&]() {
+        assert(state.mark_report_accepted({}));
+        assert(state.mark_mouse_report_accepted({}, 0));
+        assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 0));
+        assert(!state.report_needed());
+    };
+    state.on_transport_ready(); neutral();
+    assert(state.arm(101));
+    keyferry::hid::PointerReport scroll{};
+    scroll.wheel = -1; scroll.pan = 1;
+    std::array<std::uint8_t, 8> wire{};
+    assert(state.submit_mouse_movement(101, 1, scroll) == SubmitResult::accepted);
+    assert(keyferry::hid::SerializePointerReport(state.desired_mouse_report(), &wire) == 6);
+    assert((wire == std::array<std::uint8_t, 8>{1,0,0,0,255,1,0,0}));
+    assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 1));
+    keyferry::hid::PointerReport position{};
+    position.absolute = true; position.position_event = true;
+    position.absolute_x = 0x1234; position.absolute_y = 0x2345;
+    assert(state.submit_mouse_movement(101, 2, position) == SubmitResult::accepted);
+    assert(state.mark_mouse_report_accepted(position, 2));
+    state.request_dual_neutral(); neutral();
+    assert(state.arm(102)); // separate MCP commands preserve the positioning collection
+    assert(state.submit_mouse_movement(102, 1, scroll) == SubmitResult::accepted);
+    const auto routed = state.desired_mouse_report();
+    assert(keyferry::hid::SerializePointerReport(routed, &wire) == 8);
+    assert((wire == std::array<std::uint8_t, 8>{4,0,0x34,0x12,0x45,0x23,255,1}));
+    assert(!state.mark_mouse_report_accepted(scroll, 1)); // original relative bytes cannot confirm it
+    assert(!state.mark_mouse_report_accepted(routed, 2));
+    assert(state.mark_mouse_report_accepted(routed, 1));
+    assert(state.submit_mouse_movement(102, 1, scroll) == SubmitResult::movement_replayed);
+    assert(state.pointer_snapshot(true).wheel == 0 && state.pointer_snapshot(true).pan == 0);
+    assert(state.submit_mouse_buttons(102, BootMouseReport{2,0,0}) == SubmitResult::accepted);
+    assert(state.mark_mouse_report_accepted(state.desired_mouse_report(), 0));
+    assert(keyferry::hid::SerializePointerReport(state.pointer_snapshot(true), &wire) == 8);
+    assert((wire == std::array<std::uint8_t, 8>{4,2,0x34,0x12,0x45,0x23,0,0}));
+    state.fault(); neutral();
+    assert(keyferry::hid::SerializePointerReport(state.pointer_snapshot(true), &wire) == 8);
+    assert((wire == std::array<std::uint8_t, 8>{4,0,0x34,0x12,0x45,0x23,0,0}));
+}
+
 }  // namespace
 
 int main() {
+    scroll_selection_survives_neutral_and_consumes_each_token_once();
     starts_disarmed_and_requires_release();
     releases_after_fault_without_erasing_start_evidence();
     rejects_invalid_and_stale_reports();
