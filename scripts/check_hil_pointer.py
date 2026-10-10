@@ -57,8 +57,9 @@ def descriptor(data=None):
                 value, usage_minimum, usage_maximum))
             bits[report_id] = bits.get(report_id, 0) + size * count
             for p, u in usage:
-                if p == 1 and u in (0x30, 0x31):
-                    axes[(report_id, u)] = (minimum, maximum, size, value)
+                if (p == 1 and u in (0x30, 0x31, 0x38)) or (p == 0x0C and u == 0x0238):
+                    axes[(report_id, p, u)] = (minimum, maximum, size, value,
+                                               bits[report_id] - size * count, count)
             usage.clear()
             usage_minimum = usage_maximum = None
         elif tag == 0xA0:
@@ -72,23 +73,28 @@ def descriptor(data=None):
             usage.clear()
             usage_minimum = usage_maximum = None
         elif tag in (0x90, 0xB0): require(False, "unexpected output or feature report")
-    require(bits == {1: 40, 4: 48}, "reports must be exactly 6 and 7 bytes with IDs 1 and 4 only")
+    require(bits == {1: 40, 4: 56}, "reports must be exactly 6 and 8 bytes with IDs 1 and 4 only")
     require(not collections, "unclosed collection")
     for report_id in (1, 4):
         require(fields[report_id][0] == (0, 9, 1, 5, 0, 1, 2, 1, 5),
                 f"report {report_id} must start with five 0..1 button bits")
         require(fields[report_id][1] == (5, 9, 3, 1, 0, 1, 3, None, None),
                 f"report {report_id} must pad the button byte with three constant bits")
-    require(axes.get((1, 0x30)) == (-127, 127, 8, 6), "relative X differs")
-    require(axes.get((1, 0x31)) == (-127, 127, 8, 6), "relative Y differs")
+    require(axes.get((1, 1, 0x30)) == (-127, 127, 8, 6, 8, 3), "relative X differs")
+    require(axes.get((1, 1, 0x31)) == (-127, 127, 8, 6, 8, 3), "relative Y differs")
     for axis in (0x30, 0x31):
-        require(axes.get((4, axis)) == (0, 32767, 16, 2), "absolute Generic Desktop axis differs")
+        require(axes.get((4, 1, axis)) == (0, 32767, 16, 2, 8, 2), "absolute Generic Desktop axis differs")
+    for report_id, wheel_offset, pan_offset, wheel_count in ((1, 8, 32, 3), (4, 40, 48, 1)):
+        require(axes.get((report_id, 1, 0x38)) == (-127, 127, 8, 6, wheel_offset, wheel_count),
+                f"report {report_id} relative wheel differs")
+        require(axes.get((report_id, 0x0C, 0x0238)) == (-127, 127, 8, 6, pan_offset, 1),
+                f"report {report_id} relative Consumer AC Pan differs")
     require(bytes([0x05,9,0x19,1,0x29,5]) in data, "five pointer buttons missing")
     require(bytes([0x05,0x0C,0x0A,0x38,0x02]) in data, "relative AC Pan missing")
     for token in (
         "constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_NONE;",
         "kSelectedMouseReportDescriptorSize, kMouseEndpoint",
-        "constexpr std::uint16_t kInputDeviceRevision = 0x0102;",
+        "constexpr std::uint16_t kInputDeviceRevision = 0x0103;",
         "static_assert(kConfigurationDescriptor[72] == HID_SUBCLASS_NONE);",
         "static_assert(kConfigurationDescriptor[73] == HID_ITF_PROTOCOL_NONE);",
         "usb_transfer_generation_ != usb_attachment_generation_",
@@ -114,9 +120,9 @@ def no_msc_usb_descriptors(image, report):
         "09040200010300000609211101000122"
     ) + len(report).to_bytes(2, "little") + bytes.fromhex("0705830308000a")
     require(config in image, "HID IF0/IF1/IF2 descriptor differs or MSC is present")
-    device = bytes.fromhex("12010002000000403a300440020101020301")
+    device = bytes.fromhex("12010002000000403a300440030101020301")
     require(device in image,
-            "HID VID/PID or bcdDevice 0102 differs")
+            "HID VID/PID or bcdDevice 0103 differs")
 
 
 def inspect_build(build, data):
@@ -133,8 +139,8 @@ def inspect_build(build, data):
     require(data in image, "exact pointer descriptor is absent from image")
     flash = json.loads((build / "flasher_args.json").read_text())["flash_files"]
     if board == "waveshare_geek_v1_1_reference":
-        require(bytes.fromhex("12010002000000403a300840020101020301") in image,
-                "Waveshare VID/PID or bcdDevice 0102 differs")
+        require(bytes.fromhex("12010002000000403a300840030101020301") in image,
+                "Waveshare VID/PID or bcdDevice 0103 differs")
         require("KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache, "Waveshare file handoff disabled")
         require("CONFIG_TINYUSB_MSC_ENABLED=y" in config, "Waveshare MSC disabled")
         from check_msc_size_probe import inspect_file_handoff

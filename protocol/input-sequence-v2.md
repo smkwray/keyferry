@@ -10,7 +10,7 @@ Opt-in `KEYFERRY_POINTER_EXTENDED=ON` replaces IF2 with HID class 03/00/00,
 IN 0x83, 8-byte maximum packet, 10 ms polling. IF0 boot keyboard, IF1 vendor
 provisioning and IF3 read-only MSC keep their interfaces/endpoints. Relative
 report 1 is `[1,buttons(5),x:i8,y:i8,wheel:i8,pan:i8]`; absolute report 4 is
-`[4,buttons(5),x:u16LE,y:u16LE,wheel:i8]`, Generic Desktop X/Y absolute 0..32767.
+`[4,buttons(5),x:u16LE,y:u16LE,wheel:i8,pan:i8]` (8 bytes including ID), Generic Desktop X/Y absolute 0..32767.
 Only usages 1..3 are public. Consumer AC Pan is a relative pointer axis; no
 Consumer Control or System Control reports are declared. The non-boot IF2
 **drops the pre-OS BIOS boot mouse**; the boot keyboard remains.
@@ -19,8 +19,10 @@ The two report IDs have separate Mouse application collections, each containing
 a Pointer physical collection and a five-bit 0..1 button field plus three
 constant padding bits. Button presses follow the most recent positioning report:
 after absolute movement, clicks/down use report 4 with retained X/Y; before any
-absolute move or after relative X/Y movement, they use report 1. Scroll and neutral
-reports do not change this selection. Button-up and every fault still drain both
+absolute move or after relative X/Y movement, they use report 1. Wheel and Consumer
+AC Pan follow the same selection, retaining absolute X/Y and current buttons in
+report 4 after absolute positioning. Scroll and neutral reports do not change
+this selection. Button-up and every fault still drain both
 IDs. USB dispatch waits for the previous transfer's completion before sending
 another report; click holds remain 10..100 ms (default 40 ms), with separate down
 and up transfers at the 10 ms report interval. No wire records or budgets change.
@@ -28,12 +30,13 @@ and up transfers at the 10 ms report interval. No wire records or budgets change
 AtomS3 Lite uses the same IF0/IF1/IF2, reports, capability and shared executor,
 with no IF3/MSC, PSRAM or file handoff. Its board build defaults to extended
 pointer and rejects a legacy-pointer or MSC configuration. Its USB-HID PID is
-0x4004, bcdDevice 0x0102; Waveshare remains 0x4008 with MSC. Atom first install
+0x4004, bcdDevice 0x0103; Waveshare remains 0x4008 with MSC. Atom first install
 uses the board's 3 MiB factory slot at 0x10000 after exact-unit recovery proof;
 the Waveshare app-only procedure below does not apply to Atom. Static resource
 fit does not close Atom runtime TLS heap, USB attach or target-input gates.
 
-The existing personality PID is retained, with bcdDevice 0x0101 -> 0x0102.
+The existing personality PID is retained, with bcdDevice 0x0102 -> 0x0103 for
+pointer.5's added absolute-report pan byte (pointer.4 used 0x0102).
 No public PID allocation is requested by this lane. Microsoft's USB flags key
 includes VID, PID and revision, and revision participates in hardware IDs:
 [device registry](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-device-specific-registry-settings),
@@ -100,7 +103,7 @@ V1 parsers reject these records. Firmware validates the full V2 chunk, balanced
 button state and budgets before execution. New result is exactly 22 bytes:
 `command_id[16],result:u8,neutral_required:u8,neutral_mask:u8,effect_flags:u8,reason:u16LE`.
 This slice requires roles 0x03: keyboard and pointer only. Pointer proof requires
-matching **both** report 1 zero and report 4 buttons/wheel zero at the retained
+matching **both** report 1 zero and report 4 buttons/wheel/pan zero at the retained
 absolute position, after matching keyboard zero. Never zero absolute coordinates
 as a release side effect. A button-up similarly drains both report IDs before
 any following gesture. V2 neutral costs 30 ms, button-up 20 ms, click transfers
