@@ -605,7 +605,8 @@ impl Forwarder {
         }
     }
 
-    async fn fetch_view(&self, route: &Route, device: &str) -> Option<HolderView> {
+    /// The holder's own view of `device`; `Err` is the reason it is not a usable holder.
+    async fn fetch_view(&self, route: &Route, device: &str) -> Result<HolderView, String> {
         match self
             .exchange(
                 route,
@@ -618,10 +619,17 @@ impl Forwarder {
         {
             OwnerExchange::Response {
                 status: 200, body, ..
-            } => serde_json::from_slice::<HolderView>(&body)
-                .ok()
-                .filter(|view| view.holds(device)),
-            _ => None,
+            } => match serde_json::from_slice::<HolderView>(&body) {
+                Ok(view) if view.holds(device) => Ok(view),
+                Ok(_) => Err("holder_view.not_holding".to_owned()),
+                Err(_) => Err("holder_view.malformed".to_owned()),
+            },
+            OwnerExchange::Response { status, body, .. } => {
+                Err(holder_reason("holder_view", status, &body))
+            }
+            OwnerExchange::NotSent(reason) | OwnerExchange::Uncertain(reason) => {
+                Err(reason.to_owned())
+            }
         }
     }
 
@@ -648,10 +656,9 @@ impl Forwarder {
             };
             let view = match check {
                 RouteCheck::Failed(reason) => Err(reason),
-                RouteCheck::Verified | RouteCheck::Busy => self
-                    .fetch_view(&holder.route, &device)
-                    .await
-                    .ok_or_else(|| "holder_view.unavailable".to_owned()),
+                RouteCheck::Verified | RouteCheck::Busy => {
+                    self.fetch_view(&holder.route, &device).await
+                }
             };
             let mut state = self.state();
             match view {
@@ -723,7 +730,7 @@ impl Forwarder {
                     ) {
                         return None;
                     }
-                    let view = forwarder.fetch_view(&route, &device).await?;
+                    let view = forwarder.fetch_view(&route, &device).await.ok()?;
                     Some((device, route, view))
                 });
             }
@@ -802,6 +809,24 @@ impl Forwarder {
         }
     }
 
+    /// Passes a holder's answer through, logging it first when the holder refused the request.
+    fn answered(
+        &self,
+        device: &str,
+        route: &Route,
+        scope: &str,
+        status: u16,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    ) -> Response {
+        if status < 400 {
+            return passthrough(status, content_type, body);
+        }
+        let reason = holder_reason(scope, status, &body);
+        let response = passthrough(status, content_type, body);
+        self.failed(device, None, Some(route), &reason, response)
+    }
+
     /// Logs why forwarded work failed, as identifiers and a reason code only, and answers it.
     fn failed(
         &self,
@@ -838,8 +863,8 @@ impl Forwarder {
                     self.mark_verified(device, &route);
                     return Proven::Route(route);
                 }
-                RouteCheck::Busy => {
-                    if let Some(view) = self.fetch_view(&route, device).await {
+                RouteCheck::Busy => match self.fetch_view(&route, device).await {
+                    Ok(view) => {
                         let response = match view.active_command_id {
                             Some(active) => ApiError::busy(active),
                             None => ApiError::conflict("tailnet_route.busy"),
@@ -852,9 +877,11 @@ impl Forwarder {
                             response.into_response(),
                         ));
                     }
-                    self.forget_holder(device, &route, "holder_view.unavailable");
-                    lost = Some((route, "holder_view.unavailable".to_owned()));
-                }
+                    Err(reason) => {
+                        self.forget_holder(device, &route, &reason);
+                        lost = Some((route, reason));
+                    }
+                },
                 RouteCheck::Failed(reason) => {
                     self.forget_holder(device, &route, &reason);
                     lost = Some((route, reason));
@@ -1039,7 +1066,7 @@ impl Forwarder {
                     status,
                     content_type,
                     body,
-                } => passthrough(status, content_type, body),
+                } => self.answered(device, &route, "file", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
                     self.failed(device, None, Some(&route), reason, route_unavailable())
                 }
@@ -1244,7 +1271,7 @@ impl Forwarder {
                     status,
                     content_type,
                     body,
-                } => passthrough(status, content_type, body),
+                } => self.answered(device, &route, "control", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
                     self.failed(device, None, Some(&route), reason, route_unavailable())
                 }
@@ -1292,7 +1319,7 @@ impl Forwarder {
                     status,
                     content_type,
                     body,
-                } => passthrough(status, content_type, body),
+                } => self.answered(device, &route, "cancel", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
                     self.failed(device, None, Some(&route), reason, route_unavailable())
                 }
