@@ -19,8 +19,8 @@ class AtomPointerDescriptorTests(unittest.TestCase):
             "09025b000301008032"
             "0904000001030101040921110100012241000705810308000a"
             "0904010002030000050921110100012222000705020340000a0705820340000a"
-            "0904020001030000060921110100012287000705830308000a")
-        self.device = bytes.fromhex("12010002000000403a300440030101020301")
+            "090402000103000006092111010001228e000705830308000a")
+        self.device = bytes.fromhex("12010002000000403a300440040101020301")
 
     def test_three_interface_extended_personality(self):
         pointer.no_msc_usb_descriptors(self.config + self.device, self.report)
@@ -51,6 +51,32 @@ class AtomPointerDescriptorTests(unittest.TestCase):
                 with self.subTest(report=occurrence, offset=offset), self.assertRaises(SystemExit):
                     pointer.descriptor(bytes(bad))
 
+    def test_pointer6_descriptor_that_broke_macos_drag_is_rejected(self):
+        # Exact IF2 descriptor example-host's ioreg read from 0.3.0-pointer.6: its RelativePointer
+        # element group held report 4's buttons, so every held absolute move released.
+        live = bytes.fromhex(
+            "05010902a10185010901a1000509190129051500250175019505810275039501810305010930"
+            "093109381581257f750895038106050c0a380295018106c0c005010902a10185040901a10005"
+            "091901290515002501750195058102750395018103050109300931150026ff7f751095028102"
+            "09381581257f750895018106050c0a38028106c0c0")
+        with self.assertRaises(SystemExit):
+            pointer.descriptor(live)
+
+    def test_report4_wheel_and_pan_stay_outside_the_stylus_collection(self):
+        end = self.report.index(bytes.fromhex("c00938"))  # Stylus end, then report-4 wheel
+        moved = self.report[:end] + self.report[end + 1:-2] + bytes.fromhex("c0c0c0")
+        self.assertEqual(len(moved), len(self.report))
+        with self.assertRaises(SystemExit):
+            pointer.descriptor(moved)
+
+    def test_stylus_collection_identity_is_exact(self):
+        start = self.report.index(bytes.fromhex("050d0920a102"))
+        for offset in (1, 3, 5):
+            bad = bytearray(self.report)
+            bad[start + offset] ^= 1
+            with self.subTest(offset=offset), self.assertRaises(SystemExit):
+                pointer.descriptor(bytes(bad))
+
     def test_legacy_pointer_or_msc_is_rejected(self):
         for offset, value in ((4, 4), (72, 1), (73, 2), (82, 50)):
             bad = bytearray(self.config)
@@ -71,7 +97,7 @@ class AtomPointerDescriptorTests(unittest.TestCase):
             pointer.no_msc_usb_descriptors(self.config + self.device.replace(bytes.fromhex("0440"), bytes.fromhex("0840")), self.report)
 
     def test_old_revision_is_rejected(self):
-        for revision in (1, 2):
+        for revision in (1, 2, 3):
             bad = bytearray(self.device)
             bad[12] = revision
             with self.subTest(revision=revision), self.assertRaises(SystemExit):
