@@ -3496,7 +3496,8 @@ fn empty_command(sequence: u32) -> super::PlannedCommand {
         chunks: Vec::new(),
         action_count: 0,
         char_count: 0,
-        profile: "".to_owned(),
+        // Firmware before pointer.9 closes the session on a release whose profile hash differs.
+        profile: keyferry_layouts::LEGACY_WIRE_MAPPING.to_owned(),
         expires_at: std::time::Instant::now() + Duration::from_secs(1),
         arm_before_first: false,
         input: None,
