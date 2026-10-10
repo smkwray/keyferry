@@ -192,7 +192,7 @@ def main() -> int:
             "identity.mouse_relative_v1 =",
             "output_mode == keyferry::protocol::OutputMode::kUsbHid;",
             "Capability::kMouseRelativeV1)) != 0;",
-            "command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);",
+            "command_.BeginSession(epoch, peer_input_v1_, peer_input_v2_);",
         ),
         "HIL mouse dispatch",
     )

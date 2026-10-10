@@ -41,13 +41,16 @@ class CommandExecutor final {
                     HeldKeyDeadlineScheduler& watchdog,
                     const std::array<std::uint8_t, 32>& accepted_profile_hash);
 
-    void BeginSession(std::uint64_t epoch, std::uint32_t first_sequence,
-                      bool input_v1_enabled = false, bool input_v2_enabled = false);
+    void BeginSession(std::uint64_t epoch, bool input_v1_enabled = false,
+                      bool input_v2_enabled = false);
     void EndSession();
+    // Binds one arm to the frame with `command_sequence` (the frame after the ARM). The endpoint
+    // session alone owns sequence order; frames the executor never sees do not desynchronize it.
     bool CommandScopedArm(std::uint64_t epoch, std::uint32_t command_sequence);
 
-    // The caller supplies one authenticated COMMAND frame and a monotonic millisecond timestamp.
-    // True includes correlated rejection; false denotes a session/protocol fault.
+    // The caller supplies one in-order authenticated COMMAND frame and a monotonic millisecond
+    // timestamp. True includes every correlated rejection; false denotes a session fault: a stale
+    // epoch, a non-COMMAND frame, or a rejection that cannot name a command.
     bool HandleAuthenticated(std::uint64_t epoch, const protocol::DecodedFrame& frame,
                              std::uint64_t now_ms);
     void Poll(std::uint64_t now_ms);
@@ -61,7 +64,6 @@ class CommandExecutor final {
 
     [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] std::uint64_t epoch() const noexcept;
-    [[nodiscard]] std::uint32_t expected_sequence() const noexcept;
 
   private:
     enum class ActionKind : std::uint8_t { kReport, kWait, kRelease, kTap };
@@ -115,8 +117,7 @@ class CommandExecutor final {
     HeldKeyDeadlineScheduler& watchdog_;
     std::array<std::uint8_t, 32> accepted_profile_hash_{};
     std::uint64_t epoch_{0};
-    std::uint32_t expected_sequence_{0};
-    bool sequence_exhausted_{false};
+    std::uint32_t arm_sequence_{0};
     bool input_v1_enabled_{false};
     bool input_v2_enabled_{false};
     bool input_extended_{false};

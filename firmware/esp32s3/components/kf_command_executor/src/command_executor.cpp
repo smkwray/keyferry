@@ -49,8 +49,6 @@ protocol::ErrorCode ReplayError(const InputReplayDecision decision) {
         case InputReplayDecision::kConflict:
         case InputReplayDecision::kOutOfOrder:
             return protocol::ErrorCode::kDuplicate;
-        case InputReplayDecision::kWindowFull:
-            return protocol::ErrorCode::kReplayWindowFull;
         case InputReplayDecision::kInvalid:
             return protocol::ErrorCode::kMalformed;
         case InputReplayDecision::kAccepted:
@@ -69,16 +67,13 @@ CommandExecutor::CommandExecutor(hid::ExecutorState& hid, ResultSink& results,
       watchdog_(watchdog),
       accepted_profile_hash_(accepted_profile_hash) {}
 
-void CommandExecutor::BeginSession(const std::uint64_t epoch,
-                                   const std::uint32_t first_sequence,
-                                   const bool input_v1_enabled, const bool input_v2_enabled) {
+void CommandExecutor::BeginSession(const std::uint64_t epoch, const bool input_v1_enabled,
+                                   const bool input_v2_enabled) {
     EndSession();
     if (epoch == 0) {
         return;
     }
     epoch_ = epoch;
-    expected_sequence_ = first_sequence;
-    sequence_exhausted_ = false;
     input_v1_enabled_ = input_v1_enabled;
     input_v2_enabled_ = input_v2_enabled;
     command_arm_available_ = false;
@@ -116,8 +111,7 @@ void CommandExecutor::EndSession() {
     input_effect_flags_ = 0;
     command_arm_available_ = false;
     epoch_ = 0;
-    expected_sequence_ = 0;
-    sequence_exhausted_ = false;
+    arm_sequence_ = 0;
     input_v1_enabled_ = false;
     input_v2_enabled_ = false;
     hid_.disarm();
@@ -131,8 +125,7 @@ bool CommandExecutor::CommandScopedArm(const std::uint64_t epoch,
     if (!hid_.arm(epoch)) {
         return false;
     }
-    expected_sequence_ = command_sequence;
-    sequence_exhausted_ = false;
+    arm_sequence_ = command_sequence;
     command_arm_available_ = true;
     return true;
 }
@@ -140,7 +133,7 @@ bool CommandExecutor::CommandScopedArm(const std::uint64_t epoch,
 bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
                                           const protocol::DecodedFrame& frame,
                                           const std::uint64_t now_ms) {
-    if (epoch == 0 || epoch != epoch_ || sequence_exhausted_ ||
+    if (epoch == 0 || epoch != epoch_ ||
         frame.message_type != static_cast<std::uint8_t>(protocol::MessageType::kCommand)) {
         return false;
     }
@@ -149,16 +142,11 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
     if (frame.payload != nullptr && frame.payload_length >= command_id.size()) {
         std::copy_n(frame.payload, command_id.size(), command_id.begin());
     }
-    if (frame.sequence != expected_sequence_) {
-        if (!IsZeroId(command_id)) {
-            Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
-        }
-        return false;
-    }
-    if (expected_sequence_ == std::numeric_limits<std::uint32_t>::max()) {
-        sequence_exhausted_ = true;
-    } else {
-        ++expected_sequence_;
+    // An arm is consumed by the next frame, whatever it is; only that frame may use it.
+    const bool arm_bound = command_arm_available_ && frame.sequence == arm_sequence_;
+    if (command_arm_available_ && !arm_bound) {
+        command_arm_available_ = false;
+        hid_.disarm();
     }
 
     std::uint32_t valid_for_ms = 0;
@@ -168,10 +156,15 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
     if (frame.major != protocol::kMajor || frame.minor != protocol::kMinor || frame.flags != 0 ||
         !ParseEnvelope(frame, &command_id, &valid_for_ms, &kind, &body, &body_length) ||
         IsZeroId(command_id)) {
-        if (!IsZeroId(command_id)) {
-            Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
+        if (IsZeroId(command_id)) {
+            return false;
         }
-        return false;
+        if (!active_ && command_arm_available_) {
+            command_arm_available_ = false;
+            hid_.disarm();
+        }
+        Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
+        return true;
     }
 
     const bool extended = kind == static_cast<std::uint8_t>(protocol::CommandKind::kExecuteInputChunkV2) ||
@@ -585,10 +578,6 @@ std::uint64_t CommandExecutor::epoch() const noexcept {
     return epoch_;
 }
 
-std::uint32_t CommandExecutor::expected_sequence() const noexcept {
-    return expected_sequence_;
-}
-
 bool CommandExecutor::ParseEnvelope(const protocol::DecodedFrame& frame,
                                     std::array<std::uint8_t, 16>* command_id,
                                     std::uint32_t* valid_for_ms, std::uint8_t* kind,
@@ -599,12 +588,15 @@ bool CommandExecutor::ParseEnvelope(const protocol::DecodedFrame& frame,
     }
     std::copy_n(frame.payload, command_id->size(), command_id->begin());
     *valid_for_ms = ReadU32(frame.payload + 16);
+    *kind = frame.payload[52];
+    // A release carries no layout-dependent bytes; hosts send it with any profile hash.
+    const bool release = *kind == kReleaseAll || *kind == kReleaseInputAll ||
+                         *kind == static_cast<std::uint8_t>(protocol::CommandKind::kReleaseInputAllV2);
     if (*valid_for_ms == 0 || *valid_for_ms > kMaximumValidForMs ||
-        !std::equal(accepted_profile_hash_.begin(), accepted_profile_hash_.end(),
-                    frame.payload + 20)) {
+        (!release && !std::equal(accepted_profile_hash_.begin(), accepted_profile_hash_.end(),
+                                 frame.payload + 20))) {
         return false;
     }
-    *kind = frame.payload[52];
     *body_length = ReadU16(frame.payload + 53);
     if (*body_length != frame.payload_length - kCommandEnvelopeLength) {
         return false;

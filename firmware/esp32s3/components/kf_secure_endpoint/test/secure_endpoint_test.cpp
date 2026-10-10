@@ -500,8 +500,20 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   assert(effects.forwarded_count == 1 &&
          effects.last_forwarded_type == static_cast<std::uint8_t>(MessageType::kCommand));
 
+  // A settings request the runtime declines is answered BUSY on its sequence; the session lives.
+  effects.forward_ok = false;
+  const auto screen = Frame(MessageType::kSetScreenPower, 10, {1});
+  assert(session.ConsumeTls(screen.data(), screen.size()));
+  const auto busy = Decode(effects.sent, scratch);
+  assert(busy.message_type == static_cast<std::uint8_t>(MessageType::kError) &&
+         busy.sequence == 10 &&
+         busy.payload[0] == static_cast<std::uint8_t>(keyferry::protocol::ErrorCode::kBusy));
+  assert(session.authenticated() && effects.forwarded_count == 2);
+
+  // A COMMAND the executor reports as a session fault still fails closed.
+  const auto faulted = Frame(MessageType::kCommand, 11, {});
   const std::uint64_t authenticated_epoch = session.epoch();
-  assert(!session.ConsumeTls(command.data(), command.size()));
+  assert(!session.ConsumeTls(faulted.data(), faulted.size()));
   assert(!session.authenticated() && !effects.armed);
   assert(session.epoch() == authenticated_epoch + 1);
   const auto failed_epoch = session.epoch();
@@ -582,7 +594,7 @@ class StressEffects final : public FakeEffects, public keyferry::command::Result
     while (hid.report_needed()) Tick();
   }
   bool SessionAuthenticated(std::uint64_t epoch, const SessionReady&) override {
-    executor.BeginSession(epoch, 0, true, true);
+    executor.BeginSession(epoch, true, true);
     while (hid.report_needed()) Tick();
     return true;
   }

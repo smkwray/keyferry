@@ -216,8 +216,10 @@ policy               1 byte   # 0x01 command-scoped, 0x02 temporary, 0x03 always
 lease_ms             4 bytes  # little-endian
 ```
 
-Command-scoped arming is the required/default v1 mode and requires `lease_ms = 0`. It is consumed by
-one accepted command and is also cleared by disarm, session loss, reboot, or fault. Temporary arming
+Command-scoped arming is the required/default v1 mode and requires `lease_ms = 0`. It binds only the
+frame on the next sequence: that frame consumes it, and a `COMMAND` on any later sequence is a
+correlated `REJECTED`. It is also cleared by disarm, session loss, reboot, or fault. A command-scoped
+`ARM` the endpoint cannot honour now (output not yet neutral) returns `ERROR` `BUSY`. Temporary arming
 requires `lease_ms` in `1..=600000`. Always-ready is an explicit opt-in and requires `lease_ms = 0`.
 An endpoint may reject optional policies it has not qualified.
 
@@ -250,6 +252,10 @@ body                  N bytes
 Kinds are `0x01 EXECUTE_REPORT_CHUNK`, `0x02 CANCEL`, and `0x03 RELEASE_ALL`. The public daemon API
 accepts text/tap/chord, but the endpoint receives only raw report actions. Invalid auth, arm state,
 expiry, sequence, duplicate, size, capability, mode, or grammar rejects before executor dispatch.
+A rejection that names a command is a correlated `REJECTED` result on a live session; only a frame
+out of session order, or one naming no command, closes it. Release kinds carry no layout-dependent
+bytes, so the endpoint accepts them under any `profile_hash`. Settings requests (output mode,
+display orientation, screen power, bond reset) that cannot run now return `ERROR` `BUSY`.
 
 `valid_for_ms` is evaluated independently for each authenticated wire `COMMAND`. It prevents a
 queued chunk from starting stale; it is not the total-duration budget for a host-compiled sequence.

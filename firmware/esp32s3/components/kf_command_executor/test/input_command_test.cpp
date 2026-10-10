@@ -1,5 +1,6 @@
 #include "keyferry/input_command.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -93,7 +94,7 @@ void Parser_rejects_malformed_deferred_and_over_budget_chunks() {
     assert(!keyferry::command::ParseInputChunk(too_long.data(), too_long.size(), &parsed));
 }
 
-void Replay_window_is_non_evicting_and_orders_chunks() {
+void Replay_window_retains_recent_ids_and_orders_chunks() {
     InputReplayWindow window;
     assert(window.Admit(Id(1), 0, 3) == InputReplayDecision::kAccepted);
     assert(window.Admit(Id(1), 0, 3) == InputReplayDecision::kDuplicate);
@@ -103,11 +104,19 @@ void Replay_window_is_non_evicting_and_orders_chunks() {
     assert(window.Admit(Id(1), 2, 3) == InputReplayDecision::kDuplicate);
     assert(!window.Close(Id(99)));
     assert(window.Admit(Id(2), 1, 2) == InputReplayDecision::kOutOfOrder);
-    for (std::uint8_t value = 2; value <= 64; ++value) {
-        assert(window.Admit(Id(value), 0, 1) == InputReplayDecision::kAccepted);
+    // An unfinished ID cannot continue once a later ID is admitted.
+    assert(window.Admit(Id(2), 0, 2) == InputReplayDecision::kAccepted);
+    assert(window.Admit(Id(3), 0, 1) == InputReplayDecision::kAccepted);
+    assert(window.Admit(Id(2), 1, 2) == InputReplayDecision::kDuplicate);
+    // A long session never exhausts admission; the oldest closed ID leaves first.
+    for (unsigned value = 4; value <= 200; ++value) {
+        assert(window.Admit(Id(static_cast<std::uint8_t>(value)), 0, 1) ==
+               InputReplayDecision::kAccepted);
+        assert(window.size() == std::min<std::size_t>(value, 64));
     }
-    assert(window.size() == 64);
-    assert(window.Admit(Id(65), 0, 1) == InputReplayDecision::kWindowFull);
+    assert(window.Admit(Id(200), 0, 1) == InputReplayDecision::kDuplicate);
+    assert(window.Admit(Id(137), 0, 1) == InputReplayDecision::kDuplicate);
+    assert(window.Admit(Id(136), 0, 1) == InputReplayDecision::kAccepted);
     window.Reset();
     assert(window.size() == 0);
 }
@@ -178,7 +187,7 @@ int main() {
     Parses_the_canonical_cross_language_body();
     Movement_splitting_is_exact_and_never_emits_negative_128();
     Parser_rejects_malformed_deferred_and_over_budget_chunks();
-    Replay_window_is_non_evicting_and_orders_chunks();
+    Replay_window_retains_recent_ids_and_orders_chunks();
     Encodes_the_exact_evidence_result_vector_and_rejects_dishonest_results();
     std::cout << "input_command_test: ok\n";
     return 0;

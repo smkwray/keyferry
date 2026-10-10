@@ -543,6 +543,17 @@ bool EndpointSession::HandleAuthenticated(const protocol::DecodedFrame& frame) {
     } else {
       handled = effects_.AuthenticatedFrame(epoch_, frame);
     }
+  } else if (type == protocol::MessageType::kGetOutputMode ||
+             type == protocol::MessageType::kSetOutputMode ||
+             type == protocol::MessageType::kResetBleHidBond ||
+             type == protocol::MessageType::kGetDisplayOrientation ||
+             type == protocol::MessageType::kSetDisplayOrientation ||
+             type == protocol::MessageType::kGetScreenPower ||
+             type == protocol::MessageType::kSetScreenPower) {
+    // A settings request the runtime cannot take now (output not neutral, a status still
+    // queued) is a correlated rejection the host reports, not a reason to drop the link.
+    handled = effects_.AuthenticatedFrame(epoch_, frame) ||
+              SendError(frame, static_cast<std::uint16_t>(protocol::ErrorCode::kBusy));
   } else {
     handled = effects_.AuthenticatedFrame(epoch_, frame);
   }

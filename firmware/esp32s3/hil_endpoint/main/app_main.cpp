@@ -853,7 +853,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
         (ready.capability_mask &
          static_cast<std::uint32_t>(
              keyferry::protocol::Capability::kMouseRelativeV1)) != 0;
-    command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);
+    command_.BeginSession(epoch, peer_input_v1_, peer_input_v2_);
     Unlock();
     return true;
   }
@@ -884,7 +884,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     const bool matched = epoch != 0 && epoch == authenticated_epoch_;
     if (matched) {
       command_.EndSession();
-      command_.BeginSession(epoch, 0, peer_input_v1_, peer_input_v2_);
+      command_.BeginSession(epoch, peer_input_v1_, peer_input_v2_);
       disarm_waiting_ = true;
     }
     Unlock();
