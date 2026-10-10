@@ -88,7 +88,13 @@ class ExecutorState final {
     // Must be selected before the USB transport is made ready. The default remains keyboard-only.
     bool enable_mouse_interface() noexcept;
     bool enable_extended_pointer() noexcept;
+    // Report 4 only: no relative motion, and buttons, wheel, pan and releases all ride the
+    // absolute report at the retained position (macOS absolute drag).
+    bool enable_absolute_pointer() noexcept;
     [[nodiscard]] bool extended_pointer_enabled() const noexcept;
+    [[nodiscard]] bool absolute_pointer_only() const noexcept;
+    // True once an absolute move was accepted; buttons, wheel and pan need that position.
+    [[nodiscard]] bool pointer_position_known() const noexcept;
     // Arming is rejected until the transport has accepted the mandatory zero report.
     bool arm(std::uint64_t epoch) noexcept;
     SubmitResult submit(std::uint64_t epoch, const BootKeyboardReport& report) noexcept;
@@ -114,10 +120,12 @@ class ExecutorState final {
 
   private:
     void request_release() noexcept;
+    [[nodiscard]] PointerReport mouse_zero() const noexcept;
 
     bool transport_ready_{false};
     bool mouse_enabled_{false};
     bool extended_pointer_{false};
+    bool absolute_only_{false};
     bool release_absolute_pending_{false};
     // Report 4 may carry a button the host has not yet seen released. Only then does a release
     // barrier send report 4: its coordinates would otherwise reposition the cursor.

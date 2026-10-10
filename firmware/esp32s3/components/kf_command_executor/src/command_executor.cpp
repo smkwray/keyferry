@@ -57,6 +57,28 @@ protocol::ErrorCode ReplayError(const InputReplayDecision decision) {
     return protocol::ErrorCode::kInternal;
 }
 
+// An absolute-only pointer has no relative report, and a press, wheel or pan rides report 4 at
+// a position already set this boot. Reject such chunks before ARM rather than fail mid-chunk.
+protocol::ErrorCode AbsolutePointerChunkError(const ParsedInputChunk& chunk, bool position_known) {
+    for (std::size_t index = 0; index < chunk.action_count; ++index) {
+        switch (chunk.actions[index].kind) {
+            case InputActionKind::kMouseMove:
+                return protocol::ErrorCode::kCapabilityRequired;
+            case InputActionKind::kPointerAbsolute:
+                position_known = true;
+                break;
+            case InputActionKind::kMouseClick:
+            case InputActionKind::kPointerDown:
+            case InputActionKind::kPointerScroll:
+                if (!position_known) { return protocol::ErrorCode::kInvalidMode; }
+                break;
+            default:
+                break;
+        }
+    }
+    return kNoInputError;
+}
+
 }  // namespace
 
 CommandExecutor::CommandExecutor(hid::ExecutorState& hid, ResultSink& results,
@@ -233,6 +255,13 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         if (active_) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kBusy, clear_arm);
             return true;
+        }
+        if (hid_.absolute_pointer_only()) {
+            const auto error = AbsolutePointerChunkError(parsed, hid_.pointer_position_known());
+            if (error != kNoInputError) {
+                RejectInput(command_id, frame.sequence, error, clear_arm);
+                return true;
+            }
         }
         if (!command_arm_available_ || !hid_.armed()) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kNotArmed, clear_arm);

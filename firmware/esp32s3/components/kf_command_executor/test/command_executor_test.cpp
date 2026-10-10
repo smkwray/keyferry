@@ -824,9 +824,85 @@ void Extended_button_up_drains_both_ids_before_a_following_click() {
     assert(!hid.armed());
 }
 
+// The absolute-only personality (macOS) declares report 4 alone: a drag's press, held move,
+// release and terminal neutral all ride report 4, and report 1 is never emitted.
+void Absolute_only_drag_never_emits_report1() {
+    keyferry::hid::ExecutorState hid;
+    Results results; Watchdog watchdog;
+    CommandExecutor executor(hid, results, watchdog, kProfileHash);
+    assert(hid.enable_absolute_pointer()); hid.on_transport_ready();
+    std::uint64_t now = 0;
+    std::array<std::uint8_t, 8> wire{};
+    auto accept = [&]() {
+        now += 10;
+        if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) {
+            executor.UsbReportAccepted(hid.desired_report(), now);
+        } else {
+            assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
+            executor.UsbMouseReportAccepted(hid.desired_mouse_report(), hid.desired_mouse_logical_token(), now);
+        }
+    };
+    accept(); accept();
+    executor.BeginSession(7, false, true); accept(); accept();
+    assert(executor.CommandScopedArm(7, 2));
+    const auto payload = Envelope(Id(87),5000,7,{0,0,1,0,8,4,0x34,0x12,0x45,0x23,10,1,1,
+        8,4,0x56,0x34,0x67,0x45,2,2,40,0,11,1,1,7,0});
+    assert(executor.HandleAuthenticated(7,Frame(2,payload),now));
+    accept();  // start position
+    for (const auto& expected : {std::array<std::uint8_t, 8>{4,1,0x34,0x12,0x45,0x23,0,0},
+                                 std::array<std::uint8_t, 8>{4,1,0x56,0x34,0x67,0x45,0,0}}) {
+        assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
+        assert(wire == expected);
+        accept();
+    }
+    executor.Poll(now + 39); assert(!hid.report_needed());
+    executor.Poll(now + 40); now += 40;
+    assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
+    assert((wire == std::array<std::uint8_t, 8>{4,0,0x56,0x34,0x67,0x45,0,0}));
+    while (hid.report_needed()) { accept(); }  // terminal neutral: keyboard zero, report-4 zero
+    assert((wire == std::array<std::uint8_t, 8>{4,0,0x56,0x34,0x67,0x45,0,0}));
+    assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
+    assert(results.input_events.back().evidence.neutral_mask == 3);
+    std::cout << "absolute-only drag: down=[04 01 34 12 45 23 00 00]; move=[04 01 56 34 67 45 00 00]; up=[04 00 56 34 67 45 00 00]; no report 1\n";
+}
+
+// Relative motion has no report, and before any absolute move a press or scroll would have to
+// invent a position: both reject before ARM with a correlated reason, never mid-chunk.
+void Absolute_only_rejects_relative_and_unpositioned_chunks_before_arm() {
+    for (const auto& body : {std::vector<std::uint8_t>{0,0,1,0,5,4,40,0,0,0,7,0},
+                             std::vector<std::uint8_t>{0,0,1,0,6,5,1,40,0,40,0,7,0},
+                             std::vector<std::uint8_t>{0,0,1,0,9,2,1,0,7,0},
+                             std::vector<std::uint8_t>{0,0,1,0,8,4,0,0,0,0,5,4,40,0,0,0,7,0}}) {
+        keyferry::hid::ExecutorState hid;
+        Results results; Watchdog watchdog;
+        CommandExecutor executor(hid, results, watchdog, kProfileHash);
+        assert(hid.enable_absolute_pointer()); hid.on_transport_ready();
+        auto accept = [&]() {
+            if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) {
+                executor.UsbReportAccepted(hid.desired_report(), 0);
+            } else {
+                executor.UsbMouseReportAccepted(hid.desired_mouse_report(), 0, 0);
+            }
+        };
+        accept(); accept();
+        executor.BeginSession(7, false, true); accept(); accept();
+        assert(executor.CommandScopedArm(7, 2));
+        assert(executor.HandleAuthenticated(7, Frame(2, Envelope(Id(88), 5000, 7, body)), 10));
+        const auto& evidence = results.input_events.back().evidence;
+        assert(evidence.result == ResultCode::kRejected);
+        const bool relative = body[4] == 5 || body.size() == 18;
+        assert(evidence.reason == (relative ? ErrorCode::kCapabilityRequired : ErrorCode::kInvalidMode));
+        assert(!hid.armed());
+        while (hid.report_needed()) { accept(); }
+        assert(hid.desired_mouse_report().buttons == 0 && hid.current_mouse_report().buttons == 0);
+    }
+}
+
 }  // namespace
 
 int main() {
+    Absolute_only_drag_never_emits_report1();
+    Absolute_only_rejects_relative_and_unpositioned_chunks_before_arm();
     Extended_scroll_bytes_follow_positioning_collection();
     Extended_click_bytes_preserve_position_and_separate_edges();
     Extended_drag_bytes_keep_buttons_with_absolute_coordinates();

@@ -22,6 +22,8 @@ param(
 
     [switch]$PointerExtended,
 
+    [switch]$PointerAbsoluteOnly,
+
     [string]$BaselineDir = '',
 
     [ValidateRange(0, 256)]
@@ -121,7 +123,8 @@ try {
     $mscMemoryArg = if ($MscMemoryProbe) { 'ON' } else { 'OFF' }
     $fileHandoffArg = if ($FileHandoff) { 'ON' } else { 'OFF' }
     $resourceOnlyArg = if ($ResourceOnly) { 'ON' } else { 'OFF' }
-    $pointerExtendedArg = if ($PointerExtended -or $BoardProfile -eq 'm5stack_atoms3_lite') { 'ON' } else { 'OFF' }
+    $pointerExtendedArg = if ($PointerExtended -or $PointerAbsoluteOnly -or $BoardProfile -eq 'm5stack_atoms3_lite') { 'ON' } else { 'OFF' }
+    $pointerAbsoluteOnlyArg = if ($PointerAbsoluteOnly) { 'ON' } else { 'OFF' }
     $cacheArgument = if ($NoCcache) { '--no-ccache' } else { '--ccache' }
     idf.py $cacheArgument -C firmware/esp32s3/hil_endpoint -B $BuildDir `
         "-DKEYFERRY_BOARD=$BoardProfile" `
@@ -132,6 +135,7 @@ try {
         "-DKEYFERRY_MSC_MEMORY_PROBE=$mscMemoryArg" `
         "-DKEYFERRY_FILE_HANDOFF=$fileHandoffArg" `
         "-DKEYFERRY_POINTER_EXTENDED=$pointerExtendedArg" `
+        "-DKEYFERRY_POINTER_ABSOLUTE_ONLY=$pointerAbsoluteOnlyArg" `
         @privateHeaderArgument build
     if ($LASTEXITCODE -ne 0) { throw 'First-HIL firmware build failed.' }
     if ($FileHandoff) {
