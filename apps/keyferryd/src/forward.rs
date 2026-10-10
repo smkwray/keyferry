@@ -405,7 +405,7 @@ impl Forwarder {
     }
 
     pub(crate) async fn capture_prove_device(self: &Arc<Self>, device: &str) -> bool {
-        matches!(self.prove_holder(device, None).await, Proven::Route(_))
+        matches!(self.prove_holder(device).await, Proven::Route(_))
     }
 
     pub(crate) async fn capture_frame(
@@ -842,37 +842,30 @@ impl Forwarder {
         }
         let reason = holder_reason(scope, status, &body);
         let response = passthrough(status, content_type, body);
-        self.failed(device, None, Some(route), &reason, response)
+        self.failed(device, Some(route), &reason, response)
     }
 
-    /// Logs why forwarded work failed, as identifiers and a reason code only, and answers it.
+    /// Logs route failure metadata, never a command identifier or payload, and answers it.
     fn failed(
         &self,
         device: &str,
-        command_id: Option<Uuid>,
         route: Option<&Route>,
         reason: &str,
         response: Response,
     ) -> Response {
-        log_failure(
-            device,
-            command_id,
-            route,
-            response.status().as_u16(),
-            reason,
-        );
+        log_failure(device, route, response.status().as_u16(), reason);
         response
     }
 
     /// Finds the holder for new work and proves it now. A stale holder is forgotten and the
     /// search repeats once; no request reaches any holder before its proof verifies.
-    async fn prove_holder(self: &Arc<Self>, device: &str, command_id: Option<Uuid>) -> Proven {
+    async fn prove_holder(self: &Arc<Self>, device: &str) -> Proven {
         let mut lost: Option<(Route, String)> = None;
         for _ in 0..2 {
             let Some(route) = self.locate(device).await else {
                 // No holder is known now; the local handler answers as without forwarding.
                 if let Some((route, reason)) = &lost {
-                    log_failure(device, command_id, Some(route), "local", reason);
+                    log_failure(device, Some(route), "local", reason);
                 }
                 return Proven::Local;
             };
@@ -889,7 +882,6 @@ impl Forwarder {
                         };
                         return Proven::Refused(self.failed(
                             device,
-                            command_id,
                             Some(&route),
                             "route_proof.busy",
                             response.into_response(),
@@ -907,13 +899,7 @@ impl Forwarder {
             }
         }
         let (route, reason) = lost.expect("two located holders failed");
-        Proven::Refused(self.failed(
-            device,
-            command_id,
-            Some(&route),
-            &reason,
-            route_unavailable(),
-        ))
+        Proven::Refused(self.failed(device, Some(&route), &reason, route_unavailable()))
     }
 
     async fn overlay(self: &Arc<Self>, views: &mut [DeviceView]) {
@@ -1065,7 +1051,7 @@ impl Forwarder {
         if daemon.local_link_authenticated(device) {
             return None;
         }
-        let route = match self.prove_holder(device, None).await {
+        let route = match self.prove_holder(device).await {
             Proven::Route(route) => route,
             Proven::Local => return None,
             Proven::Refused(response) => return Some(response),
@@ -1086,10 +1072,10 @@ impl Forwarder {
                     body,
                 } => self.answered(device, &route, "file", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Uncertain(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                    self.failed(device, Some(&route), reason, route_uncertain(None))
                 }
             },
         )
@@ -1116,7 +1102,6 @@ impl Forwarder {
                 if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
                     return Some(self.failed(
                         device,
-                        Some(command_id),
                         Some(&pin.route),
                         &reason,
                         route_unavailable(),
@@ -1128,7 +1113,7 @@ impl Forwarder {
                 if daemon.local_link_authenticated(device) {
                     return None;
                 }
-                match self.prove_holder(device, Some(command_id)).await {
+                match self.prove_holder(device).await {
                     Proven::Route(route) => (route, true),
                     Proven::Local => return None,
                     Proven::Refused(response) => return Some(response),
@@ -1148,13 +1133,7 @@ impl Forwarder {
                     if new_pin {
                         self.unpin_command(command_id);
                     }
-                    self.failed(
-                        device,
-                        Some(command_id),
-                        Some(&route),
-                        reason,
-                        route_unavailable(),
-                    )
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Response {
                     status,
@@ -1166,7 +1145,7 @@ impl Forwarder {
                     }
                     let reason = holder_reason("command", status, &body);
                     let response = passthrough(status, content_type, body);
-                    self.failed(device, Some(command_id), Some(&route), &reason, response)
+                    self.failed(device, Some(&route), &reason, response)
                 }
                 OwnerExchange::Response {
                     status,
@@ -1189,7 +1168,6 @@ impl Forwarder {
                             self.mark_unknown(command_id);
                             self.failed(
                                 device,
-                                Some(command_id),
                                 Some(&route),
                                 reason,
                                 unknown_command(command_id, device, StatusCode::ACCEPTED),
@@ -1224,13 +1202,9 @@ impl Forwarder {
                 OwnerExchange::NotSent(_) | OwnerExchange::Uncertain(_) if pin.unknown => {
                     unknown_command(command_id, device, StatusCode::OK)
                 }
-                OwnerExchange::NotSent(reason) | OwnerExchange::Uncertain(reason) => self.failed(
-                    device,
-                    Some(command_id),
-                    Some(&pin.route),
-                    reason,
-                    route_unavailable(),
-                ),
+                OwnerExchange::NotSent(reason) | OwnerExchange::Uncertain(reason) => {
+                    self.failed(device, Some(&pin.route), reason, route_unavailable())
+                }
             },
         )
     }
@@ -1248,7 +1222,7 @@ impl Forwarder {
         }
         // Disarm needs no proof on the holder and must work while a command runs there.
         let route = if segment != "disarm" {
-            match self.prove_holder(device, None).await {
+            match self.prove_holder(device).await {
                 Proven::Route(route) => route,
                 Proven::Local => return None,
                 Proven::Refused(response) => return Some(response),
@@ -1291,13 +1265,13 @@ impl Forwarder {
                     body,
                 } => self.answered(device, &route, "control", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Uncertain(reason) if method == Method::GET => {
-                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Uncertain(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                    self.failed(device, Some(&route), reason, route_uncertain(None))
                 }
             },
         )
@@ -1339,10 +1313,10 @@ impl Forwarder {
                     body,
                 } => self.answered(device, &route, "cancel", status, content_type, body),
                 OwnerExchange::NotSent(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Uncertain(reason) => {
-                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                    self.failed(device, Some(&route), reason, route_uncertain(None))
                 }
             },
         )
@@ -1385,7 +1359,6 @@ impl Forwarder {
                 if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
                     return Some(self.failed(
                         device,
-                        None,
                         Some(&pin.route),
                         &reason,
                         route_unavailable(),
@@ -1397,7 +1370,7 @@ impl Forwarder {
                 if daemon.local_link_authenticated(device) {
                     return None;
                 }
-                let route = match self.prove_holder(device, None).await {
+                let route = match self.prove_holder(device).await {
                     Proven::Route(route) => route,
                     Proven::Local => return None,
                     Proven::Refused(response) => return Some(response),
@@ -1405,7 +1378,6 @@ impl Forwarder {
                 let Some(epoch) = self.remote_epoch(&route).await else {
                     return Some(self.failed(
                         device,
-                        None,
                         Some(&route),
                         "holder_epoch.unavailable",
                         route_unavailable(),
@@ -1428,7 +1400,7 @@ impl Forwarder {
                     if new_pin {
                         self.unpin_stream(job);
                     }
-                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                    self.failed(device, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Response {
                     status,
@@ -1445,9 +1417,7 @@ impl Forwarder {
                         Some((content_type, body)) => {
                             local_receipt(201, content_type, body, &remote_epoch, &local_epoch)
                         }
-                        None => {
-                            self.failed(device, None, Some(&route), reason, route_uncertain(None))
-                        }
+                        None => self.failed(device, Some(&route), reason, route_uncertain(None)),
                     }
                 }
             },
@@ -1510,13 +1480,7 @@ impl Forwarder {
         };
         if needs_proof {
             if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
-                return Some(self.failed(
-                    device,
-                    None,
-                    Some(&pin.route),
-                    &reason,
-                    route_unavailable(),
-                ));
+                return Some(self.failed(device, Some(&pin.route), &reason, route_unavailable()));
             }
         }
         let path = format!("/v1/devices/{device}/text-streams/{job}{suffix}");
@@ -1530,7 +1494,7 @@ impl Forwarder {
                 body,
             } => local_receipt(status, content_type, body, &pin.remote_epoch, &local_epoch),
             OwnerExchange::NotSent(reason) => {
-                self.failed(device, None, Some(&pin.route), reason, route_unavailable())
+                self.failed(device, Some(&pin.route), reason, route_unavailable())
             }
             OwnerExchange::Uncertain(reason) => {
                 // After a lost part or finish response, report the holder's receipt only when it
@@ -1561,7 +1525,6 @@ impl Forwarder {
                     }
                     None => self.failed(
                         device,
-                        None,
                         Some(&pin.route),
                         reason,
                         route_uncertain(child_command_id),
@@ -1915,17 +1878,10 @@ fn passthrough(status: u16, content_type: Option<String>, body: Vec<u8>) -> Resp
     response
 }
 
-/// Why forwarded work failed, as identifiers and a reason code only.
-fn log_failure(
-    device: &str,
-    command_id: Option<Uuid>,
-    route: Option<&Route>,
-    status: impl std::fmt::Display,
-    reason: &str,
-) {
+/// Connection/route failure metadata; execution identifiers and payloads stay in memory.
+fn log_failure(device: &str, route: Option<&Route>, status: impl std::fmt::Display, reason: &str) {
     crate::daemon_log!(
-        "forwarding failed: device={device} command_id={} holder={} status={status} reason={reason}",
-        command_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+        "forwarding failed: device={device} holder={} status={status} reason={reason}",
         route.map_or_else(|| "none".to_owned(), holder_name),
     );
 }

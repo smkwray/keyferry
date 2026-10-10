@@ -71,6 +71,48 @@ fn dispatch_lifecycle_schema_and_duplicate_id_no_replay() {
 }
 
 #[test]
+fn images_are_opt_in_and_save_path_is_rejected_before_capture() {
+    let listed = tools();
+    for name in [
+        "move",
+        "click",
+        "drag",
+        "scroll",
+        "key",
+        "type_text",
+        "batch",
+        "routine_run",
+    ] {
+        let schema = &listed.iter().find(|t| t["name"] == name).unwrap()["inputSchema"];
+        assert_eq!(schema["properties"]["return_screenshot"]["default"], false);
+    }
+    let mut s = server();
+    init(&mut s);
+    let c = AtomicBool::new(false);
+    let output = s.root.join("must-not-save.png");
+    let result = s
+        .dispatch(
+            json!({"jsonrpc":"2.0","id":"save-frame","method":"tools/call","params":{"name":"screenshot","arguments":{"save_path":output}}}),
+            &c,
+        )
+        .unwrap();
+    assert_eq!(result["result"]["isError"], true);
+    assert_eq!(
+        result["result"]["structuredContent"]["error"]["code"],
+        "input.tool_arguments"
+    );
+    assert_eq!(
+        s.frames.next, 0,
+        "invalid persistence request must not capture"
+    );
+    assert!(!output.exists());
+    assert!(
+        !s.root.exists(),
+        "invalid persistence request must not create state"
+    );
+}
+
+#[test]
 fn mapping_letterbox_scale_and_overscan() {
     let f = frame(320, 240, 1);
     let samples = vec![
@@ -128,9 +170,9 @@ fn native_fit_binds_the_agent_view_at_matching_pixel_centres() {
 
 #[test]
 fn cursor_differencing_synthetic_and_ambiguity() {
-    let a = cursor_frame([0.1, 0.1], 1);
-    let b = cursor_frame([0.7, 0.2], 2);
-    let c = cursor_frame([0.3, 0.8], 3);
+    let a = cursor_frame(FAKE_AREA, [0.1, 0.1], 1);
+    let b = cursor_frame(FAKE_AREA, [0.7, 0.2], 2);
+    let c = cursor_frame(FAKE_AREA, [0.3, 0.8], 3);
     let mask = frames::MotionMask::new(&a);
     assert_eq!(geometry::cursor(&a, &b, &c, &mask).unwrap(), [216.0, 66.0]);
     assert_eq!(
@@ -544,4 +586,29 @@ fn input_rejections_and_unknown_keys_have_actionable_messages() {
         .as_str()
         .unwrap()
         .contains("keyctl keys"));
+}
+
+#[test]
+fn cursor_seed_is_paired_and_unknown_position_is_actionable() {
+    assert_eq!(observed_cursor(&json!({})).unwrap(), None);
+    assert_eq!(
+        observed_cursor(&json!({"cursor_x":10,"cursor_y":20})).unwrap(),
+        Some([10.0, 20.0])
+    );
+    for args in [json!({"cursor_x":10}), json!({"cursor_y":20})] {
+        assert_eq!(
+            observed_cursor(&args).unwrap_err()["code"],
+            "pointer.cursor_pair_required"
+        );
+    }
+    let message = failure("pointer.position_required")["message"].clone();
+    let message = message.as_str().unwrap();
+    assert!(message.contains("fresh screenshot") && message.contains("cursor_x/cursor_y"));
+    let listed = tools();
+    let schema = &listed.iter().find(|t| t["name"] == "calibrate").unwrap()["inputSchema"];
+    assert!(validate(
+        &json!({"mode":"screen","cursor_x":10,"cursor_y":20}),
+        schema
+    ));
+    assert!(!validate(&json!({"cursor_x":-1,"cursor_y":20}), schema));
 }

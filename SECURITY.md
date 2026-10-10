@@ -125,7 +125,10 @@ phrases, or a general-purpose secret vault on the dongle.
    and four camera streams. Discovery is cached for ten seconds and remote discovery waits at most
    four seconds. Missing sources, stale frames, invalid sizes and offline peers fail explicitly.
    Region/scale and OCR are read-only; they never arm, send HID or weaken input admission. Owner
-   clients can retain screens/OCR after receipt, including in agent conversations.
+   clients can retain screens/OCR after receipt, including in agent conversations. MCP actions,
+   batches and routines return images only on explicit request; `screenshot` returns an image
+   without a disk-saving option. Client/provider transcripts can also retain tool arguments and
+   submitted keystrokes/text. Server memory-only handling cannot enforce client/provider retention.
 6. **USB administration:** nonce-bound HMAC under a random 256-bit administrative recovery secret.
 7. **Execution safety:** one active host sequence and one bounded endpoint chunk, one writer,
    daemon-atomic route-proof/command-scoped-arm/first-command ordering, cancellation between reports,
@@ -250,6 +253,9 @@ not a security proof.
 - Command diagnostics are off by default. An explicit live subscriber may receive bounded metadata
   identifying device, caller, command ID, counts, timing, and result; text and secret bodies remain
   prohibited. Minimum transient outcome/deduplication state is never exposed as history.
+- Persistent service logs contain lifecycle/connection diagnostics, never execution identifiers or
+  an input history. MCP pointer position is transient session state; calibration geometry alone is
+  persistent configuration. Saved reusable recipes are owner-allowed configuration, not run history.
 - Mixed input plans use one daemon-owned writer, command-scoped arming, bounded atomic gestures,
   and a capability-gated result with separately correlated keyboard/mouse neutral evidence. Pointer
   paths, coordinates, button/key lists, and low-entropy plan hashes are payload and never logged.

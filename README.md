@@ -267,7 +267,7 @@ aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_
 
 `keyctl mcp` exposes a
 [stdio MCP server](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-with newline-delimited JSON-RPC, tool discovery, PNG images and structured results. It creates no
+with newline-delimited JSON-RPC, tool discovery, bounded JPEG/PNG images and structured results. It creates no
 listener and never opens/restarts the controller app. Start the installed controller normally;
 input uses its existing token and sole daemon command writer. Install FFmpeg on the controllers
 with capture cards and grant Camera permission on macOS.
@@ -315,8 +315,9 @@ are memory-only, PNG is bounded to 8 MiB and response JSON to about 11.7 MiB. A 
 read at a time, at most ten frame requests/second and four capture streams. MCP uses full-frame
 geometry; direct API callers must account for region/scale before driving a pointer.
 
-First call `status`, then `calibrate` on a static, harmless approved target, then take a fresh
-`screenshot` before pointer input. The target HDMI output must be its only display or mirror the main
+First call `status` and `screenshot`, locate the cursor tip, then call `calibrate` with its
+`cursor_x,cursor_y` on a static, harmless approved target. Use `mode:"screen"` to bind without
+movement. Take a fresh `screenshot` before subsequent pointer input. The target HDMI output must be its only display or mirror the main
 display. Calibration sends eight absolute pointer probes (no clicks), isolates the cursor in
 three-frame differences, fits independent affine axes and verifies another position. It handles
 letterbox/pillarbox, scaling and modest overscan. Animation, ambiguous/missing cursor, rotated axes or
@@ -328,8 +329,8 @@ the user's Keyferry state directory. Persisted geometry is inspectable; each new
 binding. Resolution changes or capture restarts invalidate binding and require a fresh screenshot.
 Recalibrate after any HDMI/display arrangement or stick/target change, even at the same resolution.
 Coordinates are **screenshot pixels**, mapped to normalized HID and rounded to 0..32767 by the existing
-compiler; points outside the measured active rectangle reject. The equivalent CLI is
-`keyctl capture calibrate DEVICE [--source CAPTURE]`.
+compiler; points outside the measured active rectangle reject. Calibration is session-scoped
+through MCP so the observed cursor and its capture stay together.
 
 Pointer tools refuse devices without authenticated `POINTER_EXTENDED_V1` (0x08000000); keyboard tools
 remain available. Explicit per-call `uncalibrated:true` bypasses binding and uses full-frame linear
@@ -338,7 +339,7 @@ accepts the risk of driving a different target or a cropped/scaled display.
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
-| `screenshot` | optional `save_path` (new file only) | PNG image, screenshot/native geometry, frame ID/age and capture status |
+| `screenshot` | optional `format` = jpeg/png | image (JPEG by default), screenshot/native geometry, frame ID/age and capture status; no file export |
 | `move` | integer `x,y`; optional `uncalibrated` | absolute move receipt |
 | `click` | `x,y`; optional `button` = left/right/middle, `double`, `uncalibrated` | move then single/double click receipt |
 | `drag` | `from_x,from_y,to_x,to_y`; optional `button`, `uncalibrated` | balanced atomic drag, 40 ms hold |
@@ -348,7 +349,7 @@ accepts the risk of driving a different target or a cropped/scaled display.
 | `wait_for_stable` | `timeout_ms` (1..30000); optional `region` | matched after at least 3 fresh frames below 0.002 mean normalized RGB difference for 300 ms; otherwise timed_out |
 | `wait_for_change` | same | matched above 0.01 mean difference from the initial frame; otherwise timed_out |
 | `find_text` | optional `query` | capture-controller OCR line boxes in screenshot pixels, case-insensitive substring filter |
-| `calibrate` | none | verified binding, mapping and probe receipts; persists geometry only |
+| `calibrate` | optional `mode` = probe/screen, observed `cursor_x,cursor_y` | binding and mapping; fresh sessions require the observed cursor position before any pointer motion; persists geometry only |
 | `status` | none | chosen device/source, selection reasons, authenticated state, capture errors/restarts and binding |
 | `list_devices` / `select_device` | none / exact `device` UUID | authorized inventory / choose authenticated stick and clear binding |
 | `list_capture_sources` / `select_capture_source` | none / exact `source` ID | local/remote inventory / choose capture source and clear binding |
@@ -365,6 +366,18 @@ exists. Failed/possible-start UNKNOWN results return `isError:true` with command
 Inspect/reconcile uncertain outcomes; never replay them. `EMITTED` proves emission, not visible target
 behavior. MCP cancellation reaches the existing daemon cancellation mechanism.
 
+Actions, batches and routines return receipts and observation metadata by default, without an
+image. Internal fresh-frame observation and settling still run. Use `return_screenshot:true` on
+the final action of a UI stretch, or call `screenshot` when a visual decision needs it; avoid both
+for the same checkpoint. Neither emission nor `settled:true` proves the intended application
+result. Wait tools and OCR can check intermediate steps without adding images to the conversation.
+
+The current pointer position stays in session memory. After starting a session or changing sticks,
+take a screenshot and supply its observed cursor tip as `cursor_x,cursor_y` to `calibrate`. Never
+guess a starting position. Without it, pointer input and probe calibration refuse before sending
+input; `mode:"screen"` can still bind without motion. This replaces the saved-position/centre-jump
+fallback and preserves glides from the observed position.
+
 One continuous ffmpeg pipe of unfiltered PNG frames retains the latest RGB frame, scaled
 proportionally to at most 1920 pixels on each axis; recognized cards stream a pinned native mode
 from one table (the Hagibis MS2130: 1920x1080 YUYV at 30 fps). MCP screenshots, OCR boxes, pointer
@@ -374,8 +387,16 @@ and restart after backoff; counters remain visible. A stalled stream is a captur
 stable screen. Capture children belong to the daemon and stop when its capture service is dropped.
 `keyctl capture frame --out PATH` retains its independent one-shot behavior.
 
-Screens and OCR may contain secrets. They are never logged or written except to an explicit
-`screenshot.save_path` or CLI `--out`; clients receive the content and may retain conversations.
+Keyferry does not persist an execution history, submitted text, key/button lists, coordinates,
+screens or OCR. MCP has no screenshot file export. The explicit CLI `capture frame --out` is for
+deliberate exports; temporary inspection files must be removed as soon as inspection finishes.
+Saved recipes are intentional reusable configuration, not a record of executions: use parameters
+for task-specific text and never write run values or captured screens into recipes or reports.
+
+MCP clients and model providers can retain tool arguments (including typed text and keystrokes),
+results and images in their own conversations. Keyferry cannot erase or prevent that recording.
+Do not describe an agent-mediated run as having no retained history unless the client and provider
+also enforce it. Secrets belong to the owner-only secure-text dialog, outside MCP arguments.
 OCR runs on the capture controller and uses its local Windows.Media.Ocr language packs, with no
 cloud recognizer or downloaded model. A macOS or Linux agent can use OCR from a Windows capture
 controller. Capture controllers on macOS/Linux report `ocr.unsupported_platform` explicitly.

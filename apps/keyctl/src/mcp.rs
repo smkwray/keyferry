@@ -14,7 +14,7 @@ use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -36,8 +36,9 @@ const SETTLE: Duration = Duration::from_millis(350);
 const ANIMATION_SAMPLE: Duration = Duration::from_millis(1100);
 // Live MCP comparison: JPEG was 32x smaller and returned 27% faster than fast PNG.
 const DEFAULT_IMAGE_FORMAT: &str = "jpeg";
+const DEFAULT_RETURN_SCREENSHOT: bool = false;
 const GLIDE_HELP: &str = " The pointer always glides (~120-240 ms, eased) from its last position; buttons press after arrival.";
-const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
+const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Pointer tools first need the cursor: screenshot, then calibrate with cursor_x/cursor_y.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.";
 
 fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
     if !args.len().is_multiple_of(2) {
@@ -150,52 +151,6 @@ pub(super) fn run(args: &[String], url: &str, token_file: &Path) -> u8 {
     0
 }
 
-pub(super) fn calibrate_cli(args: &[String], url: &str, token: &Path) -> u8 {
-    let Some(device) = args.first() else {
-        eprintln!("{HELP}");
-        return 20;
-    };
-    let mut converted = vec!["--device".into(), device.clone()];
-    converted.extend_from_slice(&args[1..]);
-    let (device, source) = match options(&converted) {
-        Ok(v) => v,
-        Err(c) => {
-            eprintln!("{c}");
-            return 20;
-        }
-    };
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let signal = interrupted.clone();
-    if ctrlc::set_handler(move || signal.store(true, Ordering::Release)).is_err() {
-        return 25;
-    }
-    let mut server = Server::new(
-        device.unwrap_or_default(),
-        source,
-        url,
-        token,
-        super::state_root().join("capture-geometry"),
-        |source| DaemonFrames::new(source, url, token),
-        NativeOcr,
-    );
-    match server.calibrate(&interrupted) {
-        Ok(v) => {
-            println!(
-                "{}",
-                json!({"schema":"keyferry.capture-calibration.v1","result":v})
-            );
-            0
-        }
-        Err(e) => {
-            println!(
-                "{}",
-                json!({"schema":"keyferry.capture-error.v1","error":e})
-            );
-            25
-        }
-    }
-}
-
 fn routine_steps(recipe: &RecipeV1, args: &Value) -> Result<Vec<Step>, Value> {
     if !recipe.is_routine() {
         return Err(failure("recipe.routine_required"));
@@ -224,12 +179,10 @@ pub(super) fn routine_cli(args: &[String], url: &str, token: &Path) -> u8 {
         uuid::Uuid::parse_str(device).map_err(|_| failure("input.device_uuid"))?;
         let name = args.get(1).ok_or_else(|| failure("input.usage"))?;
         let mut source = None;
-        let mut calibrate = false;
         let mut arguments = json!({"name":name});
         let mut i = 2;
         while i < args.len() {
             match args[i].as_str() {
-                "--calibrate" if !calibrate => calibrate = true,
                 "--source" if source.is_none() => {
                     i += 1;
                     source = Some(args.get(i).ok_or_else(|| failure("input.usage"))?.clone());
@@ -278,10 +231,6 @@ pub(super) fn routine_cli(args: &[String], url: &str, token: &Path) -> u8 {
             NativeOcr,
         );
         routine_steps(&recipe, &arguments)?;
-        if calibrate {
-            server.calibrate(&cancelled)?;
-            server.call("screenshot", &json!({}), &cancelled)?;
-        }
         server.run_routine(&recipe, &arguments, false, false, &cancelled)
     };
     match execute() {
@@ -353,12 +302,22 @@ fn failure(code: &str) -> Value {
         "key.unknown" => "Unknown key name. Use uppercase names such as ENTER, ESCAPE, TAB, SPACE, A, CTRL, SHIFT, ALT or CMD; run keyctl keys for the complete canonical names and aliases.",
         "pointer.capability_required" => "Device lacks POINTER_EXTENDED_V1; keyboard tools remain available.",
         "pointer.calibration_required" => "Calibrate this capture/device binding first, or explicitly pass uncalibrated:true for full-frame linear mapping.",
-        "pointer.screenshot_required" => "Take a fresh screenshot after capture geometry changes before pointer input.",
+        "pointer.screenshot_required" => "Take a fresh screenshot after capture geometry changes or pointer motion before pointer input or a cursor seed.",
+        "pointer.position_required" => "Pointer position is unknown for this session and stick; nothing was sent. Take a fresh screenshot, find the cursor tip, then call calibrate with cursor_x/cursor_y at that tip (mode:\"screen\" moves nothing).",
+        "pointer.cursor_pair_required" => "Provide both cursor_x and cursor_y: the cursor tip in the latest screenshot.",
         "ocr.unsupported_platform" => "Native find_text is currently supported on Windows only; macOS Vision is not implemented.",
         "ocr.engine_unavailable" => "Windows OCR unavailable; install an OCR-capable language in Windows language settings.",
         "text.unsupported" => "Only supported ASCII is accepted; no normalization. Use the owner-only secure-text dialog for secrets.",
         _ => code,
     }})
+}
+/// Calibrate's optional observed cursor tip in screenshot pixels: both coordinates or neither.
+fn observed_cursor(args: &Value) -> Result<Option<[f64; 2]>, Value> {
+    match (args["cursor_x"].as_f64(), args["cursor_y"].as_f64()) {
+        (None, None) => Ok(None),
+        (Some(x), Some(y)) => Ok(Some([x, y])),
+        _ => Err(failure("pointer.cursor_pair_required")),
+    }
 }
 fn tool_result(value: Value, error: bool) -> Value {
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":error})
@@ -381,12 +340,13 @@ fn tools() -> Vec<Value> {
         let pointer = ["move", "click", "drag", "scroll"].contains(&name);
         let mut properties = properties;
         if action {
-            properties["return_screenshot"] = json!({"type":"boolean","default":true});
+            properties["return_screenshot"] =
+                json!({"type":"boolean","default":DEFAULT_RETURN_SCREENSHOT});
             properties["format"] =
                 json!({"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT});
         }
         let mut description = if action {
-            format!("{description} Returns the observed post-action image by default (return_screenshot:false opts out), settled, latency_ms from EMITTED to visible change, and frame_id. Moves return when a compact cursor change is seen near the target; other actions require adaptive quiet on fresh frames within 3 s. settled:false never authorizes replay.")
+            format!("{description} Returns settled, latency_ms from EMITTED to visible change, and frame_id; return_screenshot:true also returns the observed post-action image. Moves return when a compact cursor change is seen near the target; other actions require adaptive quiet on fresh frames within 3 s. settled:false never authorizes replay.")
         } else {
             description.to_owned()
         };
@@ -396,7 +356,7 @@ fn tools() -> Vec<Value> {
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
     };
-    add("screenshot","Latest HDMI frame as a bounded image (JPEG by default; format:png is lossless) plus pixel/native geometry. Memory only; save_path explicitly saves a new file.",json!({"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT},"save_path":{"type":"string","minLength":1,"maxLength":4096}}),&[],true);
+    add("screenshot","Latest HDMI frame as a bounded image (JPEG by default; format:png is lossless) plus pixel/native geometry. Memory only; images returned to the client may be retained in its conversation.",json!({"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}),&[],true);
     add("move","Move absolute pointer to screenshot pixels; requires calibrated binding or explicit uncalibrated:true.",json!({"x":pixel,"y":pixel,"uncalibrated":boolean}),&["x","y"],false);
     add(
         "click",
@@ -413,8 +373,8 @@ fn tools() -> Vec<Value> {
         add(name,"Observe fresh frames, optionally within a screenshot-pixel region. Returns matched or timed_out; never treats a frozen/missing stream as stable.",json!({"timeout_ms":{"type":"integer","minimum":1,"maximum":30000},"region":region}),&["timeout_ms"],true);
     }
     add("find_text","Local OCR line boxes in screenshot pixels, optional case-insensitive substring query. No persistence/logging; Windows only.",json!({"query":{"type":"string","maxLength":256}}),&[],true);
-    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Masks small animations learned while stationary; waits up to 3 s per probe and reports measured latency_ms. Persists only geometry. Use an approved harmless target. mode:\"screen\" never moves the pointer: it binds from the visible video area (bars excluded), reusing a saved probe fit for this stick/source when it still matches; use it on targets where probing is not allowed.",json!({"mode":{"type":"string","enum":["probe","screen"],"default":"probe"}}),&[],false);
-    add("status","Authenticated device/armed state, pointer capability, capture restart status and current/persisted geometry binding.",json!({}),&[],true);
+    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Masks small animations learned while stationary; waits up to 3 s per probe and reports measured latency_ms. Persists only geometry. Use an approved harmless target. mode:\"screen\" never moves the pointer: it binds from the visible video area (bars excluded), reusing a saved probe fit for this stick/source when it still matches; use it on targets where probing is not allowed. A new session or stick sends no pointer input until cursor_x/cursor_y give the cursor tip seen in a fresh screenshot (inside the active video); pointer tools then glide from there.",json!({"mode":{"type":"string","enum":["probe","screen"],"default":"probe"},"cursor_x":pixel,"cursor_y":pixel}),&[],false);
+    add("status","Authenticated device/armed state, pointer capability, capture restart status, current/persisted geometry binding and whether the pointer position is known.",json!({}),&[],true);
     add(
         "list_devices",
         "List authorized sticks and authenticated routes.",
@@ -445,8 +405,8 @@ fn tools() -> Vec<Value> {
     );
     add("routines", "Discover saved recipes before improvising. Searches the shared skill library and local overrides. Example: {\"os\":\"macos\",\"query\":\"settings\"}. Invalid entries are counted explicitly.",
         json!({"query":{"type":"string","maxLength":256},"os":{"type":"string","enum":["macos","windows","linux","any"]},"tag":{"type":"string","maxLength":32}}),&[],true);
-    add("routine_run", "Run a named keyferry.recipe.v1 routine once. Example: {\"name\":\"clear-stacked-dialogs\",\"params\":{\"count\":10,\"delay_ms\":800}}. Merges input stretches, stops at a failed check/non-EMITTED result, returns per-step receipts and a final image. target_os optionally asserts the target OS (never inferred from controller OS). Passwords only via secure_text's owner dialog; REQUESTED is not input proof.",
-        json!({"name":{"type":"string","minLength":1,"maxLength":63},"params":{"type":"object","additionalProperties":true},"target_os":{"type":"string","enum":["macos","windows","linux","any"]},"format":{"type":"string","enum":["png","jpeg"]}}),&["name"],false);
+    add("routine_run", "Run a named keyferry.recipe.v1 routine once. Example: {\"name\":\"clear-stacked-dialogs\",\"params\":{\"count\":10,\"delay_ms\":800}}. Merges input stretches, stops at a failed check/non-EMITTED result, returns per-step receipts; return_screenshot:true also returns one final image. target_os optionally asserts the target OS (never inferred from controller OS). Passwords only via secure_text's owner dialog; REQUESTED is not input proof.",
+        json!({"name":{"type":"string","minLength":1,"maxLength":63},"params":{"type":"object","additionalProperties":true},"target_os":{"type":"string","enum":["macos","windows","linux","any"]},"return_screenshot":{"type":"boolean","default":DEFAULT_RETURN_SCREENSHOT},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}),&["name"],false);
     add(
         "routine_save",
         r#"Validate and save after a manual flow succeeds. Example: {"definition":{"schema":"keyferry.recipe.v1","name":"copy-all","target_os":"windows","verified":false,"steps":[{"type":"key","keys":["CTRL","A"]},{"type":"key","keys":["CTRL","C"]}]}}. Exclusive create; replace:true deliberately replaces. Generalize parameters and add checkpoints; never save secrets."#,
@@ -456,8 +416,8 @@ fn tools() -> Vec<Value> {
     );
     let actions: Vec<Value> = result.iter().filter(|t| ["move", "click", "drag", "scroll", "key", "type_text"].contains(&t["name"].as_str().unwrap_or("")))
         .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"],"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean"}}})).collect();
-    result.push(json!({"name":"batch","description":r#"Ad-hoc input through the routine executor: contiguous actions merge into one bounded command. Example: {"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":800}],"settle":false}. Per-action settle:true inserts a stable checkpoint; settle defaults true after the last stretch. Stops on non-EMITTED/failed check; never retries. One final image by default. Pointer glides can split a long stretch into consecutive commands."#,
-        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean","default":true},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
+    result.push(json!({"name":"batch","description":r#"Ad-hoc input through the routine executor: contiguous actions merge into one bounded command. Example: {"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":800}],"settle":false}. Per-action settle:true inserts a stable checkpoint; settle defaults true after the last stretch. Stops on non-EMITTED/failed check; never retries. return_screenshot:true returns one final image. Pointer glides can split a long stretch into consecutive commands."#,
+        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean","default":true},"return_screenshot":{"type":"boolean","default":DEFAULT_RETURN_SCREENSHOT},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
         "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}));
     result
 }
@@ -542,6 +502,7 @@ struct Server<F: FrameSource, O: Ocr> {
     ocr: O,
     geometry: Option<Geometry>,
     bound_generation: Option<u64>,
+    pointer_capture: Option<((u32, u32), u64)>,
     screenshot_geometry: Option<(u32, u32, (u32, u32), u64)>,
     loaded: bool,
     initialized: bool,
@@ -551,6 +512,13 @@ struct Server<F: FrameSource, O: Ocr> {
     observed_latency: Duration,
     last_observed: Option<Arc<Frame>>,
     lease: Option<(String, std::fs::File)>,
+    /// Presumed pointer position (normalized HID) on the leased stick, in memory only: no
+    /// coordinates are persisted. Unknown at session start and after a device, source or
+    /// capture change; no pointer input is sent until calibrate seeds it from an observed cursor.
+    pointer: Option<[f64; 2]>,
+    /// The latest screenshot followed every pointer command that may have started, so a cursor
+    /// seen in it is where the cursor is.
+    fresh_screenshot: bool,
 }
 
 /// One agent per stick on this controller: an OS file lock the system releases on exit or crash.
@@ -604,6 +572,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             ocr,
             geometry: None,
             bound_generation: None,
+            pointer_capture: None,
             screenshot_geometry: None,
             loaded: false,
             initialized: false,
@@ -613,6 +582,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             observed_latency: SETTLE,
             last_observed: None,
             lease: None,
+            pointer: None,
+            fresh_screenshot: false,
         }
     }
     fn dispatch(&mut self, request: Value, cancelled: &AtomicBool) -> Option<Value> {
@@ -655,7 +626,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                     _ => "2025-11-25",
                 };
                 json!({"protocolVersion":version,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"keyferry","version":env!("CARGO_PKG_VERSION")},
-                    "instructions":"Screens and OCR may contain secrets. Calibrate a harmless target each session before pointer tools. Never retry UNKNOWN actions; inspect the target and reconcile command_id. Secure text stays in the owner-only dialog. Check routines before improvising; save successful generalized flows with routine_save."})
+                    "instructions":"Screens and OCR may contain secrets. This MCP server does not persist frames or command execution history; the client may retain tool arguments and results. Images are opt-in: request screenshots only at visual checkpoints and never save transcript payloads or keystroke history. Calibrate a harmless target each session before pointer tools, passing cursor_x/cursor_y for the cursor tip in a fresh screenshot. Never retry UNKNOWN actions; inspect the target and reconcile command_id. Secure text stays in the owner-only dialog. Check routines before improvising; routine_save may persist reusable recipe definitions, never execution history or secrets."})
             }
             "ping" => json!({}),
             _ if !self.ready => return Some(rpc_error(id, -32000, "rpc.not_initialized")),
@@ -734,10 +705,17 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     fn lease(&mut self, device: &str) -> Result<(), Value> {
         if self.lease.as_ref().is_none_or(|(held, _)| held != device) {
             self.lease = Some((device.to_owned(), device_lease(&self.root, device)?));
+            // Another agent may have driven this stick while it was not leased here.
+            self.pointer = None;
+            self.pointer_capture = None;
+            self.fresh_screenshot = false;
         }
         Ok(())
     }
     fn clear_binding(&mut self) {
+        self.pointer = None;
+        self.pointer_capture = None;
+        self.fresh_screenshot = false;
         self.animation = None;
         self.last_observed = None;
         self.geometry = None;
@@ -750,6 +728,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             return Err(failure("device.select_required"));
         }
         self.get_json(&format!("/v1/devices/{}", self.device))
+    }
+    fn require_position(&self) -> Result<(), Value> {
+        if self.pointer.is_none() {
+            return Err(failure("pointer.position_required"));
+        }
+        Ok(())
     }
     fn require_pointer(&self) -> Result<(), Value> {
         let status = self.device_status()?;
@@ -783,11 +767,21 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             .map_err(failure)?;
             self.loaded = true;
         }
-        if self.bound_generation.is_some_and(|g| g != f.generation)
+        let capture_changed = self
+            .pointer_capture
+            .is_some_and(|capture| capture != (f.native, f.generation));
+        if capture_changed
+            || self.bound_generation.is_some_and(|g| g != f.generation)
             || self.geometry.as_ref().is_some_and(|g| {
                 !g.matches(&self.device, self.source.as_deref().unwrap_or("auto"), &f)
             })
         {
+            // A capture restart or display-mode change may also have moved the cursor.
+            if capture_changed || self.bound_generation.is_some() {
+                self.pointer = None;
+                self.pointer_capture = None;
+                self.fresh_screenshot = false;
+            }
             self.bound_generation = None;
             self.geometry = None;
         }
@@ -854,29 +848,6 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
         Ok(result)
     }
-    /// Presumed pointer position (normalized HID) for the device, shared by every session on
-    /// this controller. Absent or malformed means unknown: the next glide starts at
-    /// `routines::GLIDE.origin`.
-    fn pointer_path(&self) -> PathBuf {
-        self.root.join(format!("{}.pointer.json", self.device))
-    }
-    fn presumed(&self) -> Option<[f64; 2]> {
-        let at: [f64; 2] = serde_json::from_slice(&fs::read(self.pointer_path()).ok()?).ok()?;
-        at.iter().all(|v| (0.0..=1.0).contains(v)).then_some(at)
-    }
-    /// Best effort: a lost write only costs one origin report on the next glide.
-    fn presume(&self, at: [f64; 2]) {
-        let tmp = self
-            .root
-            .join(format!(".pointer-{}.tmp", uuid::Uuid::now_v7()));
-        let written = fs::create_dir_all(&self.root)
-            .and_then(|()| fs::write(&tmp, json!(at).to_string()))
-            .and_then(|()| fs::rename(&tmp, self.pointer_path()));
-        if written.is_err() {
-            let _ = fs::remove_file(&tmp);
-            let _ = fs::remove_file(self.pointer_path());
-        }
-    }
     /// Submit input ending with the pointer at `end`. A command that may have started presumes
     /// `end` (an interrupted glide stops on the segment toward it); one that cannot have
     /// started leaves the presumed position unchanged.
@@ -894,8 +865,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             Ok(_) => true,
             Err(error) => error["command"]["possible_start"] == true,
         };
+        if pointer && started {
+            self.fresh_screenshot = false;
+        }
         if let Some(end) = end.filter(|_| pointer && started) {
-            self.presume(end);
+            self.pointer = Some(end);
         }
         result
     }
@@ -920,7 +894,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                         routines::mapping_error()
                     })
             },
-            self.presumed(),
+            self.pointer,
         )
         .map_err(|e| mapping_error.unwrap_or_else(|| failure(e.code())))
     }
@@ -946,7 +920,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         then: Option<Value>,
         cancelled: &AtomicBool,
     ) -> Result<Value, Value> {
-        let mut at = self.presumed();
+        self.require_position()?;
+        let mut at = self.pointer;
         let mut actions = routines::glide_to(&mut at, p);
         actions.extend(then);
         self.submit_tracked(actions, true, at, None, 5000, cancelled)
@@ -1036,10 +1011,14 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             let source_error = self.frames.resolve().err();
             let capture = self.frames.status();
             if !capture["error"].is_null()
-                || capture["generation"]
-                    .as_u64()
-                    .is_some_and(|g| self.bound_generation.is_some_and(|b| b != g))
+                || capture["generation"].as_u64().is_some_and(|g| {
+                    self.bound_generation.is_some_and(|b| b != g)
+                        || self.pointer_capture.is_some_and(|(_, b)| b != g)
+                })
             {
+                self.pointer = None;
+                self.pointer_capture = None;
+                self.fresh_screenshot = false;
                 self.bound_generation = None;
                 self.geometry = None;
             }
@@ -1047,7 +1026,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             return Ok(tool_result(
                 json!({"selected_device":if self.device.is_empty(){None}else{Some(&self.device)},"device_selection":self.device_choice,"selection_error":selection.err(),
                 "device":device.as_ref().ok(),"device_error":device.as_ref().err(),"capture":self.frames.status(),"capture_selection_error":source_error,
-                "binding_verified_this_session":self.bound_generation.is_some(),"geometry":self.geometry,"ocr":self.frames.status().get("ocr").cloned().unwrap_or_else(||json!(if cfg!(windows){"windows-native"}else{"unsupported"}))}),
+                "binding_verified_this_session":self.bound_generation.is_some(),"pointer_position_known":self.pointer.is_some(),"geometry":self.geometry,"ocr":self.frames.status().get("ocr").cloned().unwrap_or_else(||json!(if cfg!(windows){"windows-native"}else{"unsupported"}))}),
                 false,
             ));
         }
@@ -1067,10 +1046,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         if name == "calibrate" {
             if args["mode"] == "screen" {
                 return self
-                    .calibrate_screen(cancelled)
+                    .calibrate_screen(args, cancelled)
                     .map(|v| tool_result(v, false));
             }
-            return self.calibrate(cancelled).map(|v| tool_result(v, false));
+            return self
+                .calibrate(args, cancelled)
+                .map(|v| tool_result(v, false));
         }
         if name == "type_text" {
             let text = args["text"].as_str().unwrap_or("");
@@ -1098,23 +1079,9 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.frames.request_ocr(name == "find_text");
         let frame = self.frame(cancelled)?;
         if name == "screenshot" {
-            if let Some(path) = args["save_path"].as_str() {
-                let (image, _) = frame
-                    .image(args["format"].as_str().unwrap_or(DEFAULT_IMAGE_FORMAT))
-                    .map_err(failure)?;
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path)
-                    .map_err(|_| failure("capture.output"))?;
-                if file.write_all(&image).and_then(|()| file.flush()).is_err() {
-                    drop(file);
-                    let _ = std::fs::remove_file(path);
-                    return Err(failure("capture.output"));
-                }
-            }
             self.screenshot_geometry =
                 Some((frame.width, frame.height, frame.native, frame.generation));
+            self.fresh_screenshot = true;
             let (signal, mean_luma) = keyferry_capture::capture::signal(&frame.rgb);
             let metadata = json!({"signal":signal,"mean_luma":mean_luma,"width":frame.width,"height":frame.height,"native_width":frame.native.0,"native_height":frame.native.1,
                 "frame_id":frame.serial,"capture_generation":frame.generation,"frame_age_ms":frame.at.elapsed().as_millis(),"calibrated":self.bound_generation==Some(frame.generation),
@@ -1147,6 +1114,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         {
             return Err(failure("pointer.screenshot_required"));
         }
+        self.require_position()?;
         let uncalibrated = args["uncalibrated"].as_bool().unwrap_or(false);
         // The tool arguments are the routine step vocabulary; one compiler serves both.
         let mut step = args.clone();
@@ -1361,7 +1329,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             if result["settled"] != true {
                 self.animation = None;
             }
-            if args["return_screenshot"] != false {
+            if args["return_screenshot"]
+                .as_bool()
+                .unwrap_or(DEFAULT_RETURN_SCREENSHOT)
+            {
                 // Encoding/observation failure cannot erase an EMITTED receipt.
                 return match self.image_result(&frame, args, result.clone()) {
                     Ok(value) => Ok(value),
@@ -1493,6 +1464,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         let mut awaiting_owner = false;
         let mut i = 0;
         let mut commands = 0;
+        // A routine never starts its input only to stop at an unseeded pointer step.
+        if steps.iter().any(Step::pointer) {
+            self.require_position()?;
+        }
         // Capture the pre-input baseline so wait_for_change cannot miss a fast UI transition.
         self.frames.request_ocr(false);
         let mut baseline = self.frame(cancelled)?;
@@ -1686,8 +1661,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
         let mut metadata = json!({"name":recipe.name(),"target_os":recipe.target_os,"actions":receipts,"completed":completed,"step_count":steps.len(),"command_count":commands,
             "stopped_at":stopped,"awaiting_owner":awaiting_owner,"never_retried":true,"execution_complete":stopped.is_none()&&!awaiting_owner,"settled":stopped.is_none()&&!awaiting_owner&&(settle || matches!(steps.last(),Some(Step::WaitForStable{..})))});
-        // Exactly one final image; observation/encoding failures preserve all prior receipts.
-        let mut result = if args["return_screenshot"] != false {
+        // An explicitly requested final image cannot erase prior receipts on encoding failure.
+        let mut result = if args["return_screenshot"]
+            .as_bool()
+            .unwrap_or(DEFAULT_RETURN_SCREENSHOT)
+        {
             self.frames.request_ocr(false);
             match self
                 .frames
@@ -1875,7 +1853,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         // A probe onto the presumed cursor changes no pixels, and calibration ends on its first
         // probe point: step aside first so a repeated calibration still sees the cursor move.
         if self
-            .presumed()
+            .pointer
             .is_some_and(|at| (at[0] - p[0]).abs().max((at[1] - p[1]).abs()) < 0.05)
         {
             let aside = p.map(|v| v + (0.5 - v).signum() * 0.1);
@@ -1894,14 +1872,26 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         receipt["latency_ms"] = observation["latency_ms"].clone();
         Ok((frame, receipt))
     }
-    fn calibrate(&mut self, cancelled: &AtomicBool) -> Result<Value, Value> {
+    fn calibrate(&mut self, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
         self.choose_device()?;
         self.frames.device(&self.device);
+        self.require_pointer()?;
+        // Probes glide from the observed cursor (mapped through this session's binding, else
+        // the motion-free screen mapping), never from an assumed position.
+        if let Some(cursor) = observed_cursor(args)? {
+            let view = self.frame(cancelled)?;
+            let mapping = match &self.geometry {
+                Some(g) if self.bound_generation == Some(view.generation) => g.clone(),
+                _ => self.screen_geometry(&view)?.0,
+            };
+            self.pointer = Some(self.seed(&view, &mapping, cursor)?);
+            self.pointer_capture = Some((view.native, view.generation));
+        }
+        self.require_position()?;
         self.bound_generation = None;
         self.geometry = None;
         self.animation = None;
         self.loaded = true;
-        self.require_pointer()?;
         // Cursor evidence and the fit use native pixels; the binding is then expressed in
         // the bounded agent view shared by screenshots, OCR boxes and pointer tools.
         self.frames.request_native(true);
@@ -1920,28 +1910,42 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         result["active_video_rectangle"] = json!(fitted.active_rectangle());
         Ok(result)
     }
-    /// Motion-free binding (owner: no probing on CTHY). Absolute reports span the target's
-    /// whole display, so the visible video area is the mapping. A saved probe fit for this
-    /// stick/source is preferred while it agrees with that area within a few pixels.
-    fn calibrate_screen(&mut self, cancelled: &AtomicBool) -> Result<Value, Value> {
+    /// Motion-free binding (owner: no probing on CTHY). An observed cursor also seeds the
+    /// pointer position; without one, a session whose position is unknown still cannot move it.
+    fn calibrate_screen(&mut self, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
         self.choose_device()?;
         self.frames.device(&self.device);
-        self.bound_generation = None;
-        self.geometry = None;
-        self.animation = None;
         self.require_pointer()?;
-        let saved = {
-            self.loaded = false;
-            let _ = self.frame(cancelled)?;
-            self.geometry.take()
-        };
-        self.loaded = true;
+        let cursor = observed_cursor(args)?;
         let view = self.frame(cancelled)?;
-        let [x, y, width, height] = geometry::active_video(&view);
+        let (chosen, basis) = self.screen_geometry(&view)?;
+        // Validated before anything is bound or persisted.
+        let seed = cursor
+            .map(|cursor| self.seed(&view, &chosen, cursor))
+            .transpose()?;
+        geometry::save(&self.root, &chosen).map_err(failure)?;
+        self.loaded = true;
+        self.animation = None;
+        self.bound_generation = Some(view.generation);
+        self.geometry = Some(chosen.clone());
+        if seed.is_some() {
+            self.pointer = seed;
+            self.pointer_capture = Some((view.native, view.generation));
+        }
+        Ok(
+            json!({"bound":true,"mode":"screen","basis":basis,"pointer_moved":false,"pointer_position_known":self.pointer.is_some(),"geometry":chosen,"active_video_rectangle":chosen.active_rectangle()}),
+        )
+    }
+    /// Absolute reports span the target's whole display, so the visible video area is the
+    /// motion-free mapping. A saved probe fit for this stick/source is preferred while it agrees
+    /// with that area within a few pixels.
+    fn screen_geometry(&self, view: &Frame) -> Result<(Geometry, &'static str), Value> {
+        let [x, y, width, height] = geometry::active_video(view);
         if width < view.width as f64 / 2.0 || height < view.height as f64 / 2.0 {
             return Err(failure("calibration.animated_or_ambiguous"));
         }
         let source = self.source.clone().unwrap_or_else(|| "auto".into());
+        let saved = geometry::load(&self.root, &self.device, &source).map_err(failure)?;
         let area = Geometry {
             schema: "keyferry.capture-geometry.v1".into(),
             device: self.device.clone(),
@@ -1957,18 +1961,27 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                     && (g.origin[a] + g.extent[a] - area.origin[a] - area.extent[a]).abs() <= 4.0
             })
         };
-        let (chosen, basis) = match saved {
-            Some(g) if g.matches(&self.device, &source, &view) && agrees(&g) => {
+        Ok(match saved {
+            Some(g) if g.matches(&self.device, &source, view) && agrees(&g) => {
                 (g, "saved-probe-fit")
             }
             _ => (area, "video-area"),
-        };
-        geometry::save(&self.root, &chosen).map_err(failure)?;
-        self.bound_generation = Some(view.generation);
-        self.geometry = Some(chosen.clone());
-        Ok(
-            json!({"bound":true,"mode":"screen","basis":basis,"pointer_moved":false,"geometry":chosen,"active_video_rectangle":chosen.active_rectangle()}),
-        )
+        })
+    }
+    /// The presumed position of the cursor tip the agent saw at `cursor` in its fresh
+    /// screenshot of `view`; sends and stores nothing.
+    fn seed(&self, view: &Frame, mapping: &Geometry, cursor: [f64; 2]) -> Result<[f64; 2], Value> {
+        if !self.fresh_screenshot
+            || self.screenshot_geometry
+                != Some((view.width, view.height, view.native, view.generation))
+        {
+            return Err(failure("pointer.screenshot_required"));
+        }
+        let [x, y, width, height] = mapping.active_rectangle();
+        if !(x..x + width).contains(&cursor[0]) || !(y..y + height).contains(&cursor[1]) {
+            return Err(failure("pointer.outside_active_video"));
+        }
+        mapping.map(cursor[0], cursor[1]).map_err(failure)
     }
     fn calibrate_native(
         &mut self,

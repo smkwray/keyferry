@@ -169,7 +169,7 @@ pub(super) fn routine_cli(args: &[String], url: &str, token: &Path) -> u8 {
     let library = Library::current();
     let result = match (args.first().map(String::as_str), args.len()) {
         (Some("--help"), 1) => {
-            println!("keyctl routine list [--os macos|windows|linux|any] [--tag TAG] [--query TEXT]\n  run DEVICE NAME [--source SOURCE] [--target-os OS] [--calibrate] (params: JSON stdin)\n  save PATH [--replace] (shared library, exclusive create by default)\n  validate NAME | validate --input PATH\nPointer runs require session calibration; --calibrate sends probes on an approved harmless target. No secrets in params.");
+            println!("keyctl routine list [--os macos|windows|linux|any] [--tag TAG] [--query TEXT]\n  run DEVICE NAME [--source SOURCE] [--target-os OS] (params: JSON stdin)\n  save PATH [--replace] (shared library, exclusive create by default)\n  validate NAME | validate --input PATH\nPointer routines run through MCP after screenshot and observed-cursor calibration in the same session. No secrets in params.");
             return 0;
         }
         (Some("list"), _) => {

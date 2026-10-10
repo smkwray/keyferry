@@ -2029,9 +2029,8 @@ async fn connection_actor<IO>(
                 }
                 Err(error) => {
                     crate::daemon_log!(
-                        "device command transport failed: device={}; command={}; {error}",
-                        uuid::Uuid::from_bytes(transport.device_id()),
-                        command.command_id
+                        "device transport failed: device={}; {error}",
+                        uuid::Uuid::from_bytes(transport.device_id())
                     );
                     transport.record_command_diagnostic(&error);
                     let _ = reply.send(TransportOutcome::Unknown);

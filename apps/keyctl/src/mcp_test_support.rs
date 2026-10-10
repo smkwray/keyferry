@@ -13,14 +13,24 @@ fn frame(w: u32, h: u32, serial: u64) -> Frame {
         at: Instant::now(),
     }
 }
-fn cursor_frame(p: [f64; 2], serial: u64) -> Frame {
+/// Where the fake target shows normalized pointer positions: origin x, y and extent w, h.
+const FAKE_AREA: [f64; 4] = [20.0, 30.0, 280.0, 180.0];
+/// The cursor tip's screenshot pixel for pointer position `p`.
+fn tip(area: [f64; 4], p: [f64; 2]) -> (u32, u32) {
+    (
+        (area[0] + p[0] * area[2]).round() as u32,
+        (area[1] + p[1] * area[3]).round() as u32,
+    )
+}
+fn cursor_frame(area: [f64; 4], p: [f64; 2], serial: u64) -> Frame {
     let mut f = frame(320, 240, serial);
-    let x = (20.0 + p[0] * 280.0).round() as u32;
-    let y = (30.0 + p[1] * 180.0).round() as u32;
+    let (x, y) = tip(area, p);
     for dy in 0..9 {
         for dx in 0..=dy / 2 {
-            let i = ((y + dy) * f.width + x + dx) as usize * 3;
-            f.rgb[i..i + 3].fill(255);
+            if x + dx < f.width && y + dy < f.height {
+                let i = ((y + dy) * f.width + x + dx) as usize * 3;
+                f.rgb[i..i + 3].fill(255);
+            }
         }
     }
     f
@@ -31,6 +41,7 @@ struct FakeFrames {
     scripted: VecDeque<Frame>,
     change_after: Option<u64>,
     pointer: Option<Arc<Mutex<Visual>>>,
+    area: [f64; 4],
     visible: Visual,
     delay: Duration,
     animate: bool,
@@ -75,6 +86,7 @@ impl FakeFrames {
             scripted: VecDeque::new(),
             change_after: None,
             pointer: None,
+            area: FAKE_AREA,
             visible: Visual {
                 pointer: [0.5, 0.5],
                 revision: 0,
@@ -152,7 +164,7 @@ impl FakeFrames {
             }
         }
         let mut f = if self.pointer.is_some() {
-            cursor_frame(self.visible.pointer, self.next)
+            cursor_frame(self.area, self.visible.pointer, self.next)
         } else {
             frame(320, 240, self.next)
         };

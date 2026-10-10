@@ -18,7 +18,7 @@ async fn busy_desktop_calibration_and_moves_use_the_production_path() {
         s.call("screenshot",&json!({}),&c).unwrap();
         for (i,(x,y)) in [(100,130),(200,160)].into_iter().enumerate() {
             let start=Instant::now();
-            let response=s.dispatch(json!({"jsonrpc":"2.0","id":format!("move-{i}"),"method":"tools/call","params":{"name":"move","arguments":{"x":x,"y":y,"format":"jpeg"}}}),&c).unwrap();
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":format!("move-{i}"),"method":"tools/call","params":{"name":"move","arguments":{"x":x,"y":y,"return_screenshot":true,"format":"jpeg"}}}),&c).unwrap();
             assert_eq!(response["result"]["isError"],false,"{response}");
             let result=&response["result"]["structuredContent"];
             assert_eq!(result["settled"],true,"{result}");
@@ -33,7 +33,7 @@ async fn busy_desktop_calibration_and_moves_use_the_production_path() {
         }
         // A newly appearing panel outside the action ROI cannot prolong a settled click.
         s.animation.as_mut().unwrap().1 = frames::MotionMask::new(s.last_observed.as_ref().unwrap());
-        let clicked = s.call("click", &json!({"x":100,"y":150,"format":"png"}), &c).unwrap();
+        let clicked = s.call("click", &json!({"x":100,"y":150,"return_screenshot":true,"format":"png"}), &c).unwrap();
         assert_eq!(clicked["structuredContent"]["settled"],true);
         assert_eq!(clicked["structuredContent"]["settle_region"]["width"],256);
         assert_eq!(clicked["content"][0]["mimeType"],"image/png");
@@ -56,7 +56,7 @@ async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
             init(&mut s);
             let c=AtomicBool::new(false);
             s.call("screenshot",&json!({}),&c).unwrap();
-            let response=s.dispatch(json!({"jsonrpc":"2.0","id":"batch","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"move","arguments":{"x":200,"y":160,"uncalibrated":true}}]}}}),&c).unwrap();
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":"batch","method":"tools/call","params":{"name":"batch","arguments":{"return_screenshot":true,"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"move","arguments":{"x":200,"y":160,"uncalibrated":true}}]}}}),&c).unwrap();
             let result=&response["result"]["structuredContent"];
             assert_eq!(response["result"]["isError"],fault,"{response}");
             assert_eq!(result["actions"].as_array().unwrap().len(),2);
@@ -79,6 +79,23 @@ async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
         task.abort();
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// The simulated target cursor's starting position, deliberately off the screen centre.
+const START: [f64; 2] = [0.3, 0.65];
+/// A fake target whose pointer spans the whole frame, as absolute reports span the target
+/// display: the motion-free video-area mapping then locates an observed cursor tip exactly.
+const FULL_AREA: [f64; 4] = [0.0, 0.0, 319.0, 239.0];
+
+/// The agent's production seed: a fresh screenshot, then calibrate with the cursor tip it shows.
+fn seed(s: &mut Server<FakeFrames, FakeOcr>, mode: &str, c: &AtomicBool) -> Result<Value, Value> {
+    s.call("screenshot", &json!({}), c)?;
+    let (x, y) = tip(s.frames.area, s.frames.visible.pointer);
+    s.call(
+        "calibrate",
+        &json!({"mode":mode,"cursor_x":x,"cursor_y":y}),
+        c,
+    )
 }
 
 /// GET status supplies simulator-only capability metadata, because SimulatorTransport has no
@@ -108,7 +125,7 @@ async fn harness(
         0
     };
     let pointer = Arc::new(Mutex::new(Visual {
-        pointer: [0.5, 0.5],
+        pointer: START,
         revision: 0,
         at: Instant::now(),
         path: Vec::new(),
@@ -160,10 +177,15 @@ async fn harness(
     });
     let mut s = server();
     s.frames.pointer = Some(pointer);
+    s.frames.visible.pointer = START;
     s.url = format!("http://127.0.0.1:{port}");
     fs::create_dir_all(&s.root).unwrap();
     s.token = s.root.join("token");
     fs::write(&s.token, "test-token-123456").unwrap();
+    // This agent has already seen the starting cursor on its leased stick; the production seed
+    // (calibrate with cursor_x/cursor_y) is exercised by the fresh-session and switch tests.
+    s.lease(SIMULATOR_DEVICE_ID).unwrap();
+    s.pointer = Some(START);
     (s, transport, daemon, task)
 }
 
@@ -236,7 +258,7 @@ async fn calibrated_simulator_binding_and_all_actions() {
     let root = s.root.clone();
     tokio::task::spawn_blocking(move || {
         let c = AtomicBool::new(false);
-        let result = s.calibrate(&c).unwrap();
+        let result = s.calibrate(&json!({}), &c).unwrap();
         assert_eq!(result["bound"], true);
         let probes = result["probes"].as_array().unwrap();
         assert_eq!(probes.len(), 10);
@@ -325,7 +347,9 @@ async fn delayed_animated_capture_calibrates_and_settles_every_mcp_action() {
             let latency = result["latency_ms"].as_u64().unwrap();
             assert!((1400..=2600).contains(&latency), "{name}: {latency}");
             assert!(start.elapsed() >= Duration::from_millis(1400));
-            assert_eq!(response["result"]["content"][0]["type"], "image");
+            assert_eq!(response["result"]["content"][0]["type"], "text");
+            assert_eq!(response["result"]["content"].as_array().unwrap().len(), 1);
+            assert!(result.get("image_bytes").is_none());
             let command = if result.get("command").is_some() { &result["command"] } else { result };
             assert_eq!(command["outcome"], "EMITTED");
             let id = uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
@@ -441,6 +465,71 @@ fn bind_fake(s: &mut Server<FakeFrames, FakeOcr>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_and_batch_images_require_explicit_opt_in() {
+    let (mut s, transport, _, task) = harness(vec![], false).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        s.library = super::super::recipe::Library {
+            local: s.root.join("local"),
+            shared: Some(s.root.join("shared")),
+        };
+        init(&mut s);
+        let cancelled = AtomicBool::new(false);
+        let definition = routine_definition(json!([{"type":"key","keys":["ESCAPE"]}]));
+        assert_eq!(
+            s.call("routine_save", &json!({"definition":definition}), &cancelled)
+                .unwrap()["isError"],
+            false
+        );
+        for (i, setting) in [None, Some(false), Some(true)].into_iter().enumerate() {
+            for name in ["routine_run", "batch"] {
+                let mut args = if name == "routine_run" {
+                    json!({"name":"test-flow"})
+                } else {
+                    json!({"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]}}],"settle":false})
+                };
+                if let Some(setting) = setting {
+                    args["return_screenshot"] = json!(setting);
+                }
+                let response = s
+                    .dispatch(
+                        json!({"jsonrpc":"2.0","id":format!("{name}-{i}"),"method":"tools/call","params":{"name":name,"arguments":args}}),
+                        &cancelled,
+                    )
+                    .unwrap();
+                let result = &response["result"];
+                let metadata = &result["structuredContent"];
+                assert_eq!(result["isError"], false, "{name}: {metadata}");
+                assert_eq!(metadata["execution_complete"], true);
+                assert_eq!(metadata["command_count"], 1);
+                let images = result["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|content| content["type"] == "image")
+                    .count();
+                assert_eq!(images, usize::from(setting == Some(true)), "{name}");
+                if setting == Some(true) {
+                    assert_eq!(result["content"][0]["mimeType"], "image/jpeg");
+                    assert!(metadata["image_bytes"].as_u64().unwrap() > 0);
+                } else {
+                    assert!(metadata.get("image_bytes").is_none());
+                    assert_eq!(result["content"].as_array().unwrap().len(), 1);
+                }
+                let command = &metadata["actions"][0]["command"];
+                assert_eq!(command["outcome"], "EMITTED");
+                let id = uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
+                assert_eq!(transport.execution_count(id), 1);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn routine_checkpoints_split_stretches_and_stop_without_replay() {
     for failed in [false, true] {
         let (mut s, transport, _, task) = harness(vec![], false).await;
@@ -471,7 +560,7 @@ async fn routine_checkpoints_split_stretches_and_stop_without_replay() {
                 if let Some(id)=action["command"]["command_id"].as_str() {assert_eq!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()),1);}
             }
             assert!(!content.to_string().contains("ordinary-canary-text"));
-            assert_eq!(result["content"].as_array().unwrap().iter().filter(|c|c["type"]=="image").count(),1);
+            assert_eq!(result["content"].as_array().unwrap().iter().filter(|c|c["type"]=="image").count(),0);
             let files=fs::read_dir(s.library.shared.unwrap()).unwrap().count();assert_eq!(files,1,"run writes no state");
         }).await.unwrap();
         task.abort();
@@ -660,11 +749,10 @@ async fn every_agent_pointer_motion_glides_including_calibration_and_split_batch
             assert_eq!(transport.execution_count(id), 1);
         }
         let visual = s.frames.pointer.as_ref().unwrap().lock().unwrap();
-        // The session's first report is the documented origin, where this cursor starts.
-        assert_eq!(visual.path[0], routines::GLIDE.origin);
-        let jump = largest_jump(&visual.path);
+        // The session's first report continues from where the target cursor started.
+        let jump = largest_jump(&[&[START][..], &visual.path[..]].concat());
         assert!(jump < 0.12, "largest step {jump}");
-        assert_eq!(s.presumed(), visual.path.last().copied());
+        assert!(s.pointer.unwrap().into_iter().zip(*visual.path.last().unwrap()).all(|(a,b)| (a-b).abs() < 1e-12));
         assert!(!transport.is_remotely_armed());
     })
     .await
@@ -731,11 +819,16 @@ async fn faulted_glides_never_replay_and_track_only_possible_starts() {
             if fault == SimulationFault::LostAfterStart {
                 // An interrupted glide stops on the segment toward its end; presume the end.
                 assert_eq!(error["command"]["outcome"], "UNKNOWN");
-                assert_eq!(s.presumed(), path.last().copied());
+                assert!(s
+                    .pointer
+                    .unwrap()
+                    .into_iter()
+                    .zip(*path.last().unwrap())
+                    .all(|(a, b)| (a - b).abs() < 1e-12));
             } else {
                 assert_eq!(
-                    s.presumed(),
-                    None,
+                    s.pointer,
+                    Some(START),
                     "a command that never started moves nothing"
                 );
             }
@@ -745,6 +838,277 @@ async fn faulted_glides_never_replay_and_track_only_possible_starts() {
         task.abort();
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// The presumed pointer lives only in session memory: same-session glides stay continuous, no
+/// file holds a coordinate, and a new session knows nothing of the previous one's position.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pointer_presumption_is_session_memory_only() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let root = s.root.clone();
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        let calibration = s.call("calibrate", &json!({}), &c).unwrap();
+        assert_eq!(calibration["structuredContent"]["bound"], true);
+        s.call("screenshot", &json!({}), &c).unwrap();
+        for (x, y) in [(60, 60), (280, 200), (60, 200)] {
+            let moved = s.call("move", &json!({"x":x,"y":y}), &c).unwrap();
+            assert_eq!(moved["isError"], false, "{moved}");
+        }
+        let visual = s.frames.pointer.clone().unwrap();
+        let path = visual.lock().unwrap().path.clone();
+        let jump = largest_jump(&[&[START][..], &path[..]].concat());
+        assert!(jump < 0.12, "largest step {jump}");
+        let last = path.last().copied();
+        assert!(s.pointer.unwrap().into_iter().zip(last.unwrap()).all(|(a,b)| (a-b).abs() < 1e-12));
+        // Leases, token and the coordinate-free geometry record only; no pointer state.
+        let coordinates = json!(last.unwrap()).to_string();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(dir).unwrap() {
+                let file = entry.unwrap().path();
+                if file.is_dir() {
+                    dirs.push(file);
+                    continue;
+                }
+                let name = file.file_name().unwrap().to_string_lossy().into_owned();
+                assert!(!name.contains("pointer"), "{name}");
+                let content = fs::read_to_string(&file).unwrap_or_default();
+                assert!(!content.contains(&coordinates), "{name}");
+            }
+        }
+        // A new session on the same controller and stick starts with no presumed position.
+        let mut next = server();
+        (next.root, next.url, next.token) = (root.clone(), s.url.clone(), s.token.clone());
+        next.frames.pointer = Some(visual.clone());
+        next.frames.area = FULL_AREA;
+        drop(s);
+        init(&mut next);
+        assert_eq!(next.pointer, None);
+        let status = next.call("status", &json!({}), &c).unwrap();
+        assert_eq!(status["structuredContent"]["pointer_position_known"], false);
+        let input = || {
+            let v = visual.lock().unwrap();
+            (v.path.len(), v.revision, transport.control_request_counts())
+        };
+        let sent = input();
+        let saved = serde_json::to_value(geometry::load(&root, SIMULATOR_DEVICE_ID, "fake-hdmi").unwrap()).unwrap();
+        let refuse = |next: &mut Server<FakeFrames, FakeOcr>, name: &str, args: Value, code: &str| {
+            let error = next.call(name, &args, &c).unwrap_err();
+            assert_eq!(error["code"], code, "{name} {args}");
+            assert_eq!(next.pointer, None, "{name} {args}");
+            assert_eq!(input(), sent, "{name} {args} sent input");
+        };
+        // Nothing moves, not even a calibration probe, before a valid observed seed.
+        let (x, y) = tip(FULL_AREA, visual.lock().unwrap().pointer);
+        refuse(&mut next, "calibrate", json!({"mode":"screen","cursor_x":x,"cursor_y":y}), "pointer.screenshot_required");
+        next.call("screenshot", &json!({}), &c).unwrap();
+        refuse(&mut next, "move", json!({"x":100,"y":120,"uncalibrated":true}), "pointer.position_required");
+        refuse(&mut next, "calibrate", json!({}), "pointer.position_required");
+        refuse(
+            &mut next,
+            "batch",
+            json!({"actions":[{"tool":"key","arguments":{"keys":["SHIFT"]}},{"tool":"click","arguments":{"x":100,"y":120,"uncalibrated":true}}]}),
+            "pointer.position_required",
+        );
+        refuse(&mut next, "calibrate", json!({"cursor_x":x}), "pointer.cursor_pair_required");
+        refuse(&mut next, "calibrate", json!({"mode":"screen","cursor_x":400,"cursor_y":y}), "pointer.outside_active_video");
+        let unchanged = serde_json::to_value(geometry::load(&root, SIMULATOR_DEVICE_ID, "fake-hdmi").unwrap()).unwrap();
+        assert_eq!(unchanged, saved, "a refused seed persists nothing");
+        // Screen-only binding moves nothing and leaves the position unknown.
+        let bound = next.call("calibrate", &json!({"mode":"screen"}), &c).unwrap();
+        assert_eq!(bound["structuredContent"]["bound"], true, "{bound}");
+        assert_eq!(bound["structuredContent"]["pointer_position_known"], false);
+        refuse(&mut next, "move", json!({"x":100,"y":120}), "pointer.position_required");
+        // Seeded from the observed tip, probes and the next move glide on from the real cursor.
+        let start = visual.lock().unwrap().pointer;
+        assert!((start[0] - 0.5).hypot(start[1] - 0.5) > 0.2, "off-centre start {start:?}");
+        let seeded = seed(&mut next, "probe", &c).unwrap();
+        assert_eq!(seeded["structuredContent"]["bound"], true, "{seeded}");
+        let status = next.call("status", &json!({}), &c).unwrap();
+        assert_eq!(status["structuredContent"]["pointer_position_known"], true);
+        next.call("screenshot", &json!({}), &c).unwrap();
+        let moved = next
+            .call("move", &json!({"x":100,"y":120,"uncalibrated":true}), &c)
+            .unwrap();
+        assert_eq!(moved["isError"], false, "{moved}");
+        let path = visual.lock().unwrap().path.clone();
+        assert!(path.len() > sent.0 + 10 * 12, "every probe glides");
+        let jump = largest_jump(&[&[start][..], &path[sent.0..]].concat());
+        assert!(jump < 0.12, "largest step {jump}");
+        assert!(next.pointer.unwrap().into_iter().zip(*path.last().unwrap()).all(|(a,b)| (a-b).abs() < 1e-12));
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Capture restarts invalidate cursor state even without a verified binding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbound_capture_restart_forgets_the_observed_cursor_before_input() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        seed(&mut s, "screen", &c).unwrap();
+        assert!(s.pointer.is_some());
+        // A failed probe may leave an observed position but no verified binding.
+        s.bound_generation = None;
+        s.geometry = None;
+        let mut restarted = frame(320, 240, s.frames.next + 1);
+        restarted.generation = 2;
+        s.frames.scripted.push_back(restarted.clone());
+        s.frames.scripted.push_back(restarted);
+        let sent = transport.control_request_counts();
+        s.call("screenshot", &json!({}), &c).unwrap();
+        assert!(s.pointer.is_none());
+        let refused = s
+            .call("move", &json!({"x":100,"y":120,"uncalibrated":true}), &c)
+            .unwrap_err();
+        assert_eq!(refused["code"], "pointer.position_required");
+        assert_eq!(transport.control_request_counts(), sent);
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Switching sticks in one session never glides from another stick's presumed position.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_switch_never_reuses_another_sticks_pointer() {
+    let ids = ["sim-stick-a", "sim-stick-b"];
+    let transports = ids.map(|_| Arc::new(SimulatorTransport::new(vec![]).with_extended_pointer()));
+    let daemon = Daemon::with_device_transports(
+        MemoryTokenStore::new("test-token-123456"),
+        ids.iter()
+            .zip(&transports)
+            .map(|(id, t)| {
+                (
+                    id.to_string(),
+                    id.to_string(),
+                    t.clone() as Arc<dyn keyferryd::DeviceTransport>,
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let visual = Arc::new(Mutex::new(Visual {
+        pointer: [0.7, 0.25],
+        revision: 0,
+        at: Instant::now(),
+        path: Vec::new(),
+    }));
+    let sent: Arc<Mutex<Vec<(String, [f64; 2])>>> = Arc::default();
+    let (observed, log) = (visual.clone(), sent.clone());
+    let app = daemon.router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let (observed, log) = (observed.clone(), log.clone());
+            async move {
+                let path = request.uri().path().to_owned();
+                let device = path.strip_prefix("/v1/devices/").and_then(|p| p.split('/').next()).unwrap_or("").to_owned();
+                let status = request.method() == axum::http::Method::GET && ids.contains(&device.as_str()) && path.ends_with(&device);
+                let request = if request.method() == axum::http::Method::POST && path.ends_with("/input-sequences") {
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, MAX_MESSAGE).await.unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap();
+                    let mut visual = observed.lock().unwrap();
+                    for action in value["actions"].as_array().unwrap() {
+                        if action["type"] == "move_absolute" {
+                            let at = [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()];
+                            visual.pointer = at;
+                            log.lock().unwrap().push((device.clone(), at));
+                        } else {
+                            visual.revision += 1;
+                        }
+                    }
+                    visual.at = Instant::now();
+                    drop(visual);
+                    axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+                } else {
+                    request
+                };
+                let response = next.run(request).await;
+                if !status {
+                    return response;
+                }
+                let (parts, body) = response.into_parts();
+                let mut v: Value = serde_json::from_slice(&axum::body::to_bytes(body, 8192).await.unwrap()).unwrap();
+                v["firmware"] = json!({"device_capability_mask":keyferry_protocol::capability::POINTER_EXTENDED_V1});
+                axum::response::Response::from_parts(parts, axum::body::Body::from(v.to_string()))
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut s = server();
+    let root = s.root.clone();
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("token"), "test-token-123456").unwrap();
+    (s.url, s.token) = (url, root.join("token"));
+    s.frames.pointer = Some(visual.clone());
+    s.frames.area = FULL_AREA;
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        for (id, (x, y)) in [
+            (ids[0], (60, 60)),
+            (ids[0], (280, 200)),
+            (ids[1], (280, 60)),
+            (ids[0], (60, 200)),
+        ] {
+            if s.device != id {
+                let selected = s.call("select_device", &json!({"device":id}), &c).unwrap();
+                assert_eq!(selected["structuredContent"]["selection"], "selected");
+                assert_eq!(s.pointer, None, "a newly leased stick's cursor is unknown");
+                s.call("screenshot", &json!({}), &c).unwrap();
+                let before = sent.lock().unwrap().len();
+                let refused = s
+                    .call("move", &json!({"x":x,"y":y,"uncalibrated":true}), &c)
+                    .unwrap_err();
+                assert_eq!(refused["code"], "pointer.position_required");
+                assert_eq!(
+                    sent.lock().unwrap().len(),
+                    before,
+                    "no input before the seed"
+                );
+                let seeded = seed(&mut s, "screen", &c).unwrap();
+                assert_eq!(seeded["structuredContent"]["pointer_moved"], false);
+                assert_eq!(seeded["structuredContent"]["pointer_position_known"], true);
+            }
+            // Where the target cursor really is: off centre at first, then wherever the
+            // other stick left it.
+            let from = visual.lock().unwrap().pointer;
+            let start = sent.lock().unwrap().len();
+            let moved = s
+                .call("move", &json!({"x":x,"y":y,"uncalibrated":true}), &c)
+                .unwrap();
+            assert_eq!(moved["isError"], false, "{moved}");
+            let sent = sent.lock().unwrap();
+            assert!(sent[start..].iter().all(|(d, _)| d == id), "{id}");
+            let path: Vec<[f64; 2]> = std::iter::once(from)
+                .chain(sent[start..].iter().map(|(_, at)| *at))
+                .collect();
+            assert!(largest_jump(&path) < 0.12, "{id}: {path:?}");
+            assert!(s
+                .pointer
+                .unwrap()
+                .into_iter()
+                .zip(sent.last().unwrap().1)
+                .all(|(a, b)| (a - b).abs() < 1e-12));
+        }
+        assert!(transports.iter().all(|t| !t.is_remotely_armed()));
+    })
+    .await
+    .unwrap();
+    task.abort();
+    drop(daemon);
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// Two agents on one controller: separate MCP servers, sticks and screens, one real daemon.
@@ -786,7 +1150,7 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
             (
                 id.to_string(),
                 Arc::new(Mutex::new(Visual {
-                    pointer: [0.5, 0.5],
+                    pointer: START,
                     revision: 0,
                     at: Instant::now(),
                     path: Vec::new(),
@@ -847,6 +1211,7 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
         s.url = url.clone();
         s.token = root.join("token");
         s.frames.pointer = Some(visuals[id].clone());
+        s.frames.area = FULL_AREA;
         s
     });
     fn script(s: &mut Server<FakeFrames, FakeOcr>, lost_first: bool) -> Vec<String> {
@@ -857,7 +1222,13 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
             assert_eq!(lost["command"]["outcome"], "UNKNOWN", "{lost}");
             commands.push(lost["command"]["command_id"].as_str().unwrap().to_owned());
         }
-        let calibration = s.call("calibrate", &json!({}), &c).unwrap();
+        // A fresh session seeds its probes from the cursor it sees; a known one needs no seed.
+        let calibration = if s.pointer.is_none() {
+            seed(s, "probe", &c)
+        } else {
+            s.call("calibrate", &json!({}), &c)
+        }
+        .unwrap();
         assert_eq!(
             calibration["structuredContent"]["bound"], true,
             "{calibration}"
@@ -969,6 +1340,7 @@ async fn screen_calibration_binds_without_any_pointer_input() {
         assert_eq!(r["result"]["isError"], false, "{r}");
         let result = &r["result"]["structuredContent"];
         assert_eq!(result["pointer_moved"], false);
+        assert_eq!(result["pointer_position_known"], true);
         assert_eq!(result["basis"], "video-area");
         assert_eq!(transport.control_request_counts(), counts, "no stick traffic");
         assert_eq!(s.frames.pointer.as_ref().unwrap().lock().unwrap().pointer, before);

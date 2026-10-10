@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--device", required=True, help="Exact authorized Waveshare UUID")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--calibrate", action="store_true")
+    parser.add_argument("--cursor-x", type=int, help="Observed cursor tip in the fresh screenshot")
+    parser.add_argument("--cursor-y", type=int, help="Observed cursor tip in the fresh screenshot")
     parser.add_argument("--format", choices=["png", "jpeg"])
     parser.add_argument("--image-benchmark", action="store_true")
     parser.add_argument("--images-only", action="store_true")
@@ -23,6 +25,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.samples <= 100:
         parser.error("samples must be 1..100")
+    if (args.cursor_x is None) != (args.cursor_y is None):
+        parser.error("--cursor-x and --cursor-y must be supplied together")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(
         [args.keyctl, "mcp", "--device", args.device],
@@ -65,9 +69,14 @@ def main():
         shot = call("screenshot", {})
         print(json.dumps(dict(capture={key: shot["structuredContent"].get(key) for key in ("width", "height", "native_width", "native_height", "frame_age_ms")})), flush=True)
         previous = picture(shot)
-        if args.calibrate and not args.images_only:
-            result = call("calibrate", {})["structuredContent"]
-            print(json.dumps(dict(calibration=result)), flush=True)
+        if not args.images_only and (args.calibrate or args.cursor_x is not None):
+            arguments = dict(mode="probe" if args.calibrate else "screen")
+            if args.cursor_x is not None:
+                arguments.update(cursor_x=args.cursor_x, cursor_y=args.cursor_y)
+            result = call("calibrate", arguments)["structuredContent"]
+            print(json.dumps(dict(calibration={key: result.get(key) for key in (
+                "bound", "latency_ms", "calibration_frame", "residual_rms_px",
+                "inlier_samples", "rejected_samples", "pointer_moved")})), flush=True)
             previous = picture(call("screenshot", {}))
         if args.image_benchmark or args.images_only:
             for format_name in ("png", "jpeg"):
@@ -94,7 +103,7 @@ def main():
             result = call("batch", arguments)
             print(json.dumps(dict(batch_ms=round((time.perf_counter()-start)*1000,1),
                                   completed=result["structuredContent"]["completed"],
-                                  actions=[{key: r.get(key) for key in ("latency_ms", "settled", "cursor_px")} for r in result["structuredContent"]["actions"]])), flush=True)
+                                  actions=[{key: r.get(key) for key in ("latency_ms", "settled")} for r in result["structuredContent"]["actions"]])), flush=True)
             return
         timings = []
         for index in range(args.samples):
@@ -116,7 +125,6 @@ def main():
             changed = sum(max(pixel) >= 35 for pixel in delta.get_flattened_data())
             row = dict(sample=index + 1, action_ms=round(action_ms, 1),
                        latency_ms=metadata.get("latency_ms"), settled=metadata.get("settled"),
-                       cursor_px=metadata.get("cursor_px"),
                        settle_method=metadata.get("settle_method"),
                        submission_ms=metadata.get("command", metadata).get("submission_ms"),
                        target_changed_pixels=changed,

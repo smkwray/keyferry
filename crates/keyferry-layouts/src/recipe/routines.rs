@@ -15,8 +15,8 @@ pub struct Glide {
     pub max_steps: u32,
     /// Below this per-axis HID distance (~4 px on a 1920-wide target) one report is not a jump.
     pub still_counts: f64,
-    /// Where a glide starts when no session has commanded a position for the device: the one
-    /// report a session may jump, to the screen centre, before gliding to the target.
+    /// Compiler/validation fallback for an unknown origin. Live MCP callers require an observed
+    /// cursor seed before compiling pointer motion; they never use this centre-report fallback.
     pub origin: [f64; 2],
 }
 pub const GLIDE: Glide = Glide {
@@ -1086,7 +1086,8 @@ mod tests {
         let still = glide_to(&mut Some([0.5, 0.5]), [0.501, 0.5]);
         assert_eq!(still, vec![report([0.501, 0.5])]);
 
-        // Unknown position: one report at the documented origin, then the same glide.
+        // Compiler-only fallback for validation: one origin report, then the glide.
+        // Live MCP requires an observed cursor and cannot select this fallback.
         let mut unknown = None;
         let first = glide_to(&mut unknown, [0.9, 0.9]);
         assert_eq!(xy(&first[0]), GLIDE.origin);
