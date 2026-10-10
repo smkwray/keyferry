@@ -1,4 +1,5 @@
 #pragma once
+#include "keyferry/transport_arbiter.h"
 
 #include <array>
 #include <cstddef>
@@ -53,6 +54,5 @@ struct RuntimeConfig {
 bool ParseIpv4Literal(const char* text, std::size_t length,
                       std::array<std::uint8_t, 4>* octets);
 bool ValidateRuntimeConfig(const RuntimeConfig& config);
-std::uint32_t ReconnectDelayMs(std::uint32_t consecutive_failures);
 
 }  // namespace keyferry::transport

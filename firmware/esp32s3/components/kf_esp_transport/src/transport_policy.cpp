@@ -117,12 +117,4 @@ bool ValidateRuntimeConfig(const RuntimeConfig& config) {
                      expected_name.size()) == 0;
 }
 
-std::uint32_t ReconnectDelayMs(std::uint32_t consecutive_failures) {
-  constexpr std::array<std::uint32_t, 6> kDelays{250, 500, 1000, 2000, 4000, 5000};
-  if (consecutive_failures == 0) {
-    return kDelays.front();
-  }
-  return kDelays[std::min<std::size_t>(consecutive_failures - 1, kDelays.size() - 1)];
-}
-
 }  // namespace keyferry::transport

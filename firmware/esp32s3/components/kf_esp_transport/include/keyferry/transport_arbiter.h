@@ -24,6 +24,8 @@ struct TransportAvailability {
   bool bluetooth = true;
 };
 
+std::uint32_t ReconnectDelayMs(std::uint32_t consecutive_failures);
+
 // Allocation-free policy for one EndpointSession shared by Wi-Fi and BLE.
 // The caller performs returned actions and is solely responsible for network,
 // radio, TLS, and fail-close effects.
@@ -33,6 +35,7 @@ class TransportArbiter final {
                           TransportAvailability availability = {});
   ArbitrationActions Disable(Path path, std::uint64_t now_ms);
   ArbitrationActions Poll(std::uint64_t now_ms);
+  void WifiTlsVerified(std::uint64_t now_ms);
   ArbitrationActions WifiAttemptFinished(bool authenticated,
                                          std::uint64_t now_ms);
   ArbitrationActions BleConnected(std::uint64_t now_ms);
@@ -63,8 +66,10 @@ class TransportArbiter final {
   std::uint64_t wifi_retry_started_ms_ = 0;
   std::uint32_t generation_ = 0;
   std::uint8_t consecutive_ble_failures_ = 0;
+  std::uint32_t consecutive_wifi_failures_ = 0;
   TransportAvailability availability_{};
   bool wifi_candidate_active_ = false;
+  bool wifi_tls_verified_ = false;
   bool ble_advertising_ = false;
   bool ble_connected_ = false;
   bool ble_authentication_permitted_ = false;
