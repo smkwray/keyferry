@@ -327,6 +327,7 @@ async fn supervise_owner_tailnet(
             keyferryd::serve_tailnet_mtls(daemon.clone(), control_address, installation.clone());
         tokio::pin!(probe);
         tokio::pin!(control);
+        let mut lookup_unavailable = false;
         loop {
             tokio::select! {
                 result = &mut probe => {
@@ -342,15 +343,27 @@ async fn supervise_owner_tailnet(
                     break;
                 }
                 () = time::sleep(TAILSCALE_REFRESH) => {
-                    if discover_local_tailscale_ipv4().await != Some(ip) {
+                    let observed = discover_local_tailscale_ipv4().await;
+                    if owner_listener_address_changed(ip, observed) {
                         keyferryd::daemon_log!("keyferryd tailnet address changed; rebinding owner gateway listeners");
                         break;
                     }
+                    if observed.is_none() && !lookup_unavailable {
+                        keyferryd::daemon_log!("Tailscale address lookup unavailable; retaining bound owner gateway listeners");
+                    } else if observed.is_some() && lookup_unavailable {
+                        keyferryd::daemon_log!("Tailscale address lookup recovered; owner gateway address unchanged");
+                    }
+                    lookup_unavailable = observed.is_none();
                 }
             }
         }
         time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+fn owner_listener_address_changed(bound: IpAddr, observed: Option<IpAddr>) -> bool {
+    // A failed CLI invocation is not evidence that the bound address changed.
+    observed.is_some_and(|address| address != bound)
 }
 
 fn owner_control_port(probe_port: u16) -> Result<u16, keyferryd::DaemonError> {
@@ -556,6 +569,18 @@ fn parse_options(args: &[String]) -> Result<Options, keyferryd::DaemonError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_tailnet_lookup_failure_preserves_bound_owner_listeners() {
+        let bound = "100.64.0.7".parse().unwrap();
+        for observation in [Some(bound), None, None, Some(bound)] {
+            assert!(!owner_listener_address_changed(bound, observation));
+        }
+        assert!(owner_listener_address_changed(
+            bound,
+            Some("100.64.0.8".parse().unwrap())
+        ));
+    }
 
     #[test]
     fn ordinary_config_path_is_explicit() {
