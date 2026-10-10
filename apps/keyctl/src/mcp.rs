@@ -411,7 +411,7 @@ fn tools() -> Vec<Value> {
         add(name,"Observe fresh frames, optionally within a screenshot-pixel region. Returns matched or timed_out; never treats a frozen/missing stream as stable.",json!({"timeout_ms":{"type":"integer","minimum":1,"maximum":30000},"region":region}),&["timeout_ms"],true);
     }
     add("find_text","Local OCR line boxes in screenshot pixels, optional case-insensitive substring query. No persistence/logging; Windows only.",json!({"query":{"type":"string","maxLength":256}}),&[],true);
-    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Masks small animations learned while stationary; waits up to 3 s per probe and reports measured latency_ms. Persists only geometry. Use an approved harmless target.",json!({}),&[],false);
+    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Masks small animations learned while stationary; waits up to 3 s per probe and reports measured latency_ms. Persists only geometry. Use an approved harmless target. mode:\"screen\" never moves the pointer: it binds from the visible video area (bars excluded), reusing a saved probe fit for this stick/source when it still matches; use it on targets where probing is not allowed.",json!({"mode":{"type":"string","enum":["probe","screen"],"default":"probe"}}),&[],false);
     add("status","Authenticated device/armed state, pointer capability, capture restart status and current/persisted geometry binding.",json!({}),&[],true);
     add(
         "list_devices",
@@ -1059,6 +1059,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             selection?;
         }
         if name == "calibrate" {
+            if args["mode"] == "screen" {
+                return self
+                    .calibrate_screen(cancelled)
+                    .map(|v| tool_result(v, false));
+            }
             return self.calibrate(cancelled).map(|v| tool_result(v, false));
         }
         if name == "type_text" {
@@ -1908,6 +1913,56 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         result["geometry"] = json!(fitted);
         result["active_video_rectangle"] = json!(fitted.active_rectangle());
         Ok(result)
+    }
+    /// Motion-free binding (owner: no probing on CTHY). Absolute reports span the target's
+    /// whole display, so the visible video area is the mapping. A saved probe fit for this
+    /// stick/source is preferred while it agrees with that area within a few pixels.
+    fn calibrate_screen(&mut self, cancelled: &AtomicBool) -> Result<Value, Value> {
+        self.choose_device()?;
+        self.frames.device(&self.device);
+        self.bound_generation = None;
+        self.geometry = None;
+        self.animation = None;
+        self.require_pointer()?;
+        let saved = {
+            self.loaded = false;
+            let _ = self.frame(cancelled)?;
+            self.geometry.take()
+        };
+        self.loaded = true;
+        let view = self.frame(cancelled)?;
+        let [x, y, width, height] = geometry::active_video(&view);
+        if width < view.width as f64 / 2.0 || height < view.height as f64 / 2.0 {
+            return Err(failure("calibration.animated_or_ambiguous"));
+        }
+        let source = self.source.clone().unwrap_or_else(|| "auto".into());
+        let area = Geometry {
+            schema: "keyferry.capture-geometry.v1".into(),
+            device: self.device.clone(),
+            source: source.clone(),
+            native: view.native,
+            screenshot: (view.width, view.height),
+            origin: [x, y],
+            extent: [width - 1.0, height - 1.0],
+        };
+        let agrees = |g: &Geometry| {
+            (0..2).all(|a| {
+                (g.origin[a] - area.origin[a]).abs() <= 4.0
+                    && (g.origin[a] + g.extent[a] - area.origin[a] - area.extent[a]).abs() <= 4.0
+            })
+        };
+        let (chosen, basis) = match saved {
+            Some(g) if g.matches(&self.device, &source, &view) && agrees(&g) => {
+                (g, "saved-probe-fit")
+            }
+            _ => (area, "video-area"),
+        };
+        geometry::save(&self.root, &chosen).map_err(failure)?;
+        self.bound_generation = Some(view.generation);
+        self.geometry = Some(chosen.clone());
+        Ok(
+            json!({"bound":true,"mode":"screen","basis":basis,"pointer_moved":false,"geometry":chosen,"active_video_rectangle":chosen.active_rectangle()}),
+        )
     }
     fn calibrate_native(
         &mut self,

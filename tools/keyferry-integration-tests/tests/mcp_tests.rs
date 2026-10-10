@@ -951,3 +951,29 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
     task.abort();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn screen_calibration_binds_without_any_pointer_input() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        let before = s.frames.pointer.as_ref().unwrap().lock().unwrap().pointer;
+        let counts = transport.control_request_counts();
+        let r = s.dispatch(json!({"jsonrpc":"2.0","id":"screen-cal","method":"tools/call","params":{"name":"calibrate","arguments":{"mode":"screen"}}}), &c).unwrap();
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        let result = &r["result"]["structuredContent"];
+        assert_eq!(result["pointer_moved"], false);
+        assert_eq!(result["basis"], "video-area");
+        assert_eq!(transport.control_request_counts(), counts, "no stick traffic");
+        assert_eq!(s.frames.pointer.as_ref().unwrap().lock().unwrap().pointer, before);
+        s.call("screenshot", &json!({}), &c).unwrap();
+        let moved = s.dispatch(json!({"jsonrpc":"2.0","id":"after","method":"tools/call","params":{"name":"move","arguments":{"x":100,"y":120}}}), &c).unwrap();
+        assert_eq!(moved["result"]["isError"], false, "{moved}");
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
