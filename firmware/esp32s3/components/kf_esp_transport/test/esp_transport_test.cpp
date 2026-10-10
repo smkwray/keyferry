@@ -209,8 +209,10 @@ void TestHealthyHolderWithCompetingControllers(unsigned count) {
     }
     idf_test::advertised = (idf_test::advertised + 1) % count;
     // The exact original trigger, persistently reported by an unused carrier.
-    idf_test::ble_synchronized = false;
-    idf_test::ble_events.fault = keyferry::ble::Fault::kBadState;
+    if (runtime.in_flight) {
+      idf_test::ble_synchronized = false;
+      idf_test::ble_events.fault = keyferry::ble::Fault::kBadState;
+    }
     // Another controller restarts; its connection availability is irrelevant.
     idf_test::reachable[1] = idf_test::now % 1000 < 500;
     if (runtime.in_flight) {
