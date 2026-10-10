@@ -53,18 +53,21 @@ endif()
 
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
 
-if(KEYFERRY_PRIVATE_HEADER)
-    add_custom_target(keyferry_private_config_refresh ALL)
-else()
-    add_custom_target(keyferry_private_config_refresh ALL
+if(NOT KEYFERRY_PRIVATE_HEADER)
+    add_custom_command(
+        OUTPUT "${KEYFERRY_PRIVATE_CONFIG_DIR}/materialize.stamp"
+        BYPRODUCTS "${KEYFERRY_PRIVATE_CONFIG_DIR}/keyferry_hil_private.h"
         COMMAND
             "${CMAKE_COMMAND}" -E env
-            "KEYFERRY_PAIRING_OUTPUT_DIR=${KEYFERRY_PRIVATE_CONFIG_DIR}"
-            "${KEYFERRY_CARGO_EXECUTABLE}" run --locked --offline --quiet
-            -p keyferry-pairing -- materialize
+            "KEYFERRY_CARGO_EXECUTABLE=${KEYFERRY_CARGO_EXECUTABLE}"
+            "${KEYFERRY_PYTHON_EXECUTABLE}" "${KEYFERRY_WORKSPACE_ROOT}/scripts/materialize_private_config.py"
+            --root "${KEYFERRY_WORKSPACE_ROOT}" --output "${KEYFERRY_PRIVATE_CONFIG_DIR}"
+        DEPENDS ${KEYFERRY_PAIRING_INPUTS}
         WORKING_DIRECTORY "${KEYFERRY_WORKSPACE_ROOT}"
         COMMENT "Validating private first-HIL configuration"
         VERBATIM
     )
+    add_custom_target(keyferry_private_config_refresh
+        DEPENDS "${KEYFERRY_PRIVATE_CONFIG_DIR}/materialize.stamp")
+    add_dependencies(${COMPONENT_LIB} keyferry_private_config_refresh)
 endif()
-add_dependencies(${COMPONENT_LIB} keyferry_private_config_refresh)

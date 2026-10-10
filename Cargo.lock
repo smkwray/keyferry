@@ -2669,20 +2669,17 @@ dependencies = [
 name = "keyctl"
 version = "0.0.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "ctrlc",
  "keyferry-capture",
  "keyferry-core",
  "keyferry-layouts",
  "keyferry-protocol",
- "keyferryd",
  "png",
  "serde",
  "serde_json",
  "sha2",
  "time",
- "tokio",
  "uuid",
 ]
 
@@ -2775,6 +2772,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyferry-integration-tests"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "ctrlc",
+ "keyferry-capture",
+ "keyferry-core",
+ "keyferry-layouts",
+ "keyferry-protocol",
+ "keyferryd",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "keyferry-layouts"
 version = "0.0.0"
 dependencies = [
@@ -2846,7 +2864,6 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "hyper",
- "keyferry",
  "keyferry-capture",
  "keyferry-core",
  "keyferry-gateway",

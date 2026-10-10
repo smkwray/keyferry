@@ -1,0 +1,42 @@
+[package]
+name = "keyferry-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+autotests = false
+
+[dependencies]
+keyferry-capture.workspace = true
+sha2.workspace = true
+base64.workspace = true
+ctrlc.workspace = true
+keyferry-core.workspace = true
+keyferry-layouts.workspace = true
+keyferry-protocol.workspace = true
+png.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+keyferryd = { path = "../../apps/keyferryd" }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+axum = { version = "=0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
+
+
+[[bin]]
+name = "keyctl-integration-driver"
+path = "../../apps/keyctl/src/main.rs"
+test = false
+
+[[test]]
+name = "mcp"
+path = "tests/mcp.rs"
+
+[[test]]
+name = "capture_daemon"
+path = "../../apps/keyctl/tests/capture_cli.rs"
+harness = false

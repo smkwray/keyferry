@@ -5,16 +5,44 @@ use std::{
     env, fs,
     io::{self, Write},
     path::Path,
-    process::{self, Command, Output},
+    process::{self, Command},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(not(keyferry_daemon_tests))]
+use std::{process::Output, time::Instant};
 
 fn main() {
     if let Ok(mode) = env::var("KEYCTL_FAKE_FFMPEG") {
         fake_ffmpeg(&mode);
         return;
     }
+    #[cfg(keyferry_daemon_tests)]
+    {
+        // Preserve the original platform gate: fake ffmpeg cannot replace
+        // native Windows discovery, so this smoke must not require hardware.
+        if cfg!(windows) {
+            println!("capture_daemon: NOT APPLICABLE (native Windows discovery)");
+            return;
+        }
+        let directory =
+            env::temp_dir().join(format!("keyctl-daemon-capture-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&directory).unwrap();
+        let fake = directory.join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        fs::copy(env::current_exe().unwrap(), &fake).unwrap();
+        daemon_tests::mcp_daemon_smoke(&directory);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[cfg(not(keyferry_daemon_tests))]
+    run_capture_tests();
+}
+
+#[cfg(not(keyferry_daemon_tests))]
+fn run_capture_tests() {
     one_shot_warmup();
     if cfg!(windows) {
         run_native_windows_tests();
@@ -115,6 +143,7 @@ fn fake_ffmpeg(mode: &str) {
     }
 }
 
+#[cfg(not(keyferry_daemon_tests))]
 fn one_shot_warmup() {
     let mut command = keyferry_core::process::command(env::current_exe().unwrap());
     command
@@ -135,8 +164,9 @@ fn one_shot_warmup() {
     assert!(start.elapsed() < Duration::from_secs(9));
 }
 
+#[cfg(not(keyferry_daemon_tests))]
 fn invoke(directory: &Path, mode: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_keyctl"))
+    Command::new(cli_executable())
         .args([
             "--url",
             "http://127.0.0.1:9",
@@ -153,6 +183,7 @@ fn invoke(directory: &Path, mode: &str, args: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(not(keyferry_daemon_tests))]
 fn value(output: &Output, exit: i32) -> Value {
     assert_eq!(
         output.status.code(),
@@ -167,6 +198,7 @@ fn value(output: &Output, exit: i32) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+#[cfg(not(keyferry_daemon_tests))]
 fn run_native_windows_tests() {
     // A hostile fake ffmpeg on PATH cannot affect Windows native discovery.
     let directory = env::temp_dir().join(format!("keyctl-native-capture-{}", uuid::Uuid::now_v7()));
@@ -208,6 +240,7 @@ fn run_native_windows_tests() {
     );
 }
 
+#[cfg(not(keyferry_daemon_tests))]
 fn run_tests() {
     let directory = env::temp_dir().join(format!("keyctl-capture-{}", uuid::Uuid::now_v7()));
     fs::create_dir(&directory).unwrap();
@@ -292,7 +325,6 @@ fn run_tests() {
         "timed-out child must stop"
     );
     assert!(!frame.exists());
-    mcp_daemon_smoke(&directory);
     fs::remove_file(fake).unwrap();
     assert_eq!(
         value(&invoke(&directory, "ok", &["list"]), 23)["error"]["code"],
@@ -311,126 +343,17 @@ fn run_tests() {
     );
 }
 
-fn mcp_daemon_smoke(directory: &Path) {
-    use keyferryd::{Daemon, MemoryTokenStore, SIMULATOR_DEVICE_ID};
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-    let original_path = env::var_os("PATH").unwrap();
-    let mut paths = vec![directory.to_owned()];
-    paths.extend(env::split_paths(&original_path));
-    env::set_var("PATH", env::join_paths(paths).unwrap());
-    env::set_var("KEYCTL_FAKE_FFMPEG", "ok");
-    env::set_var("FFREPORT", "file=must-not-write-a-report.log");
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let (daemon, port, task) = runtime.block_on(async {
-        let daemon = Daemon::new(MemoryTokenStore::new("test-token-123456")).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let app = daemon.router();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (daemon, port, task)
-    });
-    let token = directory.join("mcp-token");
-    fs::write(&token, "test-token-123456").unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_keyctl"))
-        .args([
-            "--url",
-            &format!("http://127.0.0.1:{port}"),
-            "--token-file",
-            token.to_str().unwrap(),
-            "mcp",
-        ])
-        .env("LOCALAPPDATA", directory)
-        .env("XDG_STATE_HOME", directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut input = child.stdin.take().unwrap();
-    let mut output = BufReader::new(child.stdout.take().unwrap());
-    let request = |input: &mut std::process::ChildStdin,
-                   output: &mut BufReader<std::process::ChildStdout>,
-                   id,
-                   name,
-                   args| {
-        writeln!(input,"{}",serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
-        input.flush().unwrap();
-        let mut line = String::new();
-        output.read_line(&mut line).unwrap();
-        serde_json::from_str::<Value>(&line).unwrap()["result"].clone()
-    };
-    writeln!(input,"{}",serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"test","version":"1"},"capabilities":{}}})).unwrap();
-    input.flush().unwrap();
-    let mut line = String::new();
-    output.read_line(&mut line).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&line).unwrap()["result"]["serverInfo"]["name"],
-        "keyferry"
-    );
-    writeln!(
-        input,
-        "{}",
-        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
-    )
-    .unwrap();
-    let status = request(&mut input, &mut output, 1, "status", serde_json::json!({}));
-    assert_eq!(
-        status["structuredContent"]["selected_device"],
-        SIMULATOR_DEVICE_ID
-    );
-    assert_eq!(
-        status["structuredContent"]["device_selection"],
-        "automatic-single"
-    );
-    assert_eq!(
-        status["structuredContent"]["capture"]["selection"],
-        "automatic-local"
-    );
-    let inventory = request(
-        &mut input,
-        &mut output,
-        2,
-        "list_capture_sources",
-        serde_json::json!({}),
-    );
-    let source = inventory["structuredContent"]["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["recognized"] == true)
-        .unwrap()["id"]
-        .clone();
-    let selected = request(
-        &mut input,
-        &mut output,
-        3,
-        "select_capture_source",
-        serde_json::json!({"source":source}),
-    );
-    assert_eq!(selected["structuredContent"]["selection"], "selected");
-    let frame = request(
-        &mut input,
-        &mut output,
-        4,
-        "screenshot",
-        serde_json::json!({}),
-    );
-    assert_eq!(frame["isError"], false, "{frame}");
-    assert_eq!(frame["content"][0]["type"], "image");
-    assert_eq!(frame["structuredContent"]["capture"]["owner"], "keyferryd");
-    drop(input);
-    let result = child.wait_with_output().unwrap();
-    assert!(result.status.success());
-    assert!(result.stderr.is_empty());
-    runtime.block_on(daemon.shutdown(Duration::from_secs(3)));
-    task.abort();
-    drop(daemon);
-    runtime.shutdown_timeout(Duration::from_secs(3));
-    env::set_var("PATH", original_path);
-    env::remove_var("KEYCTL_FAKE_FFMPEG");
-    env::remove_var("FFREPORT");
-    assert!(!directory.join("must-not-write-a-report.log").exists());
+fn cli_executable() -> &'static str {
+    #[cfg(keyferry_daemon_tests)]
+    {
+        env!("CARGO_BIN_EXE_keyctl-integration-driver")
+    }
+    #[cfg(not(keyferry_daemon_tests))]
+    {
+        env!("CARGO_BIN_EXE_keyctl")
+    }
 }
+
+#[cfg(keyferry_daemon_tests)]
+#[path = "../../../tools/keyferry-integration-tests/tests/capture_daemon.rs"]
+mod daemon_tests;

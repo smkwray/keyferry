@@ -87,25 +87,29 @@ if(KEYFERRY_PRIVATE_HEADER)
             "${KEYFERRY_PRIVATE_HEADER}" DIRECTORY)
     endif()
 else()
-    execute_process(
-        COMMAND
-            "${CMAKE_COMMAND}" -E env
-            "KEYFERRY_PAIRING_OUTPUT_DIR=${KEYFERRY_PRIVATE_CONFIG_DIR}"
-            "${KEYFERRY_CARGO_EXECUTABLE}" run --locked --offline --quiet
-            -p keyferry-pairing -- materialize
-        WORKING_DIRECTORY "${KEYFERRY_WORKSPACE_ROOT}"
-        RESULT_VARIABLE KEYFERRY_PAIRING_RESULT
-        OUTPUT_QUIET
-        ERROR_VARIABLE KEYFERRY_PAIRING_ERROR
-    )
-    if(NOT KEYFERRY_PAIRING_RESULT EQUAL 0)
-        string(STRIP "${KEYFERRY_PAIRING_ERROR}" KEYFERRY_PAIRING_ERROR)
-        message(FATAL_ERROR
-            "Private first-HIL pairing validation/materialization failed. "
-            "Create and validate secrets/first-hil before configuring this image. "
-            "${KEYFERRY_PAIRING_ERROR}"
-        )
+    find_program(KEYFERRY_PYTHON_EXECUTABLE python REQUIRED)
+    if(DEFINED ENV{KEYFERRY_PAIRING_BUNDLE})
+        set(KEYFERRY_PAIRING_BUNDLE "$ENV{KEYFERRY_PAIRING_BUNDLE}")
+    else()
+        set(KEYFERRY_PAIRING_BUNDLE "${KEYFERRY_WORKSPACE_ROOT}/secrets/first-hil")
     endif()
+    file(GLOB_RECURSE KEYFERRY_PAIRING_INPUTS CONFIGURE_DEPENDS
+        "${KEYFERRY_PAIRING_BUNDLE}/*"
+        "${KEYFERRY_WORKSPACE_ROOT}/tools/keyferry-pairing/src/*.rs"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-core/src/*.rs"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-gateway/src/*.rs"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-local-management/src/*.rs"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-protocol/src/*.rs")
+    list(APPEND KEYFERRY_PAIRING_INPUTS
+        "${KEYFERRY_WORKSPACE_ROOT}/Cargo.lock"
+        "${KEYFERRY_WORKSPACE_ROOT}/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/rust-toolchain.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/tools/keyferry-pairing/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-core/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-gateway/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-local-management/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/crates/keyferry-protocol/Cargo.toml"
+        "${KEYFERRY_WORKSPACE_ROOT}/scripts/materialize_private_config.py")
 endif()
 
 list(APPEND SDKCONFIG_DEFAULTS

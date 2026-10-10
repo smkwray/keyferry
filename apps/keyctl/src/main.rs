@@ -3005,7 +3005,7 @@ fn print_help() {
     println!("{}", help_text());
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(keyferry_daemon_tests)))]
 mod tests {
     use super::*;
     use std::net::TcpListener;

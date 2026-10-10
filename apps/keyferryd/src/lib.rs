@@ -10214,12 +10214,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 8192).await.unwrap();
         assert!(matches!(
-            keyferry::gateway_probe::classify_gateway_response(
+            keyferry_gateway::probe::classify_gateway_response(
                 &body,
                 nonce,
                 std::slice::from_ref(&trusted_spki)
             ),
-            keyferry::gateway_probe::GatewayCandidateClassification::AuthenticatedGateway(_)
+            keyferry_gateway::probe::GatewayCandidateClassification::AuthenticatedGateway(_)
         ));
         let response: GatewayProbeResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(response.request_nonce, encode_hex(&nonce));

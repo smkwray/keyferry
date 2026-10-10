@@ -233,6 +233,7 @@ class ControllerReleaseTests(unittest.TestCase):
         gate = (project / "scripts" / "check_macos_package.sh").read_text()
         self.assertIn("logical_cpus * cpu_percent / 100", gate)
         self.assertIn("project.toml", gate)
+        self.assertIn("cpu_percent", gate)
         self.assertIn('rustup show active-toolchain', gate)
         self.assertNotIn('rust_toolchain=1.92.0', gate)
         self.assertIn('rustup which --toolchain "$rust_toolchain" rustc', gate)
@@ -259,6 +260,7 @@ class ControllerReleaseTests(unittest.TestCase):
         gate = (project / "scripts" / "check_windows_package.ps1").read_text()
         self.assertIn("project.toml", gate)
         self.assertIn("cpu_percent", gate)
+        self.assertIn("build_governor.py", gate)
         self.assertIn("RandomNumberGenerator]::Create()", gate)
         self.assertNotIn("RandomNumberGenerator]::Fill", gate)
         self.assertIn("cargo test --locked --release -p keyferryd", gate)
@@ -294,10 +296,11 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertIn("[int]$Jobs = 0", helper)
         self.assertIn("project.toml", helper)
         self.assertIn("cpu_percent", helper)
+        self.assertIn("build_governor.py", helper)
         self.assertIn("if ($Jobs -gt $buildJobCeiling)", helper)
         self.assertIn("if ($Jobs -eq 0) { $buildJobCeiling } else { $Jobs }", helper)
         self.assertIn("$env:IDF_PY_BUILD_JOBS = $buildJobs", helper)
-        self.assertIn("--jobs $buildJobs", helper)
+        self.assertIn("materialize_private_config.py", helper)
 
     def test_refuses_to_overwrite_an_existing_release(self):
         with tempfile.TemporaryDirectory() as directory:
