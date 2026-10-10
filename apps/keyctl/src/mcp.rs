@@ -5,6 +5,11 @@ use super::{
     ocr::{self, NativeOcr, Ocr},
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
+use keyferry_layouts::recipe::{
+    self as recipes,
+    routines::{self, Step},
+    RecipeV1,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -189,6 +194,110 @@ pub(super) fn calibrate_cli(args: &[String], url: &str, token: &Path) -> u8 {
     }
 }
 
+fn routine_steps(recipe: &RecipeV1, args: &Value) -> Result<Vec<Step>, Value> {
+    if !recipe.is_routine() {
+        return Err(failure("recipe.routine_required"));
+    }
+    recipes::validate(recipe).map_err(|e| failure(e.code()))?;
+    if let Some(os) = args["target_os"].as_str() {
+        let declared =
+            serde_json::to_value(recipe.target_os).map_err(|_| failure("recipe.schema"))?;
+        if declared != "any" && declared != os {
+            return Err(failure("recipe.target_os_mismatch"));
+        }
+    }
+    let params = recipes::parse_params(
+        args.get("params")
+            .unwrap_or(&json!({}))
+            .to_string()
+            .as_bytes(),
+    )
+    .map_err(|e| failure(e.code()))?;
+    routines::resolve(recipe, &params, false).map_err(|e| failure(e.code()))
+}
+
+pub(super) fn routine_cli(args: &[String], url: &str, token: &Path) -> u8 {
+    let execute = || -> Result<Value, Value> {
+        let device = args.first().ok_or_else(|| failure("input.usage"))?;
+        uuid::Uuid::parse_str(device).map_err(|_| failure("input.device_uuid"))?;
+        let name = args.get(1).ok_or_else(|| failure("input.usage"))?;
+        let mut source = None;
+        let mut calibrate = false;
+        let mut arguments = json!({"name":name});
+        let mut i = 2;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--calibrate" if !calibrate => calibrate = true,
+                "--source" if source.is_none() => {
+                    i += 1;
+                    source = Some(args.get(i).ok_or_else(|| failure("input.usage"))?.clone());
+                }
+                "--target-os" if arguments.get("target_os").is_none() => {
+                    i += 1;
+                    arguments["target_os"] =
+                        json!(args.get(i).ok_or_else(|| failure("input.usage"))?);
+                }
+                _ => return Err(failure("input.argv_payload_refused")),
+            }
+            i += 1;
+        }
+        let library = super::recipe::Library::current();
+        let recipe = library.load(name).map_err(|e| e.json())?;
+        recipes::validate(&recipe).map_err(|e| failure(e.code()))?;
+        if recipe
+            .parameters()
+            .iter()
+            .any(|p| p.kind != recipes::ParameterKind::Secure)
+        {
+            let bytes = super::recipe::read_capped(io::stdin().lock())
+                .map_err(|_| failure("params.json"))?;
+            // Strict parser runs again in run_routine; keep source/values out of errors.
+            recipes::parse_params(&bytes).map_err(|e| failure(e.code()))?;
+            arguments["params"] =
+                serde_json::from_slice(&bytes).map_err(|_| failure("params.json"))?;
+        }
+        if arguments["target_os"]
+            .as_str()
+            .is_some_and(|os| !["macos", "windows", "linux", "any"].contains(&os))
+        {
+            return Err(failure("input.tool_arguments"));
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        ctrlc::set_handler(move || signal.store(true, Ordering::Release))
+            .map_err(|_| failure("internal.interrupt_handler"))?;
+        let mut server = Server::new(
+            device.clone(),
+            source,
+            url,
+            token,
+            super::state_root().join("capture-geometry"),
+            |source| DaemonFrames::new(source, url, token),
+            NativeOcr,
+        );
+        routine_steps(&recipe, &arguments)?;
+        if calibrate {
+            server.calibrate(&cancelled)?;
+            server.call("screenshot", &json!({}), &cancelled)?;
+        }
+        server.run_routine(&recipe, &arguments, false, false, &cancelled)
+    };
+    match execute() {
+        Ok(result) => {
+            super::emit_json_line(&result);
+            if result["isError"] == true {
+                25
+            } else {
+                0
+            }
+        }
+        Err(error) => {
+            super::emit_json_line(&json!({"error":error}));
+            20
+        }
+    }
+}
+
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, &'static str> {
     let mut bytes = Vec::new();
     let n = Read::by_ref(reader)
@@ -326,10 +435,21 @@ fn tools() -> Vec<Value> {
         &["source"],
         true,
     );
+    add("routines", "Discover saved recipes before improvising. Searches the shared skill library and local overrides. Example: {\"os\":\"macos\",\"query\":\"settings\"}. Invalid entries are counted explicitly.",
+        json!({"query":{"type":"string","maxLength":256},"os":{"type":"string","enum":["macos","windows","linux","any"]},"tag":{"type":"string","maxLength":32}}),&[],true);
+    add("routine_run", "Run a named keyferry.recipe.v1 routine once. Example: {\"name\":\"clear-stacked-dialogs\",\"params\":{\"count\":10,\"delay_ms\":800}}. Merges input stretches, stops at a failed check/non-EMITTED result, returns per-step receipts and a final image. target_os optionally asserts the target OS (never inferred from controller OS). Passwords only via secure_text's owner dialog; REQUESTED is not input proof.",
+        json!({"name":{"type":"string","minLength":1,"maxLength":63},"params":{"type":"object","additionalProperties":true},"target_os":{"type":"string","enum":["macos","windows","linux","any"]},"format":{"type":"string","enum":["png","jpeg"]}}),&["name"],false);
+    add(
+        "routine_save",
+        r#"Validate and save after a manual flow succeeds. Example: {"definition":{"schema":"keyferry.recipe.v1","name":"copy-all","target_os":"windows","verified":false,"steps":[{"type":"key","keys":["CTRL","A"]},{"type":"key","keys":["CTRL","C"]}]}}. Exclusive create; replace:true deliberately replaces. Generalize parameters and add checkpoints; never save secrets."#,
+        json!({"definition":{"type":"object","additionalProperties":true},"replace":{"type":"boolean"}}),
+        &["definition"],
+        false,
+    );
     let actions: Vec<Value> = result.iter().filter(|t| ["move", "click", "drag", "scroll", "key", "type_text"].contains(&t["name"].as_str().unwrap_or("")))
-        .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"]}})).collect();
-    result.push(json!({"name":"batch","description":"Execute up to 32 ordered actions, observing each before the next. Stops at the first failed/non-EMITTED command or unsettled observation; never retries. Returns receipts and one final observed image by default.",
-        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
+        .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"],"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean"}}})).collect();
+    result.push(json!({"name":"batch","description":r#"Ad-hoc input through the routine executor: contiguous actions merge into one bounded command. Example: {"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":800}],"settle":false}. Per-action settle:true inserts a stable checkpoint; settle defaults true after the last stretch. Stops on non-EMITTED/failed check; never retries. One final image by default."#,
+        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean","default":true},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
         "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}));
     result
 }
@@ -379,6 +499,9 @@ fn validate(value: &Value, schema: &Value) -> bool {
         }
     }
     if let Some(o) = value.as_object() {
+        if schema["additionalProperties"] == true && schema.get("properties").is_none() {
+            return true;
+        }
         if schema["required"]
             .as_array()
             .is_some_and(|a| a.iter().any(|k| !o.contains_key(k.as_str().unwrap_or(""))))
@@ -399,6 +522,8 @@ fn validate(value: &Value, schema: &Value) -> bool {
 }
 
 struct Server<F: FrameSource, O: Ocr> {
+    library: super::recipe::Library,
+    secure_prompt: fn(&str, &str, &Path) -> Result<Value, &'static str>,
     device: String,
     device_choice: &'static str,
     source: Option<String>,
@@ -430,6 +555,8 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         ocr: O,
     ) -> Self {
         Self {
+            library: super::recipe::Library::current(),
+            secure_prompt: super::secure_text_request,
             frames: create(source.clone()),
             device_choice: if device.is_empty() {
                 "unselected"
@@ -494,7 +621,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                     _ => "2025-11-25",
                 };
                 json!({"protocolVersion":version,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"keyferry","version":env!("CARGO_PKG_VERSION")},
-                    "instructions":"Screens and OCR may contain secrets. Calibrate a harmless target each session before pointer tools. Never retry UNKNOWN actions; inspect the target and reconcile command_id. Secure text stays in the owner-only dialog."})
+                    "instructions":"Screens and OCR may contain secrets. Calibrate a harmless target each session before pointer tools. Never retry UNKNOWN actions; inspect the target and reconcile command_id. Secure text stays in the owner-only dialog. Check routines before improvising; save successful generalized flows with routine_save."})
             }
             "ping" => json!({}),
             _ if !self.ready => return Some(rpc_error(id, -32000, "rpc.not_initialized")),
@@ -622,12 +749,26 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         pointer: bool,
         cancelled: &AtomicBool,
     ) -> Result<Value, Value> {
+        self.submission_config(actions, pointer, None, 5000, cancelled)
+    }
+    fn submission_config(
+        &self,
+        actions: Vec<Value>,
+        pointer: bool,
+        timing: Option<keyferry_layouts::InputKeyboardTiming>,
+        start_within_ms: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
         if cancelled.load(Ordering::Acquire) {
             return Err(failure("request.cancelled"));
         }
-        let mut request = json!({"schema":if pointer {"keyferry.input-sequence.v2"}else{"keyferry.input-sequence.v1"},"arm":"command-scoped","start_within_ms":5000,"actions":actions});
-        if !pointer {
+        let keyboard = actions.iter().any(routines::has_keyboard);
+        let mut request = json!({"schema":if pointer {"keyferry.input-sequence.v2"}else{"keyferry.input-sequence.v1"},"arm":"command-scoped","start_within_ms":start_within_ms,"actions":actions});
+        if keyboard {
             request["keyboard_profile"] = json!(super::LEGACY_WIRE_MAPPING);
+            if let Some(timing) = timing {
+                request["keyboard_timing"] = json!(timing);
+            }
         }
         let raw = request.to_string();
         let prepared = super::prepare_input_sequence(raw.as_bytes()).map_err(failure)?;
@@ -677,6 +818,30 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     fn call(&mut self, name: &str, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
         if name == "batch" {
             return self.batch(args, cancelled);
+        }
+        if name == "routines" {
+            return self
+                .library
+                .list(args, true)
+                .map(|v| tool_result(v, false))
+                .map_err(|e| e.json());
+        }
+        if name == "routine_save" {
+            return self
+                .library
+                .save(
+                    args["definition"].to_string().as_bytes(),
+                    args["replace"] == true,
+                )
+                .map(|v| tool_result(v, false))
+                .map_err(|e| e.json());
+        }
+        if name == "routine_run" {
+            let recipe = self
+                .library
+                .load(args["name"].as_str().unwrap_or(""))
+                .map_err(|e| e.json())?;
+            return self.run_routine(&recipe, args, false, false, cancelled);
         }
         match name {
             "list_devices" => return self.devices().map(|v| tool_result(v, false)),
@@ -1103,65 +1268,387 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     }
 
     fn batch(&mut self, args: &Value, cancelled: &AtomicBool) -> Result<Value, Value> {
-        let mut receipts = Vec::new();
-        let mut final_frame = None;
-        let mut stopped = None;
-        for (index, action) in args["actions"]
+        let mut steps = Vec::new();
+        let mut uncalibrated = None;
+        for action in args["actions"]
             .as_array()
             .ok_or_else(|| failure("input.tool_arguments"))?
-            .iter()
-            .enumerate()
         {
-            let mut arguments = action["arguments"].clone();
-            // Keep raw observations; encode only once after the last attempted action.
-            arguments["return_screenshot"] = json!(false);
-            self.last_observed = None;
-            match self.call(action["tool"].as_str().unwrap_or(""), &arguments, cancelled) {
-                Ok(value) => {
-                    let receipt = value["structuredContent"].clone();
-                    let command = receipt.get("command").unwrap_or(&receipt);
-                    let complete = command["outcome"] == "EMITTED" && receipt["settled"] == true;
-                    final_frame = self.last_observed.clone();
-                    receipts.push(receipt);
-                    if !complete {
-                        stopped = Some(index);
-                        break;
-                    }
+            let tool = action["tool"].as_str().unwrap_or("");
+            let mut step = action["arguments"].clone();
+            let object = step
+                .as_object_mut()
+                .ok_or_else(|| failure("input.tool_arguments"))?;
+            object.remove("return_screenshot");
+            object.remove("format");
+            let bypass = object.remove("uncalibrated").is_some_and(|v| v == true);
+            if ["move", "click", "scroll", "drag"].contains(&tool) {
+                if uncalibrated.is_some_and(|prior| prior != bypass) {
+                    return Err(failure("pointer.mixed_calibration_policy"));
                 }
-                Err(error) => {
-                    receipts.push(json!({"error":error}));
-                    stopped = Some(index);
+                uncalibrated = Some(bypass);
+            }
+            object.insert("type".into(), json!(tool));
+            let count = action["repeat"].as_u64().unwrap_or(1);
+            let delay = action["delay_ms"].as_u64().unwrap_or(0);
+            if count > 1 {
+                step = json!({"type":"repeat","count":count,"delay_ms":delay,"steps":[step]});
+            } else if delay != 0 {
+                return Err(failure("repeat.delay_without_repeat"));
+            }
+            steps.push(step);
+            if action["settle"] == true {
+                steps.push(json!({"type":"wait_for_stable","timeout_ms":3000}));
+            }
+        }
+        let count = args["repeat"].as_u64().unwrap_or(1);
+        let delay = args["delay_ms"].as_u64().unwrap_or(0);
+        if count > 1 {
+            steps = vec![json!({"type":"repeat","count":count,"delay_ms":delay,"steps":steps})];
+        } else if delay != 0 {
+            return Err(failure("repeat.delay_without_repeat"));
+        }
+        let recipe=recipes::parse(json!({"schema":"keyferry.recipe.v1","name":"ad-hoc-batch","target_os":"any","steps":steps}).to_string().as_bytes()).map_err(|e|failure(e.code()))?;
+        self.run_routine(
+            &recipe,
+            args,
+            uncalibrated.unwrap_or(false),
+            args["settle"] != false,
+            cancelled,
+        )
+    }
+
+    fn run_routine(
+        &mut self,
+        recipe: &RecipeV1,
+        args: &Value,
+        uncalibrated: bool,
+        settle: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
+        if !recipe.is_routine() {
+            return Err(failure("recipe.routine_required"));
+        }
+        let steps = routine_steps(recipe, args)?;
+        self.choose_device()?;
+        self.frames.device(&self.device);
+        self.execute_routine(recipe, &steps, args, uncalibrated, settle, cancelled)
+    }
+
+    fn execute_routine(
+        &mut self,
+        recipe: &RecipeV1,
+        steps: &[Step],
+        args: &Value,
+        uncalibrated: bool,
+        settle: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
+        let mut receipts = Vec::new();
+        let mut stopped = None;
+        let mut completed = 0;
+        let mut awaiting_owner = false;
+        let mut i = 0;
+        let mut commands = 0;
+        // Capture the pre-input baseline so wait_for_change cannot miss a fast UI transition.
+        self.frames.request_ocr(false);
+        let mut baseline = self.frame(cancelled)?;
+        self.screenshot_geometry = Some((
+            baseline.width,
+            baseline.height,
+            baseline.native,
+            baseline.generation,
+        ));
+        while i < steps.len() {
+            if cancelled.load(Ordering::Acquire) {
+                stopped = Some(i);
+                receipts.push(json!({"step":i,"error":failure("request.cancelled")}));
+                break;
+            }
+            if steps[i].input_only() {
+                if awaiting_owner {
+                    stopped = Some(i);
+                    receipts.push(
+                        json!({"step":i,"error":failure("recipe.owner_completion_required")}),
+                    );
                     break;
                 }
-            }
-        }
-        let mut capture_error = None;
-        if stopped.is_some() && args["return_screenshot"] != false {
-            // Inspection is safe after uncertainty; no action is resubmitted.
-            match self.frames.latest(
-                final_frame.as_ref().map(|f| f.serial),
-                ACTION_WAIT,
-                cancelled,
-            ) {
-                Ok(frame) => final_frame = Some(frame),
-                Err(code) => capture_error = Some(failure(code)),
-            }
-        }
-        let mut metadata = json!({"actions":receipts,"completed":receipts.len() - usize::from(stopped.is_some()),"stopped_at":stopped,"settled":stopped.is_none(),"never_retried":true,"screenshot_error":capture_error});
-        let mut result =
-            if let Some(frame) = final_frame.filter(|_| args["return_screenshot"] != false) {
-                match self.image_result(&frame, args, metadata.clone()) {
-                    Ok(value) => value,
+                let begin = i;
+                while i < steps.len() && steps[i].input_only() {
+                    i += 1;
+                }
+                let stretch = &steps[begin..i];
+                let result = (|| {
+                    self.frames.request_ocr(false);
+                    let frame = self.frame(cancelled)?;
+                    baseline = frame.clone();
+                    if stretch.iter().any(Step::pointer) {
+                        self.require_pointer()?;
+                        if self.screenshot_geometry
+                            != Some((frame.width, frame.height, frame.native, frame.generation))
+                        {
+                            return Err(failure("pointer.screenshot_required"));
+                        }
+                    }
+                    let mut mapping_error = None;
+                    let (actions, pointer, _) = routines::compile_stretch(
+                        stretch,
+                        routines::timing(recipe),
+                        routines::start_within(recipe),
+                        &mut |x, y| {
+                            self.point(&frame, f64::from(x), f64::from(y), uncalibrated)
+                                .map_err(|e| {
+                                    mapping_error = Some(e);
+                                    routines::mapping_error()
+                                })
+                        },
+                    )
+                    .map_err(|e| mapping_error.unwrap_or_else(|| failure(e.code())))?;
+                    // Compile and submit the entire stretch once, including all repeats/delays.
+                    commands += 1;
+                    let command = self.submission_config(
+                        actions,
+                        pointer,
+                        routines::timing(recipe),
+                        routines::start_within(recipe),
+                        cancelled,
+                    )?;
+                    Ok::<_, Value>(command)
+                })();
+                match result {
+                    Ok(command) => {
+                        for (offset, step) in stretch.iter().enumerate() {
+                            receipts.push(
+                                json!({"step":begin+offset,"type":step.kind(),"command":command}),
+                            );
+                            completed += 1;
+                        }
+                        self.animation = None;
+                        if settle && i == steps.len() {
+                            let mask = frames::MotionMask::new(&baseline);
+                            let observed =
+                                self.observe_target(&baseline, &mask, None, None, cancelled);
+                            let receipt = receipts.last_mut().expect("stretch receipt");
+                            match observed {
+                                Ok((frame, observation)) => {
+                                    self.last_observed = Some(frame);
+                                    receipt["observation"] = observation.clone();
+                                    if observation["settled"] != true {
+                                        stopped = Some(begin);
+                                        completed -= stretch.len();
+                                    }
+                                }
+                                Err(error) => {
+                                    receipt["observation_error"] = error;
+                                    stopped = Some(begin);
+                                    completed -= stretch.len();
+                                }
+                            }
+                        }
+                    }
                     Err(error) => {
-                        metadata["screenshot_error"] = error;
-                        tool_result(metadata, false)
+                        // Every step in this one command is uncertain together. No per-step
+                        // emission claim can be made after a partial or possibly-started command.
+                        for (offset, step) in stretch.iter().enumerate() {
+                            receipts.push(
+                                json!({"step":begin+offset,"type":step.kind(),"error":error}),
+                            );
+                        }
+                        stopped = Some(begin);
                     }
                 }
             } else {
-                tool_result(metadata, false)
-            };
-        result["isError"] = json!(stopped.is_some());
+                let result = (|| match &steps[i] {
+                    Step::WaitForChange {
+                        timeout_ms, region, ..
+                    }
+                    | Step::WaitForStable {
+                        timeout_ms, region, ..
+                    } => {
+                        let mut check = json!({"timeout_ms":timeout_ms});
+                        if let Some(region) = region {
+                            check["region"] = json!(region);
+                        }
+                        let first = if matches!(steps[i], Step::WaitForChange { .. }) {
+                            baseline.clone()
+                        } else {
+                            self.frame(cancelled)?
+                        };
+                        let value = self.wait(steps[i].kind(), &check, first, cancelled)?;
+                        if value["matched"] == true {
+                            Ok(value)
+                        } else {
+                            Err(json!({"code":"recipe.checkpoint_failed","check":value}))
+                        }
+                    }
+                    Step::ExpectText {
+                        query,
+                        timeout_ms,
+                        region,
+                        optional,
+                        ..
+                    } => {
+                        if *optional && query.is_empty() {
+                            Ok(json!({"skipped":true}))
+                        } else {
+                            self.text_checkpoint(query, *timeout_ms, *region, false, cancelled)
+                                .map(|(v, _)| v)
+                        }
+                    }
+                    Step::ClickText {
+                        query,
+                        timeout_ms,
+                        region,
+                        button,
+                        double,
+                        ..
+                    } => {
+                        let (check, point) =
+                            self.text_checkpoint(query, *timeout_ms, *region, true, cancelled)?;
+                        let (x, y) = point.ok_or_else(|| failure("recipe.text_not_unique"))?;
+                        let frame = self.frame(cancelled)?;
+                        self.require_pointer()?;
+                        let p = self.point(&frame, x, y, false)?;
+                        baseline = frame;
+                        commands += 1;
+                        let command = self.submission(vec![
+                            json!({"type":"move_absolute","x":p[0],"y":p[1]}),
+                            json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()}),
+                        ], true, cancelled)?;
+                        Ok(json!({"check":check,"command":command}))
+                    }
+                    Step::SecureText { .. } => {
+                        (self.secure_prompt)(&self.device, &self.url, &self.token)
+                            .map_err(failure)
+                            .inspect(|_| {
+                                awaiting_owner = true;
+                            })
+                    }
+                    _ => unreachable!(),
+                })();
+                match result {
+                    Ok(receipt) => {
+                        receipts.push(json!({"step":i,"type":steps[i].kind(),"receipt":receipt}));
+                        completed += 1;
+                        if !matches!(steps[i], Step::SecureText { .. })
+                            && receipts
+                                .last()
+                                .is_some_and(|r| r["receipt"]["skipped"] != true)
+                        {
+                            awaiting_owner = false;
+                        }
+                    }
+                    Err(error) => {
+                        receipts.push(json!({"step":i,"type":steps[i].kind(),"error":error}));
+                        stopped = Some(i);
+                    }
+                }
+                i += 1;
+            }
+            if stopped.is_some() {
+                break;
+            }
+        }
+        let mut metadata = json!({"name":recipe.name(),"target_os":recipe.target_os,"actions":receipts,"completed":completed,"step_count":steps.len(),"command_count":commands,
+            "stopped_at":stopped,"awaiting_owner":awaiting_owner,"never_retried":true,"execution_complete":stopped.is_none()&&!awaiting_owner,"settled":stopped.is_none()&&!awaiting_owner&&(settle || matches!(steps.last(),Some(Step::WaitForStable{..})))});
+        // Exactly one final image; observation/encoding failures preserve all prior receipts.
+        let mut result = if args["return_screenshot"] != false {
+            self.frames.request_ocr(false);
+            match self
+                .frames
+                .latest(None, ACTION_WAIT, cancelled)
+                .map_err(failure)
+                .and_then(|frame| self.image_result(&frame, args, metadata.clone()))
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    metadata["screenshot_error"] = error;
+                    tool_result(metadata, false)
+                }
+            }
+        } else {
+            tool_result(metadata, false)
+        };
+        result["isError"] = json!(
+            stopped.is_some()
+                || result["structuredContent"]
+                    .get("screenshot_error")
+                    .is_some()
+        );
         Ok(result)
+    }
+
+    fn text_checkpoint(
+        &mut self,
+        query: &str,
+        timeout_ms: u64,
+        region: Option<routines::Region>,
+        unique: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<(Value, Option<(f64, f64)>), Value> {
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        let mut after = None;
+        self.frames.request_ocr(true);
+        loop {
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(failure("recipe.checkpoint_failed"));
+            }
+            let frame = self
+                .frames
+                .latest(after, remaining, cancelled)
+                .map_err(failure)?;
+            if after.is_some_and(|serial| frame.serial <= serial) {
+                return Err(failure("capture.stale_frame"));
+            }
+            after = Some(frame.serial);
+            let region = region.map(|r| Region {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            });
+            if region.is_some_and(|r| !r.valid(&frame)) {
+                return Err(failure("input.region"));
+            }
+            let boxes = ocr::filter(
+                match self.frames.ocr_result() {
+                    Some(v) => v,
+                    None => self.ocr.recognize(&frame).map_err(failure)?,
+                },
+                Some(query),
+            );
+            let matches: Vec<_> = boxes
+                .iter()
+                .filter(|b| {
+                    region.is_none_or(|r| {
+                        b.x >= f64::from(r.x)
+                            && b.y >= f64::from(r.y)
+                            && b.x + b.width <= f64::from(r.x + r.width)
+                            && b.y + b.height <= f64::from(r.y + r.height)
+                    })
+                })
+                .collect();
+            if unique && matches.len() > 1 {
+                return Err(failure("recipe.text_not_unique"));
+            }
+            if !matches.is_empty() {
+                let point = unique.then(|| {
+                    (
+                        matches[0].x + matches[0].width / 2.0,
+                        matches[0].y + matches[0].height / 2.0,
+                    )
+                });
+                self.last_observed = Some(frame.clone());
+                self.screenshot_geometry =
+                    Some((frame.width, frame.height, frame.native, frame.generation));
+                return Ok((
+                    json!({"matched":true,"match_count":matches.len(),"frame_id":frame.serial,"elapsed_ms":start.elapsed().as_millis()}),
+                    point,
+                ));
+            }
+        }
     }
     fn wait(
         &mut self,
@@ -1202,6 +1689,9 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                 Err("capture.frame_timeout") if start.elapsed() >= timeout => continue,
                 Err(e) => return Err(failure(e)),
             };
+            if next.serial <= previous.serial || next.at <= previous.at {
+                return Err(failure("capture.stale_frame"));
+            }
             let delta = frames::difference(&previous, &next, region).map_err(failure)?;
             let baseline = frames::difference(&first, &next, region).map_err(failure)?;
             samples += 1;

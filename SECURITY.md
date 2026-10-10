@@ -338,3 +338,18 @@ authenticated, idle, disarmed inventory with the exact ELF/profile and authentic
 The daemon exposes that raw capability mask as metadata, granting no additional command authority.
 Enabled download eFuses prove current state, not permanent immunity to later eFuse burns. Automatic
 reset and app boot remain exact-board hardware evidence, and never close physical gates in simulation.
+
+## Host-side routine boundary
+
+Routines extend the existing recipe parser and library; they never reach firmware as scripts or
+change daemon authority. Parameterized repeats, templates and checkpoint boundaries are adversarial
+input: validation and execution share the production bounded compiler, compile every whole stretch
+before sending, and reject overflow rather than splitting or silently dropping steps. Capture/OCR
+checks are observations, not cryptographic target identity or proof of application acceptance.
+Local overrides are fail-closed; corrupt overrides never select shared alternatives. Shared saves
+use exclusive creation unless replacement was explicitly selected. No run state is persisted.
+Password-like parameters reject except owner-dialog declarations; secure values are always refused.
+The owner dialog's REQUESTED receipt cannot authorize following input. A screen checkpoint must pass
+before further input, and an omitted optional marker leaves awaiting_owner true. Input/checkpoint
+failure stops and preserves correlated command receipts; no automatic replay or dialog retry exists.
+Screens, OCR text and ordinary parameter values remain memory-only and absent from diagnostics.

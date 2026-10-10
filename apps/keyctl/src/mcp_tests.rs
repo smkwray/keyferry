@@ -244,7 +244,7 @@ fn dispatch_lifecycle_schema_and_duplicate_id_no_replay() {
             &c,
         )
         .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 20);
     for tool in tools() {
         assert!(
             validate(&json!({}), &tool["inputSchema"])
@@ -418,7 +418,7 @@ async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
             let response=s.dispatch(json!({"jsonrpc":"2.0","id":"batch","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"move","arguments":{"x":200,"y":160,"uncalibrated":true}}]}}}),&c).unwrap();
             let result=&response["result"]["structuredContent"];
             assert_eq!(response["result"]["isError"],fault,"{response}");
-            assert_eq!(result["actions"].as_array().unwrap().len(),if fault {1} else {2});
+            assert_eq!(result["actions"].as_array().unwrap().len(),2);
             assert_eq!(response["result"]["content"].as_array().unwrap().iter().filter(|c|c["type"]=="image").count(),1);
             for action in result["actions"].as_array().unwrap() {
                 let command=if fault {&action["error"]["command"]} else {&action["command"]};
@@ -431,7 +431,7 @@ async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
             assert_eq!(transport.control_request_counts(),prior);
             s.frames.never_change=true;
             let response=s.dispatch(json!({"jsonrpc":"2.0","id":"unsettled-batch","method":"tools/call","params":{"name":"batch","arguments":{"return_screenshot":false,"actions":[{"tool":"move","arguments":{"x":130,"y":150,"uncalibrated":true}},{"tool":"move","arguments":{"x":220,"y":100,"uncalibrated":true}}]}}}),&c).unwrap();
-            assert_eq!(response["result"]["structuredContent"]["actions"].as_array().unwrap().len(),1);
+            assert_eq!(response["result"]["structuredContent"]["actions"].as_array().unwrap().len(),2);
             assert_eq!(response["result"]["structuredContent"]["stopped_at"],0);
             assert_eq!(response["result"]["content"].as_array().unwrap().len(),1);
         }).await.unwrap();
@@ -931,4 +931,175 @@ async fn mcp_status_and_selection_use_the_production_device_inventory() {
     .await
     .unwrap();
     task.abort();
+}
+
+fn routine_definition(steps: Value) -> Value {
+    json!({"schema":"keyferry.recipe.v1","name":"test-flow","target_os":"any","verified":false,"steps":steps})
+}
+fn bind_fake(s: &mut Server<FakeFrames, FakeOcr>) {
+    let f = frame(320, 240, 1);
+    s.geometry = Some(
+        geometry::fit(
+            &s.device,
+            "fake-hdmi",
+            &f,
+            &[
+                ([0.1, 0.1], [48.0, 48.0]),
+                ([0.8, 0.2], [244.0, 66.0]),
+                ([0.2, 0.8], [76.0, 174.0]),
+                ([0.8, 0.7], [244.0, 156.0]),
+            ],
+        )
+        .unwrap(),
+    );
+    s.loaded = true;
+    s.bound_generation = Some(1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_checkpoints_split_stretches_and_stop_without_replay() {
+    for failed in [false, true] {
+        let (mut s, transport, _, task) = harness(vec![], false).await;
+        let root = s.root.clone();
+        tokio::task::spawn_blocking(move|| {
+            s.library=super::super::recipe::Library{local:s.root.join("local"),shared:Some(s.root.join("shared"))};
+            init(&mut s);let cancelled=AtomicBool::new(false);
+            let definition=routine_definition(json!([
+                {"type":"key","keys":["ESCAPE"]},
+                {"type":"type_text","text":"ordinary-canary-text"},
+                {"type":"expect_text","query":if failed {"absent"} else {"Safe test target"},"timeout_ms":120},
+                {"type":"key","keys":["TAB"]},
+                {"type":"key","keys":["ENTER"]}
+            ]));
+            let saved=s.call("routine_save",&json!({"definition":definition}),&cancelled).unwrap();
+            assert_eq!(saved["isError"],false);
+            let result=s.dispatch(json!({"jsonrpc":"2.0","id":"run-flow","method":"tools/call","params":{"name":"routine_run","arguments":{"name":"test-flow"}}}),&cancelled).unwrap();
+            let result=&result["result"];let content=&result["structuredContent"];
+            assert_eq!(result["isError"],failed,"{content}");
+            assert_eq!(content["command_count"],if failed {1} else {2});
+            assert_eq!(content["actions"].as_array().unwrap().len(),if failed {3} else {5});
+            assert_eq!(content["actions"][0]["command"]["command_id"],content["actions"][1]["command"]["command_id"]);
+            if failed {assert_eq!(content["stopped_at"],2);} else {
+                assert_ne!(content["actions"][1]["command"]["command_id"],content["actions"][3]["command"]["command_id"]);
+                assert_eq!(content["actions"][3]["command"]["command_id"],content["actions"][4]["command"]["command_id"]);
+            }
+            for action in content["actions"].as_array().unwrap() {
+                if let Some(id)=action["command"]["command_id"].as_str() {assert_eq!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()),1);}
+            }
+            assert!(!content.to_string().contains("ordinary-canary-text"));
+            assert_eq!(result["content"].as_array().unwrap().iter().filter(|c|c["type"]=="image").count(),1);
+            let files=fs::read_dir(s.library.shared.unwrap()).unwrap().count();assert_eq!(files,1,"run writes no state");
+        }).await.unwrap();
+        task.abort();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_ocr_click_maps_center_and_requires_unique_match() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move||{
+        let cancelled=AtomicBool::new(false);bind_fake(&mut s);
+        let definition=routine_definition(json!([
+            {"type":"click_text","query":"Safe test target","timeout_ms":100},
+            {"type":"expect_text","query":"Safe test target","timeout_ms":100,"region":{"x":20,"y":20,"width":150,"height":40}}
+        ]));
+        let recipe=recipes::parse(definition.to_string().as_bytes()).unwrap();
+        let result=s.run_routine(&recipe,&json!({}),false,false,&cancelled).unwrap();
+        assert_eq!(result["isError"],false);let result=&result["structuredContent"];
+        assert_eq!(result["actions"][0]["receipt"]["check"]["match_count"],1);
+        let visual=s.frames.pointer.as_ref().unwrap().lock().unwrap();
+        assert!((visual.pointer[0]-(96.0-20.0)/280.0).abs()<0.001);
+        assert!((visual.pointer[1]-(34.0-30.0)/180.0).abs()<0.001);
+        drop(visual);
+        let id=uuid::Uuid::parse_str(result["actions"][0]["receipt"]["command"]["command_id"].as_str().unwrap()).unwrap();
+        assert_eq!(transport.execution_count(id),1);
+        let before=transport.control_request_counts();
+        let ambiguous=routine_definition(json!([{ "type":"click_text","query":"a","timeout_ms":100}]));
+        let recipe=recipes::parse(ambiguous.to_string().as_bytes()).unwrap();
+        let result=s.run_routine(&recipe,&json!({}),false,false,&cancelled).unwrap();
+        assert_eq!(result["isError"],true);
+        assert_eq!(result["structuredContent"]["actions"][0]["error"]["code"],"recipe.text_not_unique");
+        assert_eq!(transport.control_request_counts(),before);
+    }).await.unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_repeat_uses_one_command_and_rejects_bounds_before_input() {
+    let (mut s, transport, _, task) = harness(vec![], false).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move||{
+        init(&mut s);let c=AtomicBool::new(false);
+        let response=s.dispatch(json!({"jsonrpc":"2.0","id":"repeat","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":5}],"settle":false}}}),&c).unwrap();
+        let result=&response["result"]["structuredContent"];assert_eq!(response["result"]["isError"],false,"{result}");
+        assert_eq!(result["command_count"],1);assert_eq!(result["actions"].as_array().unwrap().len(),1);
+        let id=uuid::Uuid::parse_str(result["actions"][0]["command"]["command_id"].as_str().unwrap()).unwrap();assert_eq!(transport.execution_count(id),1);
+        let before=transport.control_request_counts();
+        for (i,args) in [
+            json!({"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":1001}],"settle":false}),
+            json!({"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":1000,"delay_ms":800}],"settle":false})
+        ].into_iter().enumerate() {
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":format!("bad-{i}"),"method":"tools/call","params":{"name":"batch","arguments":args}}),&c).unwrap();
+            assert_eq!(response["result"]["isError"],true);
+        }
+        assert_eq!(transport.control_request_counts(),before);
+    }).await.unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn secure_request_requires_owner_completion_and_never_exposes_values() {
+    let mut s = server();
+    s.secure_prompt = |_, _, _| Ok(json!({"outcome":"REQUESTED","input_sent":false}));
+    let definition = routine_definition(json!([
+        {"type":"secure_text"},
+        {"type":"expect_text","query":"{marker}","optional":true,"timeout_ms":100},
+        {"type":"key","keys":["ENTER"]}
+    ]));
+    let mut definition = definition;
+    definition["parameters"] =
+        json!([{"name":"marker","type":"text","max_chars":100,"optional":true}]);
+    let recipe = recipes::parse(definition.to_string().as_bytes()).unwrap();
+    let result = s
+        .run_routine(&recipe, &json!({}), false, false, &AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(
+        result["structuredContent"]["actions"][0]["receipt"]["outcome"],
+        "REQUESTED"
+    );
+    assert_eq!(result["structuredContent"]["awaiting_owner"], true);
+    assert_eq!(result["structuredContent"]["stopped_at"], 2);
+    assert_eq!(result["structuredContent"]["command_count"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routine_change_uses_pre_input_baseline_and_stable_requires_fresh_frames() {
+    let (mut s, _, _, task) = harness(vec![], false).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        s.frames.change_after = Some(3);
+        let definition = routine_definition(json!([
+            {"type":"key","keys":["ESCAPE"]},
+            {"type":"wait_for_change","timeout_ms":500},
+            {"type":"wait_for_stable","timeout_ms":600},
+            {"type":"key","keys":["TAB"]}
+        ]));
+        let recipe = recipes::parse(definition.to_string().as_bytes()).unwrap();
+        let result = s
+            .run_routine(&recipe, &json!({}), false, false, &AtomicBool::new(false))
+            .unwrap();
+        let content = &result["structuredContent"];
+        assert_eq!(result["isError"], false, "{content}");
+        assert_eq!(content["actions"][1]["receipt"]["matched"], true);
+        assert_eq!(content["actions"][2]["receipt"]["matched"], true);
+        assert_eq!(content["command_count"], 2);
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
 }

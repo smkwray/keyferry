@@ -1,8 +1,8 @@
 # Recipe v1
 
 This document is normative for `keyferry.recipe.v1`, a saved and optionally parameterized input
-plan kept on one computer. It is host-only: the daemon, tailnet forwarding, the wire, and firmware
-never see a recipe. A recipe expands on the computer that runs it into one ordinary
+plan. Routines extend this same format with host-side checkpoints and calibrated pointer steps. It is host-only: the daemon, tailnet forwarding, the wire, and firmware
+never see a recipe. A legacy recipe with `actions` expands on the computer that runs it into one ordinary
 `keyferry.keyboard-sequence.v1` or `keyferry.input-sequence.v1` request, so it has no authority
 that a hand-written sequence lacks.
 
@@ -98,3 +98,92 @@ contains a parameter value, key array, action body, or source JSON.
 
 Action shape and compilation failures use the Input Sequence v1 and keyboard-sequence codes, such
 as `input.action_type`, `key.unknown`, `chord.duplicate_key`, and `sequence.duration_limit`.
+
+## Routines (same recipe format)
+
+Use `steps` instead of `actions` (exactly one is required), with `target_os` equal to
+`macos`, `windows`, `linux`, or `any`. The target OS is declared by the author/caller; it is
+never inferred from the controller OS or claimed as observed target identity. A run can assert
+`target_os`; a mismatch rejects before input. Existing `actions` recipes retain their compiler.
+
+Metadata: optional `tags` (16 strings, 1..32 characters), `author` (200 characters), and
+`verified:false` until live success. After live observation use
+`verified:{date:"YYYY-MM-DD",os_version:"observed OS version",success_count:1}`. Verification
+metadata is an author's claim, never a hardware gate or automatic promotion. `true` alone rejects.
+Parameters add `description`, full-match regex `pattern` (256 bytes, bounded compilation), and
+`integer` type with required `minimum`/`maximum` in -127..10000. Text remains bounded by
+`max_chars`; routine text rejects unsupported characters and never normalizes. Optional text
+parameters (`optional:true`) default to empty, usable in an optional trailing OCR check.
+Secret-like parameter names reject, except `type:secure` referenced only by `secure_text.param`.
+Secure parameters have no supplied value, default, pattern or bound; runtime values are refused.
+Never save secrets in literal text, descriptions, metadata or ordinary parameters either.
+
+| Step `type` | Fields |
+| --- | --- |
+| `key` | `keys`: 1..14 registry names/aliases; one key taps, multiple form a chord. |
+| `type_text` | `text`: supported ASCII, 1..4096 bytes, with `{parameter}` templates. |
+| `wait` | `ms`: 1..10000, inside the input command. |
+| `move`, `click` | `x,y`: screenshot pixels 0..1279; click adds optional left/right/middle `button`, `double`. |
+| `scroll` | `x,y,dx,dy`: detents -127..127, not both zero. |
+| `drag` | `from_x,from_y,to_x,to_y`, optional `button`; balanced 40 ms hold. |
+| `repeat` | `count`: 1..1000; `delay_ms`: 0..10000 between iterations; `steps`: 1..32 input-only leaves. No nested repeat/checkpoints. |
+| `expect_text` | Non-empty `query`, `timeout_ms`: 1..30000, optional `region`, `on_fail:stop`. `optional:true` skips only an empty optional marker. |
+| `click_text` | As above plus `button`, `double`; requires exactly one OCR match, clicks its center using calibration. |
+| `wait_for_change`, `wait_for_stable` | `timeout_ms`, optional screenshot-pixel `region`, `on_fail:stop`. |
+| `secure_text` | Optional `param` naming a secure parameter; requests the owner-only dialog on this controller. No secret input or storage. |
+
+Numeric fields may be an exact `{integer_parameter}` template; text/query fields substitute text
+parameters within literals. Keys and regions are fixed. All unknown fields, nulls, non-integers,
+unbound templates, unsupported text, malformed bounds and nested repeats reject before input.
+Validation compiles each stretch using worst-case parameter sizes/counts through the production
+input compiler (256 nodes, 4096 effects, 60 s per command, 65536-byte body). Total planned input
+plus checkpoint time is bounded to 180 s; at most 256 top-level steps. Each run checks actual values
+and compiles the full contiguous input-only stretch into ONE command before sending that stretch.
+It never splits an over-limit stretch silently. Screens/checkpoints run between stretches. Input
+receipts say `EMITTED` only for the entire correlated command; individual step completion is not
+observable after partial failure. Failure stops immediately with step indices and command evidence,
+without payloads or replay. A change check uses the pre-input capture baseline, so a fast transition
+is not missed. OCR queries/results/frames stay in memory; receipts contain counts and frame IDs.
+A final screenshot is returned once; capture failure preserves prior input receipts.
+
+`secure_text` returns `REQUESTED`, not `EMITTED`, and opens the same masked, expiring owner dialog as
+`keyctl secure-text`. A trailing request (or skipped optional desktop marker) returns
+`awaiting_owner:true`. Further input cannot run until a screen checkpoint passes. An agent must run
+this on the human's logged-in controller desktop; it cannot route a dialog to an unattended desktop.
+A checkpoint failure never requests the dialog again or replays preceding clicks/input.
+
+The shared layer is `KEYFERRY_ROUTINE_DIR`, set by the synced skill's launcher to its sibling
+`routines` directory. Direct CLI calls also discover the installed `.codex`/`.agents` keyferry skill.
+The existing per-user `recipes` library (or `KEYFERRY_RECIPE_DIR`) overrides shared entries by name.
+A malformed local override is reported and never falls back. Missing shared storage and invalid
+entries are explicit statuses/counts. `recipe list/inspect/validate/import/run` handles this same
+format; `recipe import` writes the private layer. `routine list/run/save/validate` and MCP
+`routines`, `routine_run`, `routine_save` use that same library/executor. Save validates first and
+writes the shared layer using the same exclusive-create / explicit replace primitive as import.
+No run updates verification counters or writes any parameter/run history.
+
+MCP `batch` translates its existing input tools to the same steps and executor. Per-action
+`repeat`/`delay_ms` repeats that action, optional `settle:true` inserts a stable checkpoint.
+Top-level repeat/delay repeats an input-only list; nested repeats reject. Default top-level
+`settle:true` observes the final stretch; set false when repeated dismissals may leave the screen
+unchanged. Repeats/delays remain one bounded command and never a loop of retried input requests.
+
+Additional stable codes: `recipe.metadata`, `recipe.verification`, `recipe.parameter_pattern`,
+`recipe.parameter_bounds`, `recipe.secret_parameter`, `recipe.step`, `recipe.template`,
+`recipe.query`, `recipe.checkpoint`, `recipe.duration_limit`, `recipe.routine_executor_required`,
+`recipe.routine_required`, `recipe.shared_library_unavailable`, `recipe.target_os_mismatch`,
+`recipe.checkpoint_failed`, `recipe.text_not_unique`, `recipe.owner_completion_required`,
+`params.pattern`, `params.bounds`. All are payload-free.
+
+## ADR: host routine extension to ADR 0016 H1
+
+Status: implemented under the owner-approved generalized routine objective. The former per-user
+import-only library gains a shared skill layer and an explicit shared writer, using the existing
+validation/publication primitive. Target OS metadata is now needed because shortcut/navigation
+behavior differs by target. Checkpoints require multiple host submissions; each still uses the
+existing command-scoped daemon writer and release evidence. There is no firmware macro, persisted
+command queue or new authority. Contiguous input is deliberately one command; another controller
+can act between checkpoint-separated commands, so a checkpoint is an observation, not a global
+exclusive routine lease. Rejecting an over-limit stretch avoids changing its admission/expiry
+semantics. Shared definitions and local overrides use the same schema and executable path;
+separate routine engines, automatic input retries and saved secret substitution are rejected.

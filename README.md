@@ -274,7 +274,8 @@ with capture cards and grant Camera permission on macOS.
 
 Register through the synced **keyferry skill's `keyferry-mcp` launcher and `/relink`**. The launcher
 resolves the installed CLI on the current computer and runs `keyctl mcp` with no arguments;
-explicit extra arguments pass through. Registration needs no device UUID, capture card name or
+explicit extra arguments pass through. For discovering, running and saving routine tasks, see the
+synced **keyferry skill, Routines** section and [recipe format](protocol/recipe-v1.md). Registration needs no device UUID, capture card name or
 per-device executable path. Rebuild and reinstall the updated packages on every controller,
 then run `/relink` to synchronize agent registration. Keep any explicit overrides private.
 
@@ -354,7 +355,7 @@ A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame
 wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject
 unknown fields, null optionals and invalid ranges. Keyboard actions use the existing alias table and
 reject unsupported ASCII controls. Ordinary text only: **secrets stay in the owner-only secure-text
-dialog**; no MCP tool exposes that dialog or its content.
+dialog**. A routine can request the owner dialog; its content never enters MCP.
 
 Every action submits once through `/input-sequences` with existing authentication, command-scoped
 arm, admission and release guarantees. No cross-call held button, alternate writer or input retry

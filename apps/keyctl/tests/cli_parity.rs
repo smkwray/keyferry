@@ -141,6 +141,7 @@ fn run_tests() {
     );
     fs::remove_dir(directory).unwrap();
     recipe_library_is_local_and_import_is_the_only_writer();
+    routines_use_the_shared_recipe_library_offline();
     recipe_run_posts_once_to_the_expanded_route();
     direct_sequences_pass_key_aliases_to_the_daemon();
     secure_text_launch_contains_only_the_destination_and_discards_stdin();
@@ -258,6 +259,7 @@ fn spawn_keyctl(
         .args(["--url", url])
         .args(arguments)
         .env("KEYFERRY_RECIPE_DIR", library)
+        .env("KEYFERRY_ROUTINE_DIR", library.with_file_name("shared"))
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -745,5 +747,82 @@ fn direct_sequences_pass_key_aliases_to_the_daemon() {
         assert_eq!(code, Some(0), "{command}");
         assert_eq!(result["outcome"], "EMITTED");
     }
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn routines_use_the_shared_recipe_library_offline() {
+    let root = env::temp_dir().join(format!("keyctl-routines-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&root).unwrap();
+    let local = root.join("library");
+    let token = root.join("missing-token");
+    let execute = |args: &[&str], input: Option<&str>| {
+        finish(spawn_keyctl(
+            &local,
+            &token,
+            "http://127.0.0.1:9",
+            args,
+            input,
+        ))
+    };
+    let definition = serde_json::json!({"schema":"keyferry.recipe.v1","name":"routine-cli-test","target_os":"windows","verified":false,"steps":[{"type":"key","keys":["ESCAPE"]}]});
+    let path = root.join("routine.json");
+    fs::write(&path, definition.to_string()).unwrap();
+    let path = path.to_str().unwrap();
+    let (code, valid, _) = execute(&["routine", "validate", "--input", path], None);
+    assert_eq!(code, Some(0));
+    assert_eq!(valid["route"], "routine");
+    let (code, saved, _) = execute(&["routine", "save", path], None);
+    assert_eq!(code, Some(0));
+    assert_eq!(saved["layer"], "shared");
+    assert!(!local.exists());
+    assert_eq!(
+        execute(&["routine", "save", path], None).1["error"]["code"],
+        "recipe.exists"
+    );
+    assert_eq!(
+        execute(&["routine", "save", path, "--replace"], None).0,
+        Some(0)
+    );
+    let (code, listed, _) = execute(&["routine", "list", "--os", "windows"], None);
+    assert_eq!(code, Some(0));
+    assert_eq!(listed["count"], 1);
+    assert_eq!(listed["invalid_count"], 0);
+    assert_eq!(
+        execute(&["routine", "list", "--os", "macos"], None).1["count"],
+        0
+    );
+    assert_eq!(
+        execute(&["recipe", "inspect", "routine-cli-test"], None).1["route"],
+        "routine"
+    );
+    let (code, rejected, _) = execute(
+        &[
+            "routine",
+            "run",
+            DEVICE,
+            "routine-cli-test",
+            "--target-os",
+            "macos",
+        ],
+        None,
+    );
+    assert_eq!(code, Some(20));
+    assert_eq!(rejected["error"]["code"], "recipe.target_os_mismatch");
+    let mut secret = definition.clone();
+    secret["parameters"] = serde_json::json!([{"name":"password","type":"text"}]);
+    secret["steps"] = serde_json::json!([{"type":"type_text","text":"{password}"}]);
+    let secret_path = root.join("secret.json");
+    fs::write(&secret_path, secret.to_string()).unwrap();
+    let (code, rejected, _) = execute(
+        &[
+            "routine",
+            "validate",
+            "--input",
+            secret_path.to_str().unwrap(),
+        ],
+        None,
+    );
+    assert_eq!(code, Some(20));
+    assert_eq!(rejected["error"]["code"], "recipe.secret_parameter");
     fs::remove_dir_all(root).unwrap();
 }
