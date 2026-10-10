@@ -2,3 +2,6 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # The official T-Dongle-S3 profile and observed package have no PSRAM.
 # CONFIG_SPIRAM is not set
+
+# Keep assertion failures fatal while saving verbose source/line strings in the 1 MiB app slot.
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
