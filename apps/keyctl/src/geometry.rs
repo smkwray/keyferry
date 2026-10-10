@@ -193,7 +193,8 @@ pub(super) fn cursor_near(
 }
 
 /// Frame rectangle `[x, y, width, height]` inside uniform black pillar/letterbox bars.
-/// Bars are bounded to a quarter of each side so a dark desktop cannot collapse it.
+/// Only symmetric, bounded bars fitting a common source aspect count. Dark desktop
+/// margins are ambiguous and leave that axis full rather than inventing a crop.
 pub(super) fn active_video(f: &Frame) -> [f64; 4] {
     let dark = |x: u32, y: u32| {
         let i = (y * f.width + x) as usize * 3;
@@ -213,6 +214,51 @@ pub(super) fn active_video(f: &Frame) -> [f64; 4] {
     }
     while bottom > f.height - f.height / 4 && row(bottom - 1) {
         bottom -= 1;
+    }
+    let symmetric =
+        |a: u32, b: u32, limit: u32| a > 0 && b > 0 && a < limit && b < limit && a.abs_diff(b) <= 2;
+    let aspects = [
+        1.0,
+        4.0 / 3.0,
+        3.0 / 2.0,
+        16.0 / 10.0,
+        16.0 / 9.0,
+        21.0 / 9.0,
+    ];
+    let common = |width: u32, height: u32, original_width: u32, original_height: u32| {
+        let ratio = f64::from(width) / f64::from(height);
+        let original = f64::from(original_width) / f64::from(original_height);
+        aspects.iter().any(|aspect| {
+            (ratio / aspect - 1.0).abs() <= 0.01 && (original / aspect - 1.0).abs() > 0.01
+        })
+    };
+    // Evaluate each axis independently: an asymmetric dark top must not hide valid pillars.
+    if !symmetric(left, f.width - right, f.width / 4)
+        || !common(right - left, f.height, f.width, f.height)
+    {
+        left = 0;
+        right = f.width;
+    }
+    // A few near-black desktop pixels can extend a bar. Prefer the exact centred
+    // common-aspect boundary when it lies inside the observed black margins.
+    if left > 0 {
+        for aspect in aspects {
+            let width = (f64::from(f.height) * aspect).round() as u32;
+            if width <= f.width && width >= right - left && width - (right - left) <= 6 {
+                let margin = (f.width - width) / 2;
+                if margin <= left && f.width - margin >= right {
+                    left = margin;
+                    right = f.width - margin;
+                    break;
+                }
+            }
+        }
+    }
+    if !symmetric(top, f.height - bottom, f.height / 4)
+        || !common(right - left, bottom - top, right - left, f.height)
+    {
+        top = 0;
+        bottom = f.height;
     }
     [left, top, right - left, bottom - top].map(f64::from)
 }
