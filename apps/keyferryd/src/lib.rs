@@ -6157,7 +6157,7 @@ async fn owner_callback(
             status: 200, body, ..
         } => Ok(body),
         forward::OwnerExchange::Response { .. } => Err(ApiError::unavailable(unsuccessful)),
-        forward::OwnerExchange::NotSent | forward::OwnerExchange::Uncertain => {
+        forward::OwnerExchange::NotSent(_) | forward::OwnerExchange::Uncertain(_) => {
             Err(ApiError::unavailable(failed))
         }
     }

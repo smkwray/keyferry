@@ -4,6 +4,19 @@ pub mod process;
 
 use std::fmt;
 
+/// Whether a daemon error string is a stable machine code such as `tailnet_route.unavailable`
+/// (dot-separated lowercase ASCII segments) rather than prose written for people.
+pub fn is_error_code(value: &str) -> bool {
+    value.len() <= 64
+        && value.contains('.')
+        && value.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationalMode {
     Keyboard,
@@ -280,6 +293,23 @@ mod tests {
     use super::*;
 
     const ID: [u8; 16] = [7; 16];
+
+    #[test]
+    fn error_codes_are_dotted_lowercase_tokens_not_prose() {
+        assert!(is_error_code("tailnet_route.unavailable"));
+        assert!(is_error_code("capture.peer_offline_or_select_source"));
+        for prose in [
+            "device link is not authenticated",
+            "a fresh endpoint route proof is required",
+            "tailnet_route.",
+            "Tailnet.unavailable",
+            "unavailable",
+            "",
+        ] {
+            assert!(!is_error_code(prose), "{prose}");
+        }
+        assert!(!is_error_code(&format!("a.{}", "b".repeat(63))));
+    }
 
     #[test]
     fn command_scoped_arm_disarms_after_emission() {

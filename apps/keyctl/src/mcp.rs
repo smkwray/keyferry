@@ -655,12 +655,20 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             super::load_token(&self.token).map_err(|_| failure("daemon.token_unavailable"))?;
         Ok(super::Client { endpoint, token })
     }
-    fn devices(&self) -> Result<Value, Value> {
+    /// `daemon.unavailable` only when the local daemon cannot be reached; its own refusal keeps
+    /// the daemon's code.
+    fn get_json(&self, path: &str) -> Result<Value, Value> {
         let response = self
             .client()?
-            .request("GET", "/v1/devices", None)
+            .request_raw("GET", path, None)
             .map_err(|_| failure("daemon.unavailable"))?;
-        serde_json::from_str(&response).map_err(|_| failure("protocol.invalid_response"))
+        if response.status >= 400 {
+            return Err(failure(&super::http_error_code(&response)));
+        }
+        serde_json::from_str(&response.body).map_err(|_| failure("protocol.invalid_response"))
+    }
+    fn devices(&self) -> Result<Value, Value> {
+        self.get_json("/v1/devices")
     }
     fn choose_device(&mut self) -> Result<(), Value> {
         if self.device.is_empty() || self.device_choice.starts_with("automatic") {
@@ -695,11 +703,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         if self.device.is_empty() {
             return Err(failure("device.select_required"));
         }
-        let response = self
-            .client()?
-            .request("GET", &format!("/v1/devices/{}", self.device), None)
-            .map_err(|_| failure("daemon.unavailable"))?;
-        serde_json::from_str(&response).map_err(|_| failure("protocol.invalid_response"))
+        self.get_json(&format!("/v1/devices/{}", self.device))
     }
     fn require_pointer(&self) -> Result<(), Value> {
         let status = self.device_status()?;
