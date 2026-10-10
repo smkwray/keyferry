@@ -1987,8 +1987,7 @@ struct DaemonInner {
     owner_installation: Mutex<Option<InstallationTlsSecretStore>>,
     owner_control_listener: Mutex<OwnerControlListenerState>,
     forwarder: std::sync::OnceLock<Arc<forward::Forwarder>>,
-    capture: Arc<Mutex<capture::Service>>,
-    capture_admission: Arc<tokio::sync::Semaphore>,
+    capture: Arc<capture::Service>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2154,7 +2153,21 @@ impl Daemon {
         label: String,
         transport: Arc<dyn DeviceTransport>,
     ) -> Result<Self, DaemonError> {
-        Self::with_device_transport_and_gateway(store, device_id, label, transport, None)
+        Self::with_device_transports(store, vec![(device_id, label, transport)])
+    }
+
+    /// Several independent device sessions in one daemon, without gateway authority.
+    pub fn with_device_transports(
+        store: impl TokenStore + 'static,
+        devices: Vec<(String, String, Arc<dyn DeviceTransport>)>,
+    ) -> Result<Self, DaemonError> {
+        Self::with_device_transports_and_gateways(
+            store,
+            devices
+                .into_iter()
+                .map(|(id, label, transport)| (id, label, transport, None))
+                .collect(),
+        )
     }
 
     pub fn with_tls_transport(
@@ -2206,6 +2219,7 @@ impl Daemon {
         Self::with_device_transports_and_gateways(store, entries)
     }
 
+    #[cfg(test)]
     fn with_device_transport_and_gateway(
         store: impl TokenStore + 'static,
         device_id: String,
@@ -2280,8 +2294,7 @@ impl Daemon {
             owner_installation: Mutex::new(None),
             owner_control_listener: Mutex::new(OwnerControlListenerState::default()),
             forwarder: std::sync::OnceLock::new(),
-            capture: Arc::new(Mutex::new(capture::Service::default())),
-            capture_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            capture: Arc::new(capture::Service::default()),
         }));
         for (runtime, transport, work_rx) in pending {
             let weak_daemon = Arc::downgrade(&daemon.0);
@@ -4706,15 +4719,9 @@ impl Daemon {
             while closing.join_next().await.is_some() {}
         })
         .await;
-        self.0.capture_admission.close();
+        self.0.capture.close();
         let capture = self.0.capture.clone();
-        let _ = time::timeout(
-            grace,
-            tokio::task::spawn_blocking(move || {
-                capture.lock().expect("capture service").stop();
-            }),
-        )
-        .await;
+        let _ = time::timeout(grace, tokio::task::spawn_blocking(move || capture.stop())).await;
     }
 
     pub fn finish_device_maintenance(&self, id: &str) -> Result<DeviceView, ApiError> {

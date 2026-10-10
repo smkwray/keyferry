@@ -3492,7 +3492,7 @@ mod tests {
         assert_eq!(peers[0].control_port, OWNER_GATEWAY_CONTROL_PORT);
     }
     fn fake_capture(daemon: &Daemon) {
-        daemon.0.capture.lock().unwrap().fake = Some(keyferry_capture::frames::Frame {
+        daemon.0.capture.fake.lock().unwrap().insert("fake-hdmi".into(), keyferry_capture::frames::Frame {
             width: 320,
             height: 240,
             native: (640, 480),
@@ -3579,10 +3579,10 @@ mod tests {
         good.holder
             .0
             .capture
+            .fake
             .lock()
             .unwrap()
-            .fake
-            .as_mut()
+            .get_mut("fake-hdmi")
             .unwrap()
             .width = 1281;
         time::sleep(Duration::from_millis(110)).await;

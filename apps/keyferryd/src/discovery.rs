@@ -239,22 +239,7 @@ impl PortableGatewayInterface {
                     crate::MultiTlsListener::bind(plan.listener_address(), &stores, transports)
                         .await
                         .map_err(|error| io::Error::other(error.to_string()))?;
-                tokio::spawn(async move {
-                    loop {
-                        match listener.accept_one().await {
-                            Ok((peer, device_id)) => crate::daemon_log!(
-                                "owner-authorized Wi-Fi dongle session authenticated from {peer} for {}",
-                                uuid::Uuid::from_bytes(device_id)
-                            ),
-                            Err(error) => {
-                                crate::daemon_log!(
-                                    "owner-authorized Wi-Fi dongle connection rejected: {error}"
-                                );
-                                time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-                    }
-                })
+                tokio::spawn(serve_multi(listener))
             }
         };
         Ok(Self {
@@ -265,6 +250,38 @@ impl PortableGatewayInterface {
     }
 }
 
+/// Each Wi-Fi candidate authenticates on its own task, so one stick's slow or failing handshake
+/// never delays another stick's (re)connection. Two handshakes per configured stick bound
+/// unauthenticated LAN peers.
+pub(crate) async fn serve_multi(listener: crate::MultiTlsListener) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(2 * listener.device_count()));
+    loop {
+        let Ok(slot) = slots.clone().acquire_owned().await else {
+            return;
+        };
+        let (stream, peer) = match listener.accept_candidate().await {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                crate::daemon_log!("owner-authorized Wi-Fi dongle connection rejected: {error}");
+                time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let router = listener.router();
+        tokio::spawn(async move {
+            let _slot = slot;
+            match router.accept_stream_on(stream, crate::TlsLinkPath::Wifi).await {
+                Ok(device_id) => crate::daemon_log!(
+                    "owner-authorized Wi-Fi dongle session authenticated from {peer} for {}",
+                    uuid::Uuid::from_bytes(device_id)
+                ),
+                Err(error) => crate::daemon_log!(
+                    "owner-authorized Wi-Fi dongle connection rejected from {peer}: {error}"
+                ),
+            }
+        });
+    }
+}
 impl Drop for PortableGatewayInterface {
     fn drop(&mut self) {
         self.listener_task.abort();

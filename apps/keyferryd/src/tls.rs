@@ -1758,13 +1758,18 @@ impl MultiTlsListener {
         self.listener.local_addr()
     }
 
-    pub async fn accept_one(&self) -> Result<(SocketAddr, [u8; 16]), TlsTransportError> {
-        let (stream, peer) = accept_with_keepalive(&self.listener).await?;
-        let device_id = self
-            .router
-            .accept_stream_on(stream, TlsLinkPath::Wifi)
-            .await?;
-        Ok((peer, device_id))
+    /// Accepts TCP only. The caller authenticates each candidate on its own task, so one
+    /// stick's slow or failing handshake never delays another stick's (re)connection.
+    pub async fn accept_candidate(&self) -> Result<(TcpStream, SocketAddr), TlsTransportError> {
+        accept_with_keepalive(&self.listener).await
+    }
+
+    pub fn router(&self) -> MultiTlsRouter {
+        self.router.clone()
+    }
+
+    pub fn device_count(&self) -> usize {
+        self.router.transports.len()
     }
 }
 
@@ -6200,6 +6205,55 @@ pub(crate) mod tests {
         installation_id[0] ^= 0xff;
         fs::write(root.join("installation-id.bin"), installation_id).expect("alter identity");
         assert!(InstallationTlsSecretStore::load(&root).is_err());
+        fs::remove_dir_all(root).expect("remove installation root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_wifi_candidate_never_delays_another_stick() {
+        let root = std::env::temp_dir().join(format!("keyferry-install-{}", uuid::Uuid::now_v7()));
+        let (device_id, _, _) = create_installation_store(&root);
+        let stores = InstallationTlsSecretSet::load(&root).expect("installation set");
+        let store = stores.iter().next().unwrap().clone();
+        let transport = TlsTransport::from_installation_store(&store).expect("transport");
+        let listener = MultiTlsListener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            &stores,
+            vec![transport.clone()],
+        )
+        .await
+        .expect("listener");
+        let address = listener.local_addr().unwrap();
+        let serving = tokio::spawn(crate::discovery::serve_multi(listener));
+        // An unauthenticated peer (or a stick mid-reconnect) that never completes TLS.
+        let _stalled = TcpStream::connect(address).await.unwrap();
+        tokio::task::yield_now().await;
+        let credentials = TlsCredentials::new(
+            store.load_or_create_host_identity().unwrap(),
+            device_id,
+            [0x33; 32],
+        );
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (_session, ready) = time::timeout(
+            AUTHENTICATION_TIMEOUT / 4,
+            respond_on_name(
+                stream,
+                &credentials,
+                &[0x33; 32],
+                true,
+                store.device_server_name(),
+            ),
+        )
+        .await
+        .expect("second candidate authenticated while the first stalled");
+        assert_eq!(ready.message_type, keyferry_protocol::message::SESSION_READY);
+        time::timeout(Duration::from_secs(1), async {
+            while !transport.is_ready() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("session ready");
+        serving.abort();
         fs::remove_dir_all(root).expect("remove installation root");
     }
 
