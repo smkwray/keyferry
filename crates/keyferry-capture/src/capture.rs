@@ -524,13 +524,21 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
         "error",
         "-threads",
         "1",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
         "-f",
         backend.name(),
     ]
     .map(str::to_owned)
     .to_vec();
     if backend == Backend::Dshow {
-        args.extend(["-rtbufsize".into(), "16M".into()]);
+        args.extend(["-rtbufsize".into(), "4M".into()]);
     }
     if backend == Backend::Avfoundation {
         args.extend(["-framerate".into(), "30".into()]);
@@ -545,8 +553,8 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
     };
     args.extend(["-i".into(), input, "-map".into(), "0:v:0".into()]);
     let filter = options.scale.map_or_else(
-        || "fps=5".to_owned(),
-        |(w, h)| format!("fps=5,scale={w}:{h}"),
+        || "fps=15".to_owned(),
+        |(w, h)| format!("fps=15,scale={w}:{h}:flags=fast_bilinear"),
     );
     args.extend(["-vf".into(), filter]);
     args.extend(
@@ -566,6 +574,8 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
             "rgb24",
             "-f",
             "image2pipe",
+            "-flush_packets",
+            "1",
             "pipe:1",
         ]
         .map(str::to_owned),
@@ -643,7 +653,10 @@ pub fn stream_setup(source: Option<&str>) -> Result<(String, Vec<String>), &'sta
     let options = FrameOptions {
         out: PathBuf::new(),
         source: None,
-        size: None,
+        // This exact MS2130 mode was enumerated on the live adapter. Other cards retain
+        // their negotiated input mode; no reopen/probe or unsupported-mode fallback.
+        size: (backend == Backend::Dshow && device.id.contains("vid_345f&pid_2130"))
+            .then_some((1280, 720)),
         scale: None,
     };
     Ok((device.id.clone(), frame_args(backend, device, &options)))

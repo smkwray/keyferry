@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 keyferry-core = { path = "../keyferry-core" }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 png = { version = "=0.18.1", default-features = false }
 serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

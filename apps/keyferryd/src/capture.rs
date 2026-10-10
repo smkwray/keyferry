@@ -175,20 +175,28 @@ fn encode(
     let ratio = (f64::from(max_width) / f64::from(region.width)).min(1.0);
     let width = (f64::from(region.width) * ratio).round().max(1.0) as u32;
     let height = (f64::from(region.height) * ratio).round().max(1.0) as u32;
-    let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let sx = region.x + x * region.width / width;
-            let sy = region.y + y * region.height / height;
-            let i = ((sy * frame.width + sx) * 3) as usize;
-            rgb.extend_from_slice(&frame.rgb[i..i + 3]);
+    let scaled = if region.x == 0 && region.y == 0 && (width, height) == (frame.width, frame.height)
+    {
+        std::borrow::Cow::Borrowed(frame)
+    } else {
+        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let sx = region.x + x * region.width / width;
+                let sy = region.y + y * region.height / height;
+                let i = ((sy * frame.width + sx) * 3) as usize;
+                rgb.extend_from_slice(&frame.rgb[i..i + 3]);
+            }
         }
-    }
-    let scaled = Frame {
-        width,
-        height,
-        rgb,
-        ..frame.clone()
+        std::borrow::Cow::Owned(Frame {
+            width,
+            height,
+            rgb,
+            native: frame.native,
+            serial: frame.serial,
+            generation: frame.generation,
+            at: frame.at,
+        })
     };
     let png = scaled.png()?;
     if png.len() > 5 * 1024 * 1024 {

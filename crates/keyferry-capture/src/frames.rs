@@ -41,12 +41,40 @@ impl Frame {
             let mut encoder = png::Encoder::new(&mut bytes, self.width, self.height);
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
             let mut writer = encoder.write_header().map_err(|_| "capture.encode")?;
             writer
                 .write_image_data(&self.rgb)
                 .map_err(|_| "capture.encode")?;
         }
         Ok(bytes)
+    }
+
+    pub fn image(&self, format: &str) -> Result<(Vec<u8>, &'static str), &'static str> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > MAX_SIDE
+            || self.height > MAX_SIDE
+            || self.rgb.len() != (self.width * self.height * 3) as usize
+        {
+            return Err("capture.size_limit");
+        }
+        match format {
+            "png" => self.png().map(|bytes| (bytes, "image/png")),
+            "jpeg" => {
+                let mut bytes = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
+                    .encode(
+                        &self.rgb,
+                        self.width,
+                        self.height,
+                        image::ExtendedColorType::Rgb8,
+                    )
+                    .map_err(|_| "capture.encode")?;
+                Ok((bytes, "image/jpeg"))
+            }
+            _ => Err("capture.format"),
+        }
     }
 }
 
@@ -102,6 +130,7 @@ pub fn difference(a: &Frame, b: &Frame, region: Option<Region>) -> Result<f64, &
 
 /// Transient animation mask learned only while input is stationary. Whole 16-pixel tiles
 /// cover changing clock glyphs/carets and their compression edges, not just lit pixels.
+#[derive(Clone)]
 pub struct MotionMask {
     geometry: (u32, u32, (u32, u32), u64),
     tiles: Vec<bool>,
@@ -128,7 +157,8 @@ impl MotionMask {
     }
 
     pub fn small(&self) -> bool {
-        self.tiles.iter().filter(|tile| **tile).count() * 20 <= self.tiles.len()
+        // Bound ignored desktop animations/notification regions to a quarter of the screen.
+        self.tiles.iter().filter(|tile| **tile).count() * 4 <= self.tiles.len()
     }
 
     pub fn learn(&mut self, a: &Frame, b: &Frame) -> Result<(), &'static str> {
@@ -146,13 +176,35 @@ impl MotionMask {
 
     /// Count significant changed pixels, so a small cursor on a large frame is visible.
     pub fn changed(&self, a: &Frame, b: &Frame) -> Result<usize, &'static str> {
+        self.changed_region(a, b, None)
+    }
+
+    pub fn changed_region(
+        &self,
+        a: &Frame,
+        b: &Frame,
+        region: Option<Region>,
+    ) -> Result<usize, &'static str> {
         self.check(a)?;
         self.check(b)?;
+        if region.is_some_and(|region| !region.valid(a)) {
+            return Err("input.region");
+        }
         Ok(a.rgb
             .chunks_exact(3)
             .zip(b.rgb.chunks_exact(3))
             .enumerate()
-            .filter(|(pixel, (a, b))| !self.ignored(*pixel) && pixel_changed(a, b))
+            .filter(|(pixel, (a, b))| {
+                let x = *pixel % self.geometry.0 as usize;
+                let y = *pixel / self.geometry.0 as usize;
+                region.is_none_or(|region| {
+                    x >= region.x as usize
+                        && x < (region.x + region.width) as usize
+                        && y >= region.y as usize
+                        && y < (region.y + region.height) as usize
+                }) && !self.ignored(*pixel)
+                    && pixel_changed(a, b)
+            })
             .count())
     }
 }
@@ -613,6 +665,44 @@ fn source_busy(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_and_jpeg_are_bounded_decodable_rgb_images() {
+        let frame = Frame {
+            width: 32,
+            height: 24,
+            native: (64, 48),
+            rgb: [100, 50, 200].repeat(32 * 24),
+            serial: 1,
+            generation: 1,
+            at: Instant::now(),
+        };
+        for (format, mime) in [("png", "image/png"), ("jpeg", "image/jpeg")] {
+            let (bytes, actual) = frame.image(format).unwrap();
+            assert_eq!(actual, mime);
+            assert!(bytes.len() < 5 * 1024 * 1024);
+            if format == "png" {
+                let (width, height, rgb) = super::super::capture::decode(&bytes).unwrap();
+                assert_eq!((width, height), (32, 24));
+                assert_eq!(rgb, frame.rgb);
+            } else {
+                let decoded =
+                    image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+                assert_eq!((decoded.width(), decoded.height()), (32, 24));
+                assert!(decoded.to_rgb8().pixels().all(|pixel| pixel
+                    .0
+                    .iter()
+                    .zip([100, 50, 200])
+                    .all(|(value, expected)| value.abs_diff(expected) < 5)));
+            }
+        }
+        assert_eq!(frame.image("webp").unwrap_err(), "capture.format");
+        let invalid = Frame {
+            rgb: vec![],
+            ..frame
+        };
+        assert_eq!(invalid.image("jpeg").unwrap_err(), "capture.size_limit");
+    }
 
     fn fake_frame(value: u8, at: Instant) -> Frame {
         let frame = Frame {
