@@ -50,7 +50,7 @@ class BudgetTests(unittest.TestCase):
         script = (ROOT / "scripts/remote_build.ps1").read_text()
         self.assertIn("python scripts/build_governor.py --receipt", script)
         self.assertIn("SHA256 mismatch after transfer", script)
-        self.assertIn("Copy-Verified 'Cargo.lock'", script)
+        self.assertIn("ls-files -- '*.lock'", script)
         self.assertIn("if ($code) { throw", script)
 
 

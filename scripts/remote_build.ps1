@@ -2,7 +2,7 @@
 # remrun reconciles this checkout, uncommitted edits included, to the same path on the device. The
 # build runs over SSH because remrun's runner Job Object forbids the governor's breakaway, so the
 # host-wide cap and slots still come from that device's project.toml budget. remrun excludes *.lock,
-# so Cargo.lock is copied separately. Every returned file is checked against the remote SHA256.
+# so the tracked lock files are copied separately. Every returned file is checked against the remote SHA256.
 #   pwsh -NoProfile -File scripts/remote_build.ps1 -Name deploy -Command 'cargo build --locked --profile deploy -p keyctl'
 param(
     [ValidatePattern('^[A-Za-z0-9-]+$')]
@@ -40,7 +40,11 @@ function Copy-Verified([string]$Relative, [string]$LocalPath, [switch]$Receive) 
 $env:REMRUN_ALLOW_WORKTREE = '1'
 & 'C:\sync\malus\remrun\bin\remrun.cmd' run $Device -- python -c pass
 if ($LASTEXITCODE) { throw "remrun could not reconcile this checkout to $Device." }
-Copy-Verified 'Cargo.lock' (Join-Path $root 'Cargo.lock')
+# Cargo.lock and the ESP-IDF dependencies.lock files pin the build; without them the device
+# resolves newer crates or components and the output diverges.
+$locks = @(git -C $root ls-files -- '*.lock')
+if (-not $locks -or $locks -notcontains 'Cargo.lock') { throw 'Tracked lock files are missing.' }
+foreach ($lock in $locks) { Copy-Verified $lock (Join-Path $root $lock) }
 
 $epoch = if ($env:SOURCE_DATE_EPOCH) { $env:SOURCE_DATE_EPOCH } else { "$(git -C $root log -1 --format=%ct)".Trim() }
 $receipt = "build/remote/$Name.json"
