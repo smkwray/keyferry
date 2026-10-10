@@ -237,24 +237,6 @@ constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_MOUSE;
 constexpr std::uint16_t kInputDeviceRevision = 0x0101;
 #endif
 
-// Explicit serialized reports include the report ID. No C++ padding reaches USB.
-std::size_t PointerWire(const PointerReport& r, std::array<std::uint8_t, 8>* out) {
-    out->fill(0);
-    if (r.absolute) {
-        (*out)[0] = 4; (*out)[1] = r.buttons;
-        (*out)[2] = static_cast<std::uint8_t>(r.absolute_x);
-        (*out)[3] = static_cast<std::uint8_t>(r.absolute_x >> 8U);
-        (*out)[4] = static_cast<std::uint8_t>(r.absolute_y);
-        (*out)[5] = static_cast<std::uint8_t>(r.absolute_y >> 8U);
-        (*out)[6] = static_cast<std::uint8_t>(r.wheel);
-        return 7;
-    }
-    (*out)[0] = 1; (*out)[1] = r.buttons;
-    (*out)[2] = static_cast<std::uint8_t>(r.x); (*out)[3] = static_cast<std::uint8_t>(r.y);
-    (*out)[4] = static_cast<std::uint8_t>(r.wheel); (*out)[5] = static_cast<std::uint8_t>(r.pan);
-    return 6;
-}
-
 
 static constexpr std::uint8_t kConfigurationDescriptor[] = {
 #if defined(KEYFERRY_MSC_SIZE_PROBE) || defined(KEYFERRY_FILE_HANDOFF)
@@ -710,7 +692,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
       const auto report = hid_.desired_mouse_report();
       const auto token = hid_.desired_mouse_logical_token();
 #if defined(KEYFERRY_POINTER_EXTENDED)
-      usb_transfer_pointer_length_ = PointerWire(report, &usb_transfer_pointer_bytes_);
+      usb_transfer_pointer_length_ = keyferry::hid::SerializePointerReport(report, &usb_transfer_pointer_bytes_);
       queued = tud_hid_n_report(instance, 0, usb_transfer_pointer_bytes_.data(), usb_transfer_pointer_length_);
 #else
       const keyferry::hid::BootMouseReport boot{report.buttons, report.x, report.y};
@@ -2967,7 +2949,7 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
     if (report_id != 1 && report_id != 4) { return 0; }
     const auto report = g_runtime->CurrentMouseReport(report_id == 4);
     std::array<std::uint8_t, 8> wire{};
-    const auto wire_length = PointerWire(report, &wire);
+    const auto wire_length = keyferry::hid::SerializePointerReport(report, &wire);
     const auto bytes = std::min<std::uint16_t>(requested_length, wire_length - 1);
     if (buffer == nullptr && bytes != 0) { return 0; }
     std::memcpy(buffer, wire.data() + 1, bytes);

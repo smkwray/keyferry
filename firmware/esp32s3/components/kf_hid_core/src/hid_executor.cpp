@@ -5,6 +5,24 @@
 
 namespace keyferry::hid {
 
+std::size_t SerializePointerReport(const PointerReport& r,
+                                 std::array<std::uint8_t, 8>* out) noexcept {
+    out->fill(0);
+    if (r.absolute) {
+        (*out)[0] = 4; (*out)[1] = r.buttons;
+        (*out)[2] = static_cast<std::uint8_t>(r.absolute_x);
+        (*out)[3] = static_cast<std::uint8_t>(r.absolute_x >> 8U);
+        (*out)[4] = static_cast<std::uint8_t>(r.absolute_y);
+        (*out)[5] = static_cast<std::uint8_t>(r.absolute_y >> 8U);
+        (*out)[6] = static_cast<std::uint8_t>(r.wheel);
+        return 7;
+    }
+    (*out)[0] = 1; (*out)[1] = r.buttons;
+    (*out)[2] = static_cast<std::uint8_t>(r.x); (*out)[3] = static_cast<std::uint8_t>(r.y);
+    (*out)[4] = static_cast<std::uint8_t>(r.wheel); (*out)[5] = static_cast<std::uint8_t>(r.pan);
+    return 6;
+}
+
 bool operator==(const BootKeyboardReport& left, const BootKeyboardReport& right) noexcept {
     return left.modifiers == right.modifiers && left.reserved == right.reserved &&
            left.usages == right.usages;
@@ -224,6 +242,14 @@ SubmitResult ExecutorState::submit_mouse_buttons(const std::uint64_t epoch,
         return SubmitResult::held_state_conflict;
     }
     desired_mouse_ = report;
+    // Report IDs 1 and 4 are separate Mouse application collections. A press must
+    // accompany the coordinates in the collection that positioned the pointer.
+    // Do not invent an absolute position before a move, or reuse it after relative motion.
+    if (extended_pointer_ && report.buttons != 0) {
+        desired_mouse_.absolute = absolute_button_target_;
+        desired_mouse_.absolute_x = absolute_x_;
+        desired_mouse_.absolute_y = absolute_y_;
+    }
     if (extended_pointer_ && report.buttons == 0) { release_absolute_pending_ = true; }
     desired_interface_ = InputInterface::mouse;
     pending_mouse_movement_ = false;
@@ -342,7 +368,13 @@ bool ExecutorState::mark_mouse_report_accepted(const PointerReport& report,
         }
         last_movement_token_ = logical_token;
         current_mouse_ = PointerReport{report.buttons, 0, 0};
-        if (report.absolute) { absolute_x_ = report.absolute_x; absolute_y_ = report.absolute_y; }
+        if (report.absolute) {
+            absolute_x_ = report.absolute_x;
+            absolute_y_ = report.absolute_y;
+            absolute_button_target_ = true;
+        } else if (report.x != 0 || report.y != 0) {
+            absolute_button_target_ = false;
+        }
         session_started_ = true;
         neutral_mask_ = 0;
     } else {

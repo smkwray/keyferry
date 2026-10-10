@@ -13,17 +13,21 @@ def require(condition, message):
         raise SystemExit("pointer check: " + message)
 
 
-def descriptor():
+def descriptor(data=None):
     source = (ROOT / "firmware/esp32s3/hil_endpoint/main/app_main.cpp").read_text()
     from check_hil_mouse import check_usb_identity
     check_usb_identity(source)
     body = re.search(r"kPointerReportDescriptor\[\]\s*=\s*\{(.*?)\};", source, re.S)
     require(body is not None, "missing closed pointer descriptor")
-    data = bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", body[1]))
+    if data is None:
+        data = bytes(int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{2})", body[1]))
     # Parse HID short items, preserving globals across collections/report IDs.
     report_id = 0
     size = count = page = minimum = maximum = 0
     usage = []
+    usage_minimum = usage_maximum = None
+    collections = []
+    fields = {}
     bits = {}
     axes = {}
     offset = 0
@@ -43,15 +47,38 @@ def descriptor():
         elif tag == 0x14: minimum = int.from_bytes(raw, "little", signed=True)
         elif tag == 0x24: maximum = int.from_bytes(raw, "little", signed=minimum < 0)
         elif tag == 0x08: usage.append((page, value))
+        elif tag == 0x18: usage_minimum = value
+        elif tag == 0x28: usage_maximum = value
         elif tag == 0x80:
+            require(collections == [(1, 2, 1), (1, 1, 0)],
+                    "each report must be Pointer physical inside Mouse application")
+            fields.setdefault(report_id, []).append((
+                bits.get(report_id, 0), page, size, count, minimum, maximum,
+                value, usage_minimum, usage_maximum))
             bits[report_id] = bits.get(report_id, 0) + size * count
             for p, u in usage:
                 if p == 1 and u in (0x30, 0x31):
                     axes[(report_id, u)] = (minimum, maximum, size, value)
             usage.clear()
-        elif tag in (0xA0, 0xC0): usage.clear()
+            usage_minimum = usage_maximum = None
+        elif tag == 0xA0:
+            require(len(usage) == 1, "collection must have one usage")
+            collections.append((*usage[0], value))
+            usage.clear()
+            usage_minimum = usage_maximum = None
+        elif tag == 0xC0:
+            require(bool(collections), "unbalanced collection")
+            collections.pop()
+            usage.clear()
+            usage_minimum = usage_maximum = None
         elif tag in (0x90, 0xB0): require(False, "unexpected output or feature report")
     require(bits == {1: 40, 4: 48}, "reports must be exactly 6 and 7 bytes with IDs 1 and 4 only")
+    require(not collections, "unclosed collection")
+    for report_id in (1, 4):
+        require(fields[report_id][0] == (0, 9, 1, 5, 0, 1, 2, 1, 5),
+                f"report {report_id} must start with five 0..1 button bits")
+        require(fields[report_id][1] == (5, 9, 3, 1, 0, 1, 3, None, None),
+                f"report {report_id} must pad the button byte with three constant bits")
     require(axes.get((1, 0x30)) == (-127, 127, 8, 6), "relative X differs")
     require(axes.get((1, 0x31)) == (-127, 127, 8, 6), "relative Y differs")
     for axis in (0x30, 0x31):
@@ -68,6 +95,8 @@ def descriptor():
         "usb_transfer_epoch_ != authenticated_epoch_",
         "std::memcmp(report_bytes, expected_report, expected_length)",
         "usb_transfer_pointer_bytes_.data()",
+        "keyferry::hid::SerializePointerReport(report, &usb_transfer_pointer_bytes_)",
+        "!usb_mounted_ || usb_transfer_in_flight_ || !hid_.report_needed()",
         "identity.pointer_extended_v1 =",
         "hid_.enable_extended_pointer()",
         "wire.data() + 1",

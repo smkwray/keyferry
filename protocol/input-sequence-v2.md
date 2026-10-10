@@ -15,6 +15,16 @@ Only usages 1..3 are public. Consumer AC Pan is a relative pointer axis; no
 Consumer Control or System Control reports are declared. The non-boot IF2
 **drops the pre-OS BIOS boot mouse**; the boot keyboard remains.
 
+The two report IDs have separate Mouse application collections, each containing
+a Pointer physical collection and a five-bit 0..1 button field plus three
+constant padding bits. Button presses follow the most recent positioning report:
+after absolute movement, clicks/down use report 4 with retained X/Y; before any
+absolute move or after relative X/Y movement, they use report 1. Scroll and neutral
+reports do not change this selection. Button-up and every fault still drain both
+IDs. USB dispatch waits for the previous transfer's completion before sending
+another report; click holds remain 10..100 ms (default 40 ms), with separate down
+and up transfers at the 10 ms report interval. No wire records or budgets change.
+
 AtomS3 Lite uses the same IF0/IF1/IF2, reports, capability and shared executor,
 with no IF3/MSC, PSRAM or file handoff. Its board build defaults to extended
 pointer and rejects a legacy-pointer or MSC configuration. Its USB-HID PID is

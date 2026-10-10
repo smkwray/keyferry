@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace keyferry::hid {
@@ -35,6 +36,10 @@ struct PointerReport {
     PointerReport(std::uint8_t b, std::int8_t dx, std::int8_t dy) : buttons(b), x(dx), y(dy) {}
     PointerReport(const BootMouseReport& r) : PointerReport(r.buttons, r.x, r.y) {}
 };
+
+// Includes the report ID; shared by the production USB adapter and native byte tests.
+std::size_t SerializePointerReport(const PointerReport& report,
+                                 std::array<std::uint8_t, 8>* output) noexcept;
 
 bool operator==(const BootKeyboardReport& left, const BootKeyboardReport& right) noexcept;
 bool operator!=(const BootKeyboardReport& left, const BootKeyboardReport& right) noexcept;
@@ -114,6 +119,7 @@ class ExecutorState final {
     bool mouse_enabled_{false};
     bool extended_pointer_{false};
     bool release_absolute_pending_{false};
+    bool absolute_button_target_{false};
     std::uint16_t absolute_x_{};
     std::uint16_t absolute_y_{};
     bool armed_{false};

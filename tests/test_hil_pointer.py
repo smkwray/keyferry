@@ -25,6 +25,32 @@ class AtomPointerDescriptorTests(unittest.TestCase):
     def test_three_interface_extended_personality(self):
         pointer.no_msc_usb_descriptors(self.config + self.device, self.report)
 
+    def test_button_layout_and_logical_range_on_both_reports(self):
+        button = bytes.fromhex("05091901290515002501750195058102750395018103")
+        for occurrence in (0, 1):
+            start = self.report.find(button)
+            if occurrence:
+                start = self.report.find(button, start + len(button))
+            self.assertGreaterEqual(start, 0)
+            # Page, usage range, logical min/max, size/count, data flag, padding size/count/flag.
+            for offset in (1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21):
+                bad = bytearray(self.report)
+                bad[start + offset] ^= 1
+                with self.subTest(report=occurrence, offset=offset), self.assertRaises(SystemExit):
+                    pointer.descriptor(bytes(bad))
+
+    def test_each_report_requires_mouse_application_pointer_physical_collection(self):
+        prefix = bytes.fromhex("05010902a10185")
+        for occurrence in (0, 1):
+            start = self.report.find(prefix)
+            if occurrence:
+                start = self.report.find(prefix, start + len(prefix))
+            for offset in (3, 5, 9, 11):
+                bad = bytearray(self.report)
+                bad[start + offset] ^= 1
+                with self.subTest(report=occurrence, offset=offset), self.assertRaises(SystemExit):
+                    pointer.descriptor(bytes(bad))
+
     def test_legacy_pointer_or_msc_is_rejected(self):
         for offset, value in ((4, 4), (72, 1), (73, 2), (82, 50)):
             bad = bytearray(self.config)
