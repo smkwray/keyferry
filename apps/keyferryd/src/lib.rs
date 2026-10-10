@@ -1258,6 +1258,7 @@ pub enum TransportOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportProgress {
+    Diagnostic(TransportDiagnostic),
     Accepted,
     Started,
 }
@@ -3128,6 +3129,13 @@ impl Daemon {
                 &progress_runtime,
                 command_id,
                 match event {
+                    TransportProgress::Diagnostic(diagnostic) => {
+                        let mut device = progress_runtime.lock().expect("device runtime lock");
+                        if let Some(command) = device.commands.get_mut(&command_id) {
+                            command.diagnostic.get_or_insert(diagnostic);
+                        }
+                        return;
+                    }
                     TransportProgress::Accepted => CommandOutcome::Accepted,
                     TransportProgress::Started => CommandOutcome::Started,
                 },
@@ -7501,6 +7509,7 @@ mod tests {
 
     #[derive(Default)]
     struct UnknownOnCancelTransport {
+        input_rejection: Option<TransportDiagnostic>,
         started: tokio::sync::Notify,
         releases: std::sync::atomic::AtomicUsize,
         confirmed_abort: bool,
@@ -7548,6 +7557,10 @@ mod tests {
             progress: ProgressHandler,
         ) -> BoxFuture<'a, TransportOutcome> {
             Box::pin(async move {
+                if let Some(diagnostic) = self.input_rejection {
+                    progress(TransportProgress::Diagnostic(diagnostic));
+                    return TransportOutcome::Rejected;
+                }
                 progress(TransportProgress::Accepted);
                 progress(TransportProgress::Started);
                 self.started.notify_one();
@@ -7718,6 +7731,45 @@ mod tests {
         }
         fn release_all<'a>(&'a self) -> BoxFuture<'a, Result<(), TransportError>> {
             self.base.release_all()
+        }
+    }
+
+    #[tokio::test]
+    async fn input_rejection_diagnostic_is_retained_in_the_public_command_outcome() {
+        for diagnostic in [
+            TransportDiagnostic::InputCapabilityRequired,
+            TransportDiagnostic::InputInvalidMode,
+        ] {
+            let transport = Arc::new(UnknownOnCancelTransport {
+                input_rejection: Some(diagnostic),
+                ..UnknownOnCancelTransport::default()
+            });
+            let daemon =
+                Daemon::with_transport(MemoryTokenStore::new("test-token-123456"), transport)
+                    .unwrap();
+            arm(&daemon).await;
+            let submitted = daemon
+                .submit_text(
+                    SIMULATOR_DEVICE_ID,
+                    "test".to_owned(),
+                    TypeRequest {
+                        text: "abc".to_owned(),
+                        profile: default_profile(),
+                        timing: default_timing(),
+                        expires_in_ms: None,
+                        command_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let id = Uuid::parse_str(&submitted.command_id).unwrap();
+            assert_eq!(
+                daemon.wait_for_terminal(id).await,
+                Some(CommandOutcome::Rejected)
+            );
+            let outcome = daemon.command_outcome(SIMULATOR_DEVICE_ID, id).unwrap();
+            assert_eq!(outcome.diagnostic_code, Some(diagnostic.code()));
+            assert!(!outcome.possible_start);
         }
     }
 

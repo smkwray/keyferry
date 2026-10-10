@@ -2841,7 +2841,22 @@ fn sequence_result_json_with_transport(
         output_transport: evidence.output_transport,
         error: error.map(|code| SequenceResultError { code }),
     };
-    serde_json::to_string(&result).expect("sequence result serialization is infallible")
+    let Some(message) = error.and_then(input_error_message) else {
+        return serde_json::to_string(&result)
+            .expect("sequence result serialization is infallible");
+    };
+    let mut value =
+        serde_json::to_value(&result).expect("sequence result serialization is infallible");
+    value["error"]["message"] = serde_json::json!(message);
+    value.to_string()
+}
+
+fn input_error_message(code: &str) -> Option<&'static str> {
+    match code {
+        "input.capability_required" => Some("Firmware rejected an unsupported input operation (CAPABILITY_REQUIRED); absolute-only pointer firmware cannot emit relative moves. Use eased absolute motion."),
+        "input.invalid_mode" => Some("Firmware rejected input in its current mode (INVALID_MODE); absolute-only pointer firmware requires an absolute move before a press, click or scroll after boot. Glide from the known current position first."),
+        _ => None,
+    }
 }
 
 fn outcome_exit_code(outcome: SequenceOutcome) -> u8 {

@@ -519,3 +519,29 @@ fn screen_area_preserves_dark_wallpaper_and_recognizes_letterbox() {
     }
     assert_eq!(geometry::active_video(&letter), [0.0, 0.0, 640.0, 480.0]);
 }
+
+#[test]
+fn input_rejections_and_unknown_keys_have_actionable_messages() {
+    for code in ["input.capability_required", "input.invalid_mode"] {
+        let error = failure(code);
+        assert_eq!(error["code"], code);
+        assert!(error["message"].as_str().unwrap().contains("absolute"));
+        let result: Value = serde_json::from_str(&super::super::sequence_result_json(
+            "test-device",
+            None,
+            super::super::SequenceOutcome::Rejected,
+            Some(code),
+        ))
+        .unwrap();
+        assert_eq!(result["error"], error);
+    }
+    let raw = br#"{"schema":"keyferry.input-sequence.v1","keyboard_profile":"windows-us","arm":"command-scoped","start_within_ms":5000,"actions":[{"type":"tap","key":"enter"}]}"#;
+    assert_eq!(
+        super::super::prepare_input_sequence(raw).unwrap_err(),
+        "key.unknown"
+    );
+    assert!(failure("key.unknown")["message"]
+        .as_str()
+        .unwrap()
+        .contains("keyctl keys"));
+}

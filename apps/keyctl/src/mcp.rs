@@ -349,6 +349,8 @@ fn failure(code: &str) -> Value {
         "capture.peer_offline" => "The selected capture peer is offline or its fresh device proof failed. Check controller connectivity; no input was sent.",
         "capture.select_required" => "Select a capture source using list_capture_sources and select_capture_source; no unambiguous source is available.",
         "calibration.cursor_not_seen" => "Cursor not seen: capture may show a different machine. Check HDMI main-display mirroring and a static harmless target.",
+        "input.capability_required" | "input.invalid_mode" => super::input_error_message(code).unwrap(),
+        "key.unknown" => "Unknown key name. Use uppercase names such as ENTER, ESCAPE, TAB, SPACE, A, CTRL, SHIFT, ALT or CMD; run keyctl keys for the complete canonical names and aliases.",
         "pointer.capability_required" => "Device lacks POINTER_EXTENDED_V1; keyboard tools remain available.",
         "pointer.calibration_required" => "Calibrate this capture/device binding first, or explicitly pass uncalibrated:true for full-frame linear mapping.",
         "pointer.screenshot_required" => "Take a fresh screenshot after capture geometry changes before pointer input.",
@@ -842,9 +844,13 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             result["terminal_release_completed"] = json!(false);
         }
         if exit != 0 || result["outcome"] != "EMITTED" {
-            return Err(
-                json!({"code":"command.failed_or_unknown","command":result,"message":"Do not replay; inspect target and reconcile command_id. UNKNOWN may have started."}),
+            let code = result["error"]["code"]
+                .as_str()
+                .unwrap_or("command.failed_or_unknown");
+            let message = super::input_error_message(code).unwrap_or(
+                "Do not replay; inspect target and reconcile command_id. UNKNOWN may have started.",
             );
+            return Err(json!({"code":code,"command":result,"message":message}));
         }
         Ok(result)
     }

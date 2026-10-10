@@ -198,6 +198,10 @@ async fn capability_refuses_before_arm_and_unknown_never_replays() {
             "pointer.capability_required"
         );
         assert_eq!(t.control_request_counts(), (0, 0, 0));
+        let error = s.call("key", &json!({"keys":["enter"]}), &c).unwrap_err();
+        assert_eq!(error["code"], "key.unknown");
+        assert!(error["message"].as_str().unwrap().contains("keyctl keys"));
+        assert_eq!(t.control_request_counts(), (0, 0, 0));
         assert_eq!(
             s.call("key", &json!({"keys":["CMD","A"]}), &c).unwrap()["structuredContent"]
                 ["outcome"],

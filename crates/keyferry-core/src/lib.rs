@@ -62,6 +62,8 @@ impl CommandState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportDiagnostic {
+    InputCapabilityRequired,
+    InputInvalidMode,
     CancelSendTransport,
     CancelSendProtocol,
     CancelActiveResultTransport,
@@ -80,6 +82,8 @@ impl TransportDiagnostic {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::InputCapabilityRequired => "input.capability_required",
+            Self::InputInvalidMode => "input.invalid_mode",
             Self::CancelSendTransport => "cancel.send.transport",
             Self::CancelSendProtocol => "cancel.send.protocol",
             Self::CancelActiveResultTransport => "cancel.active_result.transport",
@@ -98,6 +102,8 @@ impl TransportDiagnostic {
     #[must_use]
     pub fn from_code(code: &str) -> Option<Self> {
         match code {
+            "input.capability_required" => Some(Self::InputCapabilityRequired),
+            "input.invalid_mode" => Some(Self::InputInvalidMode),
             "cancel.send.transport" => Some(Self::CancelSendTransport),
             "cancel.send.protocol" => Some(Self::CancelSendProtocol),
             "cancel.active_result.transport" => Some(Self::CancelActiveResultTransport),
