@@ -89,12 +89,21 @@ impl DaemonFrames {
         }
     }
     fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<Value, &'static str> {
+        self.request_with_timeout(method, path, body, None)
+    }
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, &'static str> {
         let endpoint = super::super::parse_endpoint(&self.url).map_err(|_| "input.url")?;
         let token =
             super::super::load_token(&self.token).map_err(|_| "daemon.token_unavailable")?;
         let client = super::super::Client { endpoint, token };
         let response = client
-            .request_raw(method, path, body)
+            .request_raw_with_timeout(method, path, body, timeout)
             .map_err(|_| "daemon.unavailable")?;
         let value: Value =
             serde_json::from_str(&response.body).map_err(|_| "protocol.invalid_response")?;
@@ -110,6 +119,7 @@ impl DaemonFrames {
                 Some("capture.source_busy") => "capture.source_busy",
                 Some("capture.source_not_found") => "capture.source_not_found",
                 Some("capture.source_unavailable") => "capture.source_unavailable",
+                Some("capture.frame_timeout") => "capture.frame_timeout",
                 Some("ocr.unsupported_platform") => "ocr.unsupported_platform",
                 Some("ocr.engine_unavailable") => "ocr.engine_unavailable",
                 _ => "capture.frame_unavailable",
@@ -232,13 +242,24 @@ impl FrameSource for DaemonFrames {
             if cancelled.load(Ordering::Acquire) {
                 return Err("request.cancelled");
             }
-            let request = json!({"device":self.device,"source":self.source,"after":after,"epoch":self.epoch,"ocr":self.ocr});
-            let value = match self.request("POST", "/v1/capture/frame", Some(&request.to_string()))
-            {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err("capture.frame_timeout");
+            }
+            let request = json!({"device":self.device,"source":self.source,"after":after,"epoch":self.epoch,"ocr":self.ocr,"timeout_ms":remaining.as_millis().clamp(1, keyferry_capture::frames::FRAME_WAIT.as_millis())});
+            let value = match self.request_with_timeout(
+                "POST",
+                "/v1/capture/frame",
+                Some(&request.to_string()),
+                Some(remaining),
+            ) {
+                Err(_) if started.elapsed() >= timeout => return Err("capture.frame_timeout"),
                 Err("capture.busy" | "capture.frame_unavailable")
                     if started.elapsed() < timeout =>
                 {
-                    thread::sleep(Duration::from_millis(100));
+                    thread::sleep(
+                        Duration::from_millis(100).min(timeout.saturating_sub(started.elapsed())),
+                    );
                     continue;
                 }
                 other => other?,
