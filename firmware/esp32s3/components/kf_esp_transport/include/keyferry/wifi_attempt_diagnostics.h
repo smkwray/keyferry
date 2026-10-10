@@ -18,6 +18,9 @@ struct WifiAttemptStatus {
   std::uint32_t attempt_count{};
   std::uint32_t elapsed_to_tls_ms{};
   std::uint32_t elapsed_to_close_ms{};
+  std::uint8_t endpoint_reject_site{};
+  std::uint8_t endpoint_message_type{};
+  std::uint32_t endpoint_sequence{};
 };
 
 class WifiAttemptDiagnostics {
@@ -48,6 +51,12 @@ class WifiAttemptDiagnostics {
     current_.elapsed_to_close_ms = Elapsed(now_ms);
     completed_ = current_;
     open_ = false;
+  }
+  void EndpointRejected(std::uint8_t site, std::uint8_t type, std::uint32_t sequence) {
+    if (!open_) return;
+    current_.endpoint_reject_site = site;
+    current_.endpoint_message_type = type;
+    current_.endpoint_sequence = sequence;
   }
   [[nodiscard]] WifiAttemptStatus completed() const { return completed_; }
 

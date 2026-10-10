@@ -73,6 +73,12 @@ struct LocalSafetyStatus {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LocalWifiDiagnostic {
+    #[serde(default)]
+    endpoint_reject_site: Option<u8>,
+    #[serde(default)]
+    endpoint_message_type: Option<u8>,
+    #[serde(default)]
+    endpoint_sequence: Option<u32>,
     last_wifi_reject_reason: String,
     beacon_tls_identity_equal: bool,
     identity_checked: bool,
@@ -290,7 +296,18 @@ fn format_local_status(status: LocalStatusDocument) -> Result<String, String> {
             }) {
                 return Err("The local Wi-Fi diagnostic response was invalid.".to_owned());
             }
-            format!("\nWi-Fi last close: {} · attempt {} · TLS {} ({} ms) · identity checked {} / equal {} · close {} ms.",
+            let endpoint = match (
+                wifi.endpoint_reject_site,
+                wifi.endpoint_message_type,
+                wifi.endpoint_sequence,
+            ) {
+                (Some(site), Some(message), Some(sequence)) if site <= 8 => {
+                    format!(" Endpoint check {site}, message {message}, sequence {sequence}.")
+                }
+                (None, None, None) => String::new(),
+                _ => return Err("The local endpoint diagnostic response was invalid.".to_owned()),
+            };
+            format!("\nWi-Fi last close: {} · attempt {} · TLS {} ({} ms) · identity checked {} / equal {} · close {} ms.{endpoint}",
                 wifi.last_wifi_reject_reason, wifi.attempt_count, yes_no(wifi.tls_verified),
                 wifi.elapsed_to_tls_ms, yes_no(wifi.identity_checked),
                 yes_no(wifi.beacon_tls_identity_equal), wifi.elapsed_to_close_ms)

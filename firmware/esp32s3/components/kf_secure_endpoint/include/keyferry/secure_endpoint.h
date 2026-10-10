@@ -14,10 +14,18 @@ constexpr std::uint16_t kTls12Version = 0x0303;
 constexpr std::uint16_t kRequiredCipherSuite = 0xCCA9;
 constexpr std::size_t kSha256Length = 32;
 constexpr std::size_t kMaxWireFrame = 259;
+
+// Metadata only: no identity, payload, or secret survives a rejection.
+struct EndpointRejectDiagnostic {
+  std::uint8_t site{};
+  std::uint8_t message_type{};
+  std::uint32_t sequence{};
+};
 constexpr std::size_t kFirmwareIdentityReleaseBytes = 32;
 constexpr std::size_t kFirmwareIdentityPayloadBytes = 77;
 constexpr std::uint32_t kWaveshareGeekV1_1CompatibilityId = 1;
 constexpr std::uint32_t kLilygoTDongleS3CompatibilityId = 2;
+constexpr std::uint32_t kM5stackAtomS3LiteCompatibilityId = 3;
 
 struct FirmwareIdentity {
   std::array<std::uint8_t, kFirmwareIdentityReleaseBytes> release{};
@@ -149,6 +157,7 @@ class EndpointSession {
   bool authenticated() const;
   std::uint64_t epoch() const;
   bool control_reply_pending() const;
+  EndpointRejectDiagnostic reject_diagnostic() const { return reject_diagnostic_; }
 
  private:
   enum class State : std::uint8_t {
@@ -167,6 +176,7 @@ class EndpointSession {
   bool SendAck(const protocol::DecodedFrame& frame);
   bool SendError(const protocol::DecodedFrame& frame, std::uint16_t error_code);
   bool Fail();
+  bool Reject(std::uint8_t site, const protocol::DecodedFrame* frame = nullptr);
   void ResetReceive();
 
   std::array<std::uint8_t, 16> device_id_;
@@ -184,6 +194,7 @@ class EndpointSession {
       protocol::GatewayHandoffOperation::kQuery};
   std::array<std::uint8_t, kMaxWireFrame> wire_{};
   std::size_t wire_length_{0};
+  EndpointRejectDiagnostic reject_diagnostic_{};
   std::array<std::uint8_t, protocol::kMaxDecodedFrame> decoded_{};
 };
 

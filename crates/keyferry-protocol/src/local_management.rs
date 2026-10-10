@@ -159,11 +159,50 @@ pub struct WifiDiagnosticStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EndpointDiagnosticStatus {
+    pub reject_site: u8,
+    pub message_type: u8,
+    pub sequence: u32,
+}
+
+#[test]
+fn endpoint_diagnostic_vector_and_bounds() {
+    let mut payload = [0; limits::RESPONSE_PAYLOAD_SIZE];
+    for (byte, hex) in payload.iter_mut().zip(
+        include_str!("../../../protocol/vectors/local-endpoint-diagnostic.hex").split_whitespace(),
+    ) {
+        *byte = u8::from_str_radix(hex, 16).unwrap();
+    }
+    assert_eq!(
+        decode_status_page(status_page::ENDPOINT_DIAGNOSTIC, &payload),
+        Ok(StatusPage::EndpointDiagnostic(EndpointDiagnosticStatus {
+            reject_site: 6,
+            message_type: 0x20,
+            sequence: 0x12345678,
+        }))
+    );
+    for site in 0..=255 {
+        payload[1] = site;
+        assert_eq!(
+            decode_status_page(status_page::ENDPOINT_DIAGNOSTIC, &payload).is_ok(),
+            site <= 8
+        );
+    }
+    payload[1] = 6;
+    for index in [3, 8, 9, 10, 11, 12, 13, 14, 15] {
+        payload[index] = 1;
+        assert!(decode_status_page(status_page::ENDPOINT_DIAGNOSTIC, &payload).is_err());
+        payload[index] = 0;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StatusPage {
     Device(DeviceStatus),
     Safety(SafetyStatus),
     Network(NetworkStatus),
     WifiDiagnostic(WifiDiagnosticStatus),
+    EndpointDiagnostic(EndpointDiagnosticStatus),
     BleHid(BleHidStatus),
     Policy(PolicyStatus),
     LastReceipt(Option<ReceiptStatus>),
@@ -276,6 +315,7 @@ pub fn status_request_payload(page: u8) -> Result<RequestPayload, StatusPageErro
             | status_page::SAFETY
             | status_page::NETWORK
             | status_page::WIFI_DIAGNOSTIC
+            | status_page::ENDPOINT_DIAGNOSTIC
             | status_page::BLE_HID
             | status_page::POLICY
             | status_page::LAST_RECEIPT
@@ -359,6 +399,19 @@ pub fn decode_status_page(
                 restart_pending: flags & 0x40 != 0,
                 receipt_storage_healthy: flags & 0x80 != 0,
                 usb_attachment_generation: u32::from_le_bytes(array(&payload[4..8])),
+            }))
+        }
+        status_page::ENDPOINT_DIAGNOSTIC => {
+            if payload[3] != 0 || !all_zero(&payload[8..]) {
+                return Err(StatusPageError::NonzeroReserved);
+            }
+            if payload[1] > 8 {
+                return Err(StatusPageError::InvalidValue);
+            }
+            Ok(StatusPage::EndpointDiagnostic(EndpointDiagnosticStatus {
+                reject_site: payload[1],
+                message_type: payload[2],
+                sequence: u32::from_le_bytes(array(&payload[4..8])),
             }))
         }
         status_page::WIFI_DIAGNOSTIC => {

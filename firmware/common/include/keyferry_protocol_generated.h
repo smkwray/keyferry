@@ -291,6 +291,7 @@ enum class LocalManagementStatusPage : std::uint8_t {
   kProbeHeap = 0x08,
   kProbeStack = 0x09,
   kWifiDiagnostic = 0x0A,
+  kEndpointDiagnostic = 0x0B,
 };
 
 enum class WifiRejectReason : std::uint8_t {
@@ -373,6 +374,7 @@ enum class Capability : std::uint32_t {
   kScreenPowerV1 = 0x02000000,
   kUsbFileSetV2 = 0x04000000,
   kPointerExtendedV1 = 0x08000000,
+  kEndpointRejectDiagnosticsV1 = 0x10000000,
 };
 
 enum class OutputMode : std::uint8_t {

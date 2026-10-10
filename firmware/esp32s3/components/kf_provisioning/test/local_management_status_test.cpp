@@ -205,7 +205,24 @@ void TestWifiDiagnosticVectorAndBounds(const char* vector_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  assert(argc == 2);
+  assert(argc == 3);
+  local::StatusSnapshot endpoint{};
+  endpoint.wifi_diagnostic.endpoint_reject_site = 6;
+  endpoint.wifi_diagnostic.endpoint_message_type = 0x20;
+  endpoint.wifi_diagnostic.endpoint_sequence = 0x12345678;
+  local::ResponsePayload payload{};
+  assert(local::EncodeStatusPage(protocol::LocalManagementStatusPage::kEndpointDiagnostic,
+                                endpoint, &payload));
+  std::ifstream vector(argv[2]);
+  unsigned byte{};
+  for (const auto actual : payload) { assert(vector >> std::hex >> byte); assert(actual == byte); }
+  assert(!(vector >> byte));
+  for (unsigned site = 0; site <= 255; ++site) {
+    endpoint.wifi_diagnostic.endpoint_reject_site = static_cast<std::uint8_t>(site);
+    assert(local::EncodeStatusPage(protocol::LocalManagementStatusPage::kEndpointDiagnostic,
+                                  endpoint, &payload) == (site <= 8));
+    if (site > 8) for (const auto actual : payload) assert(actual == 0);
+  }
   TestWifiDiagnosticVectorAndBounds(argv[1]);
   TestEveryPageHasOneExactBoundedEncoding();
   TestInvalidSnapshotsClearOutputAndFailClosed();

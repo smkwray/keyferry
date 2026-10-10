@@ -1234,9 +1234,14 @@ bool EspTransport::ServiceCurrentTls(std::uint64_t now_ms) {
 
 bool EspTransport::ServiceEndpointRead(std::uint64_t now_ms) {
   std::array<std::uint8_t, 512> input{};
-  if (!session_.Service() ||
-      (!session_.control_reply_pending() &&
-       !delegate_.Service(session_.epoch()))) {
+  if (!session_.Service()) {
+    wifi_attempt_.EndpointRejected(7, 0, 0);
+    RejectWifi(WifiReject::kEndpointRejected);
+    return false;
+  }
+  if (!session_.control_reply_pending() && !delegate_.Service(session_.epoch())) {
+    wifi_attempt_.EndpointRejected(8, 0, 0);
+    RejectWifi(WifiReject::kEndpointRejected);
     return false;
   }
   int result = 0;
@@ -1264,6 +1269,8 @@ bool EspTransport::ServiceEndpointRead(std::uint64_t now_ms) {
         session_.ConsumeTls(input.data(), static_cast<std::size_t>(result));
     SecureClear(input.data(), input.size());
     if (!consumed) {
+      const auto reject = session_.reject_diagnostic();
+      wifi_attempt_.EndpointRejected(reject.site, reject.message_type, reject.sequence);
       RejectWifi(WifiReject::kEndpointRejected);
       return false;
     }

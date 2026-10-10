@@ -131,11 +131,16 @@ def run_cpp_check(compiler: str) -> None:
                 [
                     ROOT / "firmware/common/include",
                     ROOT / "firmware/esp32s3/components/kf_secure_endpoint/include",
+                    ROOT / "firmware/esp32s3/components/kf_hid_core/include",
+                    ROOT / "firmware/esp32s3/components/kf_command_executor/include",
                 ],
                 [
                     ROOT / "firmware/common/src/frame_codec.cpp",
                     ROOT / "firmware/common/src/gateway_handoff.cpp",
                     ROOT / "firmware/esp32s3/components/kf_secure_endpoint/src/secure_endpoint.cpp",
+                    ROOT / "firmware/esp32s3/components/kf_hid_core/src/hid_executor.cpp",
+                    ROOT / "firmware/esp32s3/components/kf_command_executor/src/command_executor.cpp",
+                    ROOT / "firmware/esp32s3/components/kf_command_executor/src/input_command.cpp",
                     ROOT
                     / "firmware/esp32s3/components/kf_secure_endpoint/test/secure_endpoint_test.cpp",
                 ],
@@ -490,6 +495,9 @@ def run_cpp_check(compiler: str) -> None:
             arguments = [str(executable)]
             if name == "local-management-status-test":
                 arguments.append(str(ROOT / "protocol/vectors/local-wifi-diagnostic.hex"))
+                arguments.append(str(ROOT / "protocol/vectors/local-endpoint-diagnostic.hex"))
+            if name == "secure-endpoint-test":
+                arguments.append(str(ROOT / "protocol/vectors/typing-stress.hex"))
             run(arguments, cwd=tmp)
 
 

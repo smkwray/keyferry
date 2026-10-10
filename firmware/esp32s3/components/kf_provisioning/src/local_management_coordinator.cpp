@@ -341,7 +341,7 @@ bool Coordinator::ValidStatusPage(const std::uint8_t page) {
              static_cast<std::uint8_t>(
                  protocol::LocalManagementStatusPage::kDevice) &&
          page <= static_cast<std::uint8_t>(
-                     protocol::LocalManagementStatusPage::kWifiDiagnostic);
+                     protocol::LocalManagementStatusPage::kEndpointDiagnostic);
 }
 
 bool Coordinator::Normalize(const AuthenticatedRequest& request,

@@ -548,6 +548,8 @@ local_management_status_pages:
     id: 0x09
   - name: WIFI_DIAGNOSTIC
     id: 0x0A
+  - name: ENDPOINT_DIAGNOSTIC
+    id: 0x0B
 
 wifi_reject_reasons:
   - name: NONE
@@ -709,6 +711,8 @@ capabilities:
 
   - name: POINTER_EXTENDED_V1
     bit: 0x08000000
+  - name: ENDPOINT_REJECT_DIAGNOSTICS_V1
+    bit: 0x10000000
 
 output_modes:
   - name: USB_HID

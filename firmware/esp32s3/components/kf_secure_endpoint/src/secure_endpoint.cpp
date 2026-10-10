@@ -152,7 +152,8 @@ bool ValidateFirmwareIdentity(const FirmwareIdentity& identity) {
   const auto terminator = std::find(identity.release.begin(), identity.release.end(), 0);
   const bool known_board =
       identity.board_compatibility_id == kWaveshareGeekV1_1CompatibilityId ||
-      identity.board_compatibility_id == kLilygoTDongleS3CompatibilityId;
+      identity.board_compatibility_id == kLilygoTDongleS3CompatibilityId ||
+      identity.board_compatibility_id == kM5stackAtomS3LiteCompatibilityId;
   if (terminator == identity.release.begin() || terminator == identity.release.end() ||
       !known_board ||
       !AnyNonzero(identity.elf_sha256.data(), identity.elf_sha256.size())) {
@@ -187,6 +188,7 @@ void EndpointSession::Boot() { Fail(); }
 bool EndpointSession::BeginTls(const TlsClientPolicy& accepted_policy,
                                const TlsObservation& observation) {
   Fail();
+  reject_diagnostic_ = {};
   if (epoch_exhausted_ || !AnyNonzero(device_id_.data(), device_id_.size()) ||
       !ValidateTlsPolicy(accepted_policy) ||
       observation.version != kTls12Version ||
@@ -203,11 +205,11 @@ bool EndpointSession::BeginTls(const TlsClientPolicy& accepted_policy,
 
 bool EndpointSession::ConsumeTls(const std::uint8_t* data, std::size_t length) {
   if (state_ == State::kOffline || (data == nullptr && length != 0)) {
-    return Fail();
+    return Reject(1);
   }
   for (std::size_t index = 0; index < length; ++index) {
     if (wire_length_ == wire_.size()) {
-      return Fail();
+      return Reject(2);
     }
     wire_[wire_length_++] = data[index];
     if (data[index] != 0) {
@@ -218,10 +220,10 @@ bool EndpointSession::ConsumeTls(const std::uint8_t* data, std::size_t length) {
     const protocol::CodecError result = protocol::DecodeWireFrame(
         wire_.data(), wire_length_, decoded_.data(), decoded_.size(), &frame);
     wire_length_ = 0;
-    if (result != protocol::CodecError::kOk || frame.major != protocol::kMajor ||
-        frame.minor != protocol::kMinor || !HandleFrame(frame)) {
-      return Fail();
-    }
+    if (result != protocol::CodecError::kOk) return Reject(3);
+    if (frame.major != protocol::kMajor || frame.minor != protocol::kMinor)
+      return Reject(4, &frame);
+    if (!HandleFrame(frame)) return state_ == State::kOffline ? false : Reject(5, &frame);
   }
   return true;
 }
@@ -424,10 +426,14 @@ bool EndpointSession::HandleSessionReady(const protocol::DecodedFrame& frame) {
 bool EndpointSession::HandleAuthenticated(const protocol::DecodedFrame& frame) {
   // Reject before dispatch when increment would wrap. This is more conservative than executing the
   // final sequence and then closing with an uncertain result.
-  if (disarm_ack_pending_ || handoff_reply_pending_ ||
-      frame.sequence != expected_sequence_ ||
+  if (frame.sequence != expected_sequence_ ||
       expected_sequence_ == UINT32_MAX) {
-    return false;
+    return Reject(6, &frame);
+  }
+  if (disarm_ack_pending_ || handoff_reply_pending_) {
+    const bool sent = SendError(frame, static_cast<std::uint16_t>(protocol::ErrorCode::kBusy));
+    if (sent) ++expected_sequence_;
+    return sent;
   }
   const auto type = static_cast<protocol::MessageType>(frame.message_type);
   bool handled = false;
@@ -440,7 +446,9 @@ bool EndpointSession::HandleAuthenticated(const protocol::DecodedFrame& frame) {
         handled =
             SendError(frame, static_cast<std::uint16_t>(protocol::ErrorCode::kInvalidMode));
       } else {
-        handled = effects_.CommandScopedArm(epoch_, frame.sequence + 1U) && SendAck(frame);
+        handled = effects_.CommandScopedArm(epoch_, frame.sequence + 1U)
+                      ? SendAck(frame)
+                      : SendError(frame, static_cast<std::uint16_t>(protocol::ErrorCode::kBusy));
       }
     }
   } else if (type == protocol::MessageType::kDisarm) {
@@ -590,6 +598,17 @@ bool EndpointSession::Fail() {
   }
   effects_.FailClosed(epoch_);
   return false;
+}
+
+bool EndpointSession::Reject(std::uint8_t site, const protocol::DecodedFrame* frame) {
+  if (reject_diagnostic_.site == 0) {
+    reject_diagnostic_.site = site;
+    if (frame != nullptr) {
+      reject_diagnostic_.message_type = frame->message_type;
+      reject_diagnostic_.sequence = frame->sequence;
+    }
+  }
+  return Fail();
 }
 
 void EndpointSession::ResetReceive() {

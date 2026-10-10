@@ -227,7 +227,7 @@ void Enforces_sequence_expiry_busy_and_arm_consumption() {
 
     assert(fixture.executor.HandleAuthenticated(7, Frame(2, first), 100));
     const auto busy = Envelope(Id(3), 50, 1, Actions());
-    assert(!fixture.executor.HandleAuthenticated(7, Frame(3, busy), 101));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(3, busy), 101));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
     fixture.executor.Poll(150);
     assert(keyferry::hid::is_zero(fixture.hid.desired_report()));
@@ -235,7 +235,7 @@ void Enforces_sequence_expiry_busy_and_arm_consumption() {
     assert(fixture.results.events.back().result == ResultCode::kAborted);
 
     const auto unarmed = Envelope(Id(4), 50, 1, Actions());
-    assert(!fixture.executor.HandleAuthenticated(7, Frame(4, unarmed), 160));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(4, unarmed), 160));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
 }
 
@@ -391,7 +391,7 @@ void Mixed_cancellation_neutralizes_and_duplicate_chunks_do_not_reexecute() {
     later_body[0] = 1;
     later_body[2] = 2;
     const auto later = Envelope(id, 5000, 4, later_body);
-    assert(!fixture.executor.HandleAuthenticated(7, Frame(4, later), 20));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(4, later), 20));
     const auto& duplicate = fixture.results.input_events.back().evidence;
     assert(duplicate.result == ResultCode::kRejected);
     assert(duplicate.reason == ErrorCode::kDuplicate);
@@ -435,7 +435,7 @@ void Mixed_capability_rejection_clears_arm_and_release_confirms_both_zeros() {
     Fixture legacy;
     legacy.Arm();
     const auto unsupported = Envelope(Id(13), 5000, 4, InputActions());
-    assert(!legacy.executor.HandleAuthenticated(7, Frame(2, unsupported), 10));
+    assert(legacy.executor.HandleAuthenticated(7, Frame(2, unsupported), 10));
     assert(!legacy.hid.armed());
     assert(legacy.results.input_events.back().evidence.result == ResultCode::kRejected);
     assert(legacy.results.input_events.back().evidence.reason == ErrorCode::kCapabilityRequired);
@@ -453,7 +453,7 @@ void Mixed_capability_rejection_clears_arm_and_release_confirms_both_zeros() {
     unnegotiated.UsbReportAccepted({}, 0);
     unnegotiated.UsbMouseReportAccepted({}, 0, 0);
     assert(unnegotiated.CommandScopedArm(7, 2));
-    assert(!unnegotiated.HandleAuthenticated(7, Frame(2, unsupported), 10));
+    assert(unnegotiated.HandleAuthenticated(7, Frame(2, unsupported), 10));
     assert(!unnegotiated_hid.armed());
     assert(unnegotiated_results.input_events.back().evidence.reason ==
            ErrorCode::kCapabilityRequired);
@@ -523,7 +523,7 @@ void Extended_pointer_faults_release_every_report_role(const bool scrolling) {
             case 0: { const auto cancel = Envelope(Id(80),5000,8,{}); assert(executor.HandleAuthenticated(7,Frame(3,cancel),14)); break; }
             case 1: executor.EndSession(); break;
             case 2: executor.UsbFault(); break;
-            case 3: { const auto invalid = Envelope(Id(81),5000,7,{0,0,1,0,10,1,1,7,0}); assert(!executor.HandleAuthenticated(7,Frame(3,invalid),14)); break; }
+            case 3: { const auto invalid = Envelope(Id(81),5000,7,{0,0,1,0,10,1,1,7,0}); assert(executor.HandleAuthenticated(7,Frame(3,invalid),14)); break; }
             case 4: if (scrolling) hid.watchdog_release(); else executor.HeldKeyDeadlineFired(watchdog.token,watchdog.deadline_ms); break;
             case 5: executor.UsbMouseReportAccepted({},99,14); break;
             case 6: hid.on_transport_lost(); executor.EndSession(); hid.on_transport_ready(); break;

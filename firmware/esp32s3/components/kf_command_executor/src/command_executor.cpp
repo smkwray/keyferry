@@ -179,6 +179,14 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
                           kind == static_cast<std::uint8_t>(protocol::CommandKind::kReleaseInputAllV2);
     if (extended) { kind = static_cast<std::uint8_t>(kind - 3); }
     const bool input_kind = kind == kExecuteInputChunk || kind == kCancelInput || kind == kReleaseInputAll;
+    const auto reject_legacy = [&]() {
+        if (!active_) {
+            command_arm_available_ = false;
+            hid_.disarm();
+        }
+        Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
+        return true;  // A correlated rejection is handled, not a transport fault.
+    };
     if (!active_) { input_extended_ = extended; }
     if (input_kind) {
         const bool clear_arm = kind == kExecuteInputChunk && command_arm_available_;
@@ -186,12 +194,12 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
             !hid_.mouse_enabled() || (active_ && input_extended_ != extended)) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kCapabilityRequired,
                         clear_arm);
-            return false;
+            return true;
         }
         if (kind == kCancelInput) {
             if (body_length != 0 || !active_ || !input_active_ || command_id != command_id_) {
                 RejectInput(command_id, frame.sequence, protocol::ErrorCode::kMalformed, false);
-                return false;
+                return true;
             }
             if (terminal_pending_) {
                 if (terminal_result_ == protocol::ResultCode::kEmitted &&
@@ -207,7 +215,7 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         if (kind == kReleaseInputAll) {
             if (body_length != 0 || active_) {
                 RejectInput(command_id, frame.sequence, protocol::ErrorCode::kBusy, false);
-                return false;
+                return true;
             }
             command_arm_available_ = false;
             active_ = true;
@@ -227,20 +235,20 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         if (!ParseInputChunk(body, body_length, &parsed, extended)) {
             if (active_) { BeginTerminal(protocol::ResultCode::kAborted, protocol::ErrorCode::kMalformed); }
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kMalformed, clear_arm);
-            return false;
+            return true;
         }
         if (active_) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kBusy, clear_arm);
-            return false;
+            return true;
         }
         if (!command_arm_available_ || !hid_.armed()) {
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kNotArmed, clear_arm);
-            return false;
+            return true;
         }
         const auto replay = input_replay_.Admit(command_id, parsed.index, parsed.count);
         if (replay != InputReplayDecision::kAccepted) {
             RejectInput(command_id, frame.sequence, ReplayError(replay), true);
-            return false;
+            return true;
         }
 
         command_arm_available_ = false;
@@ -263,8 +271,7 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
 
     if (kind == kCancel) {
         if (body_length != 0 || !active_ || command_id != command_id_) {
-            Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
-            return false;
+            return reject_legacy();
         }
         BeginTerminal(protocol::ResultCode::kAborted);
         return true;
@@ -272,8 +279,7 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
 
     if (kind == kReleaseAll) {
         if (body_length != 0 || active_) {
-            Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
-            return false;
+            return reject_legacy();
         }
         active_ = true;
         input_active_ = false;
@@ -288,10 +294,12 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         return true;
     }
 
-    if (kind != kExecuteReportChunk || active_ || !command_arm_available_ || !hid_.armed() ||
+    if (kind == kExecuteReportChunk && active_) {
+        return reject_legacy();
+    }
+    if (kind != kExecuteReportChunk || !command_arm_available_ || !hid_.armed() ||
         !ParseActions(body, body_length)) {
-        Emit(command_id, frame.sequence, protocol::ResultCode::kRejected);
-        return false;
+        return reject_legacy();
     }
 
     command_arm_available_ = false;
@@ -425,7 +433,9 @@ void CommandExecutor::UsbReportAccepted(const hid::BootKeyboardReport& report,
         return;
     }
     if (terminal_pending_) {
-        if (zero) {
+        // Disarm queues keyboard, relative mouse, then absolute mouse release.
+        // A keyboard-zero callback alone must not promise rearmability to the host.
+        if (zero && !hid_.report_needed() && hid::is_zero(hid_.current_mouse_report())) {
             FinishTerminal();
         }
         return;
@@ -456,6 +466,10 @@ void CommandExecutor::UsbMouseReportAccepted(const hid::PointerReport& report,
         return;
     }
     if (!input_active_) {
+        if (active_ && terminal_pending_ && !hid_.report_needed() &&
+            hid::is_zero(hid_.current_report()) && hid::is_zero(hid_.current_mouse_report())) {
+            FinishTerminal();
+        }
         return;
     }
     const bool effect = logical_token != 0 || report.buttons != 0;
@@ -903,7 +917,7 @@ void CommandExecutor::RejectInput(const std::array<std::uint8_t, 16>& command_id
                                   const std::uint32_t sequence,
                                   const protocol::ErrorCode reason,
                                   const bool clear_arm) {
-    if (clear_arm) {
+    if (clear_arm || (!active_ && command_arm_available_)) {
         command_arm_available_ = false;
         hid_.disarm();
     }

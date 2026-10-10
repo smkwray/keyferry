@@ -10,19 +10,24 @@ int main() {
   diagnostic.TlsVerified(5100);
   diagnostic.IdentityCompared(true);
   diagnostic.Reject(WifiRejectReason::kWifiPreferenceExpired);
+  diagnostic.EndpointRejected(6, 0x20, 123);
   diagnostic.Reject(WifiRejectReason::kOther);
   diagnostic.Close(15100);
   const auto failed = diagnostic.completed();
   assert(failed.attempt_count == 1 && failed.elapsed_to_tls_ms == 5000);
   assert(failed.elapsed_to_close_ms == 15000 && failed.beacon_tls_identity_equal);
   assert(failed.last_wifi_reject_reason == WifiRejectReason::kWifiPreferenceExpired);
+  assert(failed.endpoint_reject_site == 6 && failed.endpoint_message_type == 0x20 &&
+         failed.endpoint_sequence == 123);
   diagnostic.Start(20000);
   assert(diagnostic.completed().attempt_count == 1); // reconnect retains last close
+  assert(diagnostic.completed().endpoint_sequence == 123);
   diagnostic.TlsVerified(22000);
   diagnostic.IdentityCompared(false);
   diagnostic.Reject(WifiRejectReason::kBeaconTlsIdentityMismatch);
   diagnostic.Close(22001);
   assert(diagnostic.completed().attempt_count == 2);
+  assert(diagnostic.completed().endpoint_reject_site == 0);
   assert(!diagnostic.completed().beacon_tls_identity_equal);
   diagnostic.Close(23000); // duplicate cleanup cannot overwrite timing
   assert(diagnostic.completed().elapsed_to_close_ms == 2001);
