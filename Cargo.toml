@@ -42,3 +42,10 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# Fast controller deploys (scripts/deploy_controller.ps1); published packages keep [profile.release].
+[profile.deploy]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
