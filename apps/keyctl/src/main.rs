@@ -953,6 +953,16 @@ impl Client {
         path: &str,
         body: Option<&str>,
     ) -> Result<HttpResponse, ClientError> {
+        self.request_raw_with_timeout(method, path, body, None)
+    }
+
+    fn request_raw_with_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse, ClientError> {
         let mut stream = self.connect()?;
         if path == "/v1/capture/sources" || path == "/v1/capture/frame" {
             stream
@@ -962,6 +972,11 @@ impl Client {
         if path.ends_with("/file") || path.ends_with("/files") {
             stream
                 .set_read_timeout(Some(Duration::from_secs(150)))
+                .map_err(|error| ClientError(error.to_string()))?;
+        }
+        if let Some(timeout) = timeout {
+            stream
+                .set_read_timeout(Some(timeout.max(Duration::from_millis(1))))
                 .map_err(|error| ClientError(error.to_string()))?;
         }
         let body = body.unwrap_or("");

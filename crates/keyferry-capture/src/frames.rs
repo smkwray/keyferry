@@ -100,6 +100,67 @@ pub fn difference(a: &Frame, b: &Frame, region: Option<Region>) -> Result<f64, &
     Ok(total as f64 / (f64::from(r.width) * f64::from(r.height) * 3.0 * 255.0))
 }
 
+/// Transient animation mask learned only while input is stationary. Whole 16-pixel tiles
+/// cover changing clock glyphs/carets and their compression edges, not just lit pixels.
+pub struct MotionMask {
+    geometry: (u32, u32, (u32, u32), u64),
+    tiles: Vec<bool>,
+}
+
+impl MotionMask {
+    pub fn new(frame: &Frame) -> Self {
+        Self {
+            geometry: (frame.width, frame.height, frame.native, frame.generation),
+            tiles: vec![false; (frame.width.div_ceil(16) * frame.height.div_ceil(16)) as usize],
+        }
+    }
+
+    fn check(&self, frame: &Frame) -> Result<(), &'static str> {
+        if self.geometry != (frame.width, frame.height, frame.native, frame.generation) {
+            return Err("capture.geometry_changed");
+        }
+        Ok(())
+    }
+
+    pub fn ignored(&self, pixel: usize) -> bool {
+        let width = self.geometry.0 as usize;
+        self.tiles[(pixel / width / 16) * width.div_ceil(16) + pixel % width / 16]
+    }
+
+    pub fn small(&self) -> bool {
+        self.tiles.iter().filter(|tile| **tile).count() * 20 <= self.tiles.len()
+    }
+
+    pub fn learn(&mut self, a: &Frame, b: &Frame) -> Result<(), &'static str> {
+        self.check(a)?;
+        self.check(b)?;
+        let columns = a.width.div_ceil(16) as usize;
+        for (pixel, (a, b)) in a.rgb.chunks_exact(3).zip(b.rgb.chunks_exact(3)).enumerate() {
+            if pixel_changed(a, b) {
+                let width = self.geometry.0 as usize;
+                self.tiles[(pixel / width / 16) * columns + pixel % width / 16] = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Count significant changed pixels, so a small cursor on a large frame is visible.
+    pub fn changed(&self, a: &Frame, b: &Frame) -> Result<usize, &'static str> {
+        self.check(a)?;
+        self.check(b)?;
+        Ok(a.rgb
+            .chunks_exact(3)
+            .zip(b.rgb.chunks_exact(3))
+            .enumerate()
+            .filter(|(pixel, (a, b))| !self.ignored(*pixel) && pixel_changed(a, b))
+            .count())
+    }
+}
+
+pub fn pixel_changed(a: &[u8], b: &[u8]) -> bool {
+    a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) >= 35)
+}
+
 pub trait FrameSource {
     fn device(&mut self, _: &str) {}
     fn sources(&mut self) -> Result<serde_json::Value, &'static str> {

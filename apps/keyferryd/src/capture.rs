@@ -27,6 +27,7 @@ pub(crate) struct FrameRequest {
     pub device: String,
     pub source: String,
     pub after: Option<u64>,
+    pub timeout_ms: Option<u64>,
     pub epoch: Option<String>,
     pub region: Option<Region>,
     pub max_width: Option<u32>,
@@ -75,6 +76,7 @@ impl Service {
     }
 
     fn frame(&mut self, request: &FrameRequest) -> Result<serde_json::Value, &'static str> {
+        request.timeout()?;
         if self
             .last_request
             .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
@@ -104,6 +106,10 @@ impl Service {
         }
         let mut retry = std::mem::take(&mut self.source_retry);
         let result = retry.attempt(Instant::now(), || self.frame_inner(request));
+        // A short caller observation deadline is not a failed source or permission to reopen it.
+        if result == Err("capture.frame_timeout") {
+            retry = Retry::default();
+        }
         self.source_retry = retry;
         result
     }
@@ -123,8 +129,20 @@ impl Service {
                 .insert(id.to_owned(), Capture::start(Some(id.to_owned())));
         }
         let capture = self.streams.get_mut(id).expect("stream");
-        let frame = capture.latest(request.after, FRAME_WAIT, &AtomicBool::new(false))?;
+        let frame = capture.latest(request.after, request.timeout()?, &AtomicBool::new(false))?;
         encode(&frame, request, capture.status())
+    }
+}
+
+impl FrameRequest {
+    fn timeout(&self) -> Result<Duration, &'static str> {
+        match self.timeout_ms {
+            Some(ms) if (1..=FRAME_WAIT.as_millis() as u64).contains(&ms) => {
+                Ok(Duration::from_millis(ms))
+            }
+            Some(_) => Err("capture.timeout"),
+            None => Ok(FRAME_WAIT),
+        }
     }
 }
 
@@ -272,6 +290,7 @@ async fn local_frame(
 ) -> Result<Response, ApiError> {
     authorize(&headers, &daemon)?;
     let permit = admit(&daemon)?;
+    let timeout = request.timeout().map_err(ApiError::bad_request)?;
     // Only loopback exposes this route; a source never contains an address supplied by a client.
     if request.source.starts_with("local:") {
         return serve_frame(daemon, request, permit).await;
@@ -280,7 +299,9 @@ async fn local_frame(
         .forwarder()
         .ok_or_else(|| ApiError::unavailable("capture.peer_offline"))?;
     let _permit = permit;
-    Ok(forwarder.capture_frame(&daemon, request).await)
+    tokio::time::timeout(timeout, forwarder.capture_frame(&daemon, request))
+        .await
+        .map_err(|_| ApiError::unavailable("capture.frame_timeout"))
 }
 
 async fn peer_frame(
@@ -354,6 +375,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frame_deadline_is_optional_bounded_and_validated_before_capture() {
+        let value = serde_json::json!({"device":"test","source":"local:fake"});
+        let mut request: FrameRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.timeout().unwrap(), FRAME_WAIT);
+        request.timeout_ms = Some(3000);
+        assert_eq!(request.timeout().unwrap(), Duration::from_secs(3));
+        for ms in [0, FRAME_WAIT.as_millis() as u64 + 1, u64::MAX] {
+            request.timeout_ms = Some(ms);
+            let mut service = Service::default();
+            assert_eq!(service.frame(&request).unwrap_err(), "capture.timeout");
+            assert!(service.streams.is_empty() && service.last_request.is_none());
+        }
+    }
+
+    #[test]
     fn absent_inventory_is_inert_without_clients_and_backoff_is_on_demand() {
         let mut service = Service::default();
         let mut discoveries = Vec::new();
@@ -386,6 +422,7 @@ mod tests {
             device: String::new(),
             source: "local:fake".into(),
             after: None,
+            timeout_ms: None,
             epoch: None,
             region: Some(Region {
                 x: 2,
