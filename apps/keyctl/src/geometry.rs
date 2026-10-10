@@ -142,9 +142,10 @@ pub(super) fn cursor_near(
             x1 = x1.max(x);
             y1 = y1.max(y);
             area += 1;
-            // Eight-connected cursor outlines remain one component after downscaling.
-            for dy in -1_i64..=1 {
-                for dx in -1_i64..=1 {
+            // Nearest-neighbour downscaling drops whole rows/columns of a one-pixel arrow
+            // outline; bridging gaps up to two pixels keeps the cursor one component.
+            for dy in -2_i64..=2 {
+                for dx in -2_i64..=2 {
                     let (xx, yy) = (i64::from(x) + dx, i64::from(y) + dy);
                     if xx >= 0 && yy >= 0 && xx < i64::from(b.width) && yy < i64::from(b.height) {
                         let n = yy as usize * b.width as usize + xx as usize;
@@ -175,6 +176,69 @@ pub(super) fn cursor_near(
         [] => Err("calibration.cursor_not_seen"),
         _ => Err("calibration.animated_or_ambiguous"),
     }
+}
+
+/// Frame rectangle `[x, y, width, height]` inside uniform black pillar/letterbox bars.
+/// Bars are bounded to a quarter of each side so a dark desktop cannot collapse it.
+pub(super) fn active_video(f: &Frame) -> [f64; 4] {
+    let dark = |x: u32, y: u32| {
+        let i = (y * f.width + x) as usize * 3;
+        f.rgb[i..i + 3].iter().all(|v| *v <= 24)
+    };
+    let column = |x: u32| (0..f.height).all(|y| dark(x, y));
+    let row = |y: u32| (0..f.width).all(|x| dark(x, y));
+    let (mut left, mut right, mut top, mut bottom) = (0, f.width, 0, f.height);
+    while left < f.width / 4 && column(left) {
+        left += 1;
+    }
+    while right > f.width - f.width / 4 && column(right - 1) {
+        right -= 1;
+    }
+    while top < f.height / 4 && row(top) {
+        top += 1;
+    }
+    while bottom > f.height - f.height / 4 && row(bottom - 1) {
+        bottom -= 1;
+    }
+    [left, top, right - left, bottom - top].map(f64::from)
+}
+
+/// Expected cursor pixel for normalized probe `p` before a geometry exists: a provisional
+/// fit once at least three probes agree within the fit tolerance, otherwise the active
+/// video rectangle (bars excluded), never the whole frame.
+pub(super) fn expected(f: &Frame, samples: &[([f64; 2], [f64; 2])], p: [f64; 2]) -> [f64; 2] {
+    let [x, y, width, height] = active_video(f);
+    let bars = [x + p[0] * (width - 1.0), y + p[1] * (height - 1.0)];
+    if samples.len() < 3 {
+        return bars;
+    }
+    let lines = [line(samples, 0), line(samples, 1)];
+    let agree = lines.iter().enumerate().all(|(axis, l)| {
+        l.is_some_and(|(origin, extent)| {
+            samples
+                .iter()
+                .all(|(p, q)| (q[axis] - origin - extent * p[axis]).abs() <= 5.0)
+        })
+    });
+    match lines {
+        [Some(a), Some(b)] if agree => [a.0 + a.1 * p[0], b.0 + b.1 * p[1]],
+        _ => bars,
+    }
+}
+
+/// Least-squares `(origin, extent)` for one axis; `None` when the probes do not span it.
+fn line(samples: &[([f64; 2], [f64; 2])], axis: usize) -> Option<(f64, f64)> {
+    let n = samples.len() as f64;
+    let sx: f64 = samples.iter().map(|(p, _)| p[axis]).sum();
+    let sy: f64 = samples.iter().map(|(_, q)| q[axis]).sum();
+    let sxx: f64 = samples.iter().map(|(p, _)| p[axis] * p[axis]).sum();
+    let sxy: f64 = samples.iter().map(|(p, q)| p[axis] * q[axis]).sum();
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 0.01 {
+        return None;
+    }
+    let extent = (n * sxy - sx * sy) / denom;
+    Some(((sy - extent * sx) / n, extent))
 }
 
 pub(super) fn residual(g: &Geometry, samples: &[([f64; 2], [f64; 2])]) -> f64 {
@@ -251,17 +315,7 @@ pub(super) fn fit(
     let mut origin = [0.0; 2];
     let mut extent = [0.0; 2];
     for axis in 0..2 {
-        let n = samples.len() as f64;
-        let sx: f64 = samples.iter().map(|(p, _)| p[axis]).sum();
-        let sy: f64 = samples.iter().map(|(_, p)| p[axis]).sum();
-        let sxx: f64 = samples.iter().map(|(p, _)| p[axis] * p[axis]).sum();
-        let sxy: f64 = samples.iter().map(|(p, q)| p[axis] * q[axis]).sum();
-        let denom = n * sxx - sx * sx;
-        if denom.abs() < 0.01 {
-            return Err("calibration.degenerate");
-        }
-        extent[axis] = (n * sxy - sx * sy) / denom;
-        origin[axis] = (sy - extent[axis] * sx) / n;
+        (origin[axis], extent[axis]) = line(samples, axis).ok_or("calibration.degenerate")?;
     }
     let g = Geometry {
         schema: "keyferry.capture-geometry.v1".into(),

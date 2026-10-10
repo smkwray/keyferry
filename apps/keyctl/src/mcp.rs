@@ -1806,10 +1806,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             captured.push(f);
             if captured.len() == 3 {
                 let middle = &captured[1];
-                let approximate = [
-                    positions[i - 1][0] * f64::from(middle.width - 1),
-                    positions[i - 1][1] * f64::from(middle.height - 1),
-                ];
+                let approximate = geometry::expected(middle, &samples, positions[i - 1]);
                 let point =
                     geometry::cursor(&captured[0], middle, &captured[2], &mask).or_else(|_| {
                         geometry::cursor_near(
