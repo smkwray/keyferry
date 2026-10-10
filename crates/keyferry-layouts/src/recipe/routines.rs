@@ -348,7 +348,7 @@ pub fn validate_definition(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
         }) if *success_count == 0
             || os_version.is_empty()
             || os_version.chars().count() > 200
-            || !regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")
+            || !regex::Regex::new("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
                 .expect("static pattern")
                 .is_match(date) =>
         {
@@ -701,6 +701,20 @@ mod tests {
     }
     fn params(value: Value) -> Params {
         parse_params(value.to_string().as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn verification_records_validate_without_unicode_regex_classes() {
+        let record = |date: &str| {
+            let mut value = definition(json!([{"type":"key","keys":["ESCAPE"]}]));
+            value["verified"] = json!({"date":date,"os_version":"macOS 26.3","success_count":1});
+            parsed(&value)
+        };
+        assert!(record("2026-10-10").is_ok());
+        assert_eq!(record("2026-1-10").unwrap_err().code(), "recipe.verification");
+        let mut flag = definition(json!([{"type":"key","keys":["ESCAPE"]}]));
+        flag["verified"] = json!(true);
+        assert_eq!(parsed(&flag).unwrap_err().code(), "recipe.verification");
     }
 
     #[test]
