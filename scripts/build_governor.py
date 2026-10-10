@@ -173,10 +173,11 @@ def run(command: list[str], receipt: Path | None = None) -> int:
                                                 jobs, C.sizeof(jobs), None, None))
             environment = C.create_unicode_buffer("\0".join(f"{k}={v}" for k, v in sorted(env.items())) + "\0\0")
             result = ProcessInfo()
+            # BELOW_NORMAL priority keeps interactive KVM/capture work responsive.
             # BREAKAWAY avoids nesting the shared host job under a caller's
             # temporary job (e.g. an agent tool). Denial fails closed.
             checked(K.CreateProcessW(executable, C.create_unicode_buffer(subprocess.list2cmdline(command)),
-                                     None, None, True, 0x09080400, environment, None,
+                                     None, None, True, 0x09084400, environment, None,
                                      C.byref(info), C.byref(result)))
             process, thread_handle = result.process, result.thread
         finally:
