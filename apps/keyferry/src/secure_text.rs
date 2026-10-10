@@ -40,6 +40,9 @@ fn sequence(text: &str, enter: bool) -> Result<KeyboardSequenceV1, &'static str>
         }],
     };
     if enter {
+        // macOS password fields (e.g. the lock screen) drop an Enter that arrives immediately
+        // after the last character; give the target a moment to accept the text first.
+        request.actions.push(SequenceAction::Wait { ms: 400 });
         request.actions.push(SequenceAction::Tap {
             key: "ENTER".into(),
             timing: None,
@@ -423,7 +426,8 @@ mod tests {
             matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
         );
         let request = sequence("Test password!", true).unwrap();
-        assert!(matches!(&request.actions[1], SequenceAction::Tap { key, .. } if key == "ENTER"));
+        assert!(matches!(&request.actions[1], SequenceAction::Wait { ms: 400 }));
+        assert!(matches!(&request.actions[2], SequenceAction::Tap { key, .. } if key == "ENTER"));
     }
 
     #[test]
