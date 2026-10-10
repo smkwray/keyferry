@@ -39,6 +39,25 @@ struct FakeFrames {
     started: Instant,
     ocr: bool,
     ocr_polls: u32,
+    native: bool,
+    native_polls: u32,
+}
+/// Like the controller, native requests serve the frame's native pixels (here 2x).
+fn native_view(f: Frame) -> Frame {
+    let (w, h) = f.native;
+    let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * f.height / h) * f.width + x * f.width / w) as usize * 3;
+            rgb.extend_from_slice(&f.rgb[i..i + 3]);
+        }
+    }
+    Frame {
+        width: w,
+        height: h,
+        rgb,
+        ..f
+    }
 }
 #[derive(Clone)]
 struct Visual {
@@ -65,6 +84,8 @@ impl FakeFrames {
             started: Instant::now(),
             ocr: false,
             ocr_polls: 0,
+            native: false,
+            native_polls: 0,
         }
     }
 }
@@ -72,7 +93,28 @@ impl FrameSource for FakeFrames {
     fn request_ocr(&mut self, ocr: bool) {
         self.ocr = ocr;
     }
+    fn request_native(&mut self, native: bool) {
+        self.native = native;
+    }
     fn latest(
+        &mut self,
+        after: Option<u64>,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<Arc<Frame>, &'static str> {
+        let frame = self.agent_view(after, timeout, cancelled)?;
+        if !self.native {
+            return Ok(frame);
+        }
+        self.native_polls += 1;
+        Ok(Arc::new(native_view(Arc::unwrap_or_clone(frame))))
+    }
+    fn status(&self) -> Value {
+        json!({"source":"fake-hdmi","generation":1,"restarts":0})
+    }
+}
+impl FakeFrames {
+    fn agent_view(
         &mut self,
         after: Option<u64>,
         timeout: Duration,
@@ -163,9 +205,6 @@ impl FrameSource for FakeFrames {
             f.rgb.fill(255);
         }
         Ok(Arc::new(f))
-    }
-    fn status(&self) -> Value {
-        json!({"source":"fake-hdmi","generation":1,"restarts":0})
     }
 }
 struct FakeOcr;

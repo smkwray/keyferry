@@ -1057,11 +1057,13 @@ struct HttpResponse {
 fn read_response(stream: &mut TcpStream) -> Result<HttpResponse, ClientError> {
     let headers = read_headers(stream)?;
     let mut body = Vec::new();
+    // The largest daemon response is a capture frame; allow chunk framing around it.
+    let limit = keyferry_capture::frames::MAX_WIRE + 64 * 1024;
     Read::by_ref(stream)
-        .take(8 * 1024 * 1024 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|error| ClientError(format!("cannot read response: {error}")))?;
-    if body.len() > 8 * 1024 * 1024 {
+    if body.len() > limit {
         return Err(ClientError("daemon response exceeds size limit".into()));
     }
     let body = if headers.chunked {

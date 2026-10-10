@@ -1,14 +1,20 @@
 //! Latest-frame capture only. No disk, frame queue, FFmpeg report, or frame logging.
 use serde::{Deserialize, Serialize};
-pub const MAX_SIDE: u32 = 1280;
+/// Retained capture frame bound: native 1080p for OCR and direct API reads.
+pub const MAX_SIDE: u32 = 1920;
+/// Lossless frame bound: an incompressible MAX_SIDE x 1080 frame plus encoder overhead.
+pub const MAX_PNG: usize = 8 * 1024 * 1024;
+/// Capture JSON bound: base64 PNG plus geometry, status and OCR boxes.
+pub const MAX_WIRE: usize = MAX_PNG.div_ceil(3) * 4 + 1024 * 1024;
 
-pub fn scaled_size(native: (u32, u32)) -> (u32, u32) {
-    let ratio = (f64::from(MAX_SIDE) / f64::from(native.0))
-        .min(f64::from(MAX_SIDE) / f64::from(native.1))
+/// Proportional size whose sides are at most `bound`; never upscales.
+pub fn fit(size: (u32, u32), bound: u32) -> (u32, u32) {
+    let ratio = (f64::from(bound) / f64::from(size.0))
+        .min(f64::from(bound) / f64::from(size.1))
         .min(1.0);
     (
-        (f64::from(native.0) * ratio).round().max(2.0) as u32,
-        (f64::from(native.1) * ratio).round().max(2.0) as u32,
+        (f64::from(size.0) * ratio).round().max(1.0) as u32,
+        (f64::from(size.1) * ratio).round().max(1.0) as u32,
     )
 }
 
@@ -41,7 +47,8 @@ impl Frame {
             let mut encoder = png::Encoder::new(&mut bytes, self.width, self.height);
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Eight);
-            encoder.set_compression(png::Compression::Fast);
+            // Lossless loopback/remote frames are re-decoded at once; favour encode speed.
+            encoder.set_compression(png::Compression::Fastest);
             let mut writer = encoder.write_header().map_err(|_| "capture.encode")?;
             writer
                 .write_image_data(&self.rgb)
@@ -74,6 +81,47 @@ impl Frame {
                 Ok((bytes, "image/jpeg"))
             }
             _ => Err("capture.format"),
+        }
+    }
+
+    /// Native pixels of a valid region; borrowed when it is the whole frame.
+    pub fn crop(&self, r: Region) -> std::borrow::Cow<'_, Frame> {
+        if (r.x, r.y, r.width, r.height) == (0, 0, self.width, self.height) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut rgb = Vec::with_capacity((r.width * r.height * 3) as usize);
+        for y in r.y..r.y + r.height {
+            let row = ((y * self.width + r.x) * 3) as usize;
+            rgb.extend_from_slice(&self.rgb[row..row + (r.width * 3) as usize]);
+        }
+        std::borrow::Cow::Owned(Frame {
+            width: r.width,
+            height: r.height,
+            rgb,
+            ..*self
+        })
+    }
+
+    /// Filtered downscale: thin text strokes and cursor outlines blend at their true weight
+    /// rather than vanishing (nearest) or alternating with sampling phase (box thumbnail).
+    pub fn resized(&self, width: u32, height: u32) -> Frame {
+        let source = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+            self.width,
+            self.height,
+            &self.rgb,
+        )
+        .expect("frame buffer matches its geometry");
+        let rgb = image::imageops::resize(
+            &source,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        );
+        Frame {
+            width,
+            height,
+            rgb: rgb.into_raw(),
+            ..*self
         }
     }
 }
@@ -151,6 +199,32 @@ impl MotionMask {
         Ok(())
     }
 
+    /// The same ignored areas on a proportionally scaled view of the masked frame: a view
+    /// tile is ignored when any masked tile covers part of it.
+    pub fn scaled(&self, view: &Frame) -> Result<Self, &'static str> {
+        let (width, height, native, generation) = self.geometry;
+        if (view.native, view.generation) != (native, generation) {
+            return Err("capture.geometry_changed");
+        }
+        let mut mask = Self::new(view);
+        let columns = view.width.div_ceil(16);
+        let source_columns = width.div_ceil(16);
+        for (i, tile) in mask.tiles.iter_mut().enumerate() {
+            let (x, y) = (i as u32 % columns * 16, i as u32 / columns * 16);
+            let x0 = x * width / view.width / 16;
+            let x1 = ((x + 16).min(view.width) * width)
+                .div_ceil(view.width)
+                .div_ceil(16);
+            let y0 = y * height / view.height / 16;
+            let y1 = ((y + 16).min(view.height) * height)
+                .div_ceil(view.height)
+                .div_ceil(16);
+            *tile = (y0..y1)
+                .any(|sy| (x0..x1).any(|sx| self.tiles[(sy * source_columns + sx) as usize]));
+        }
+        Ok(mask)
+    }
+
     pub fn ignored(&self, pixel: usize) -> bool {
         let width = self.geometry.0 as usize;
         self.tiles[(pixel / width / 16) * width.div_ceil(16) + pixel % width / 16]
@@ -225,6 +299,8 @@ pub trait FrameSource {
         Ok(())
     }
     fn request_ocr(&mut self, _: bool) {}
+    /// Until cleared, serve native pixels instead of the bounded agent view.
+    fn request_native(&mut self, _: bool) {}
     fn ocr_result(&mut self) -> Option<Vec<super::ocr::TextBox>> {
         None
     }
@@ -540,28 +616,18 @@ fn publish(
     bounded: bool,
 ) -> Result<(), &'static str> {
     let valid = super::capture::signal(&frame.rgb).0 == "present";
+    if bounded {
+        let (width, height) = fit(frame.native, MAX_SIDE);
+        if (width, height) != frame.native {
+            frame = frame.resized(width, height);
+        }
+    }
     let mut s = state.lock().expect("capture state");
     if s.latest.as_ref().is_some_and(|f| f.native != frame.native) {
         return Err("capture.resolution_changed");
     }
     s.last_frame_at = Some(frame.at);
     s.ready |= valid || frame.at.saturating_duration_since(opened) >= WARMUP;
-    if bounded {
-        let (width, height) = scaled_size(frame.native);
-        if (width, height) != frame.native {
-            let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-            for y in 0..height {
-                for x in 0..width {
-                    let i = (((y * frame.height / height) * frame.width + x * frame.width / width)
-                        * 3) as usize;
-                    rgb.extend_from_slice(&frame.rgb[i..i + 3]);
-                }
-            }
-            frame.rgb = rgb;
-            frame.width = width;
-            frame.height = height;
-        }
-    }
     s.serial += 1;
     frame.serial = s.serial;
     s.latest = Some(Arc::new(frame));
@@ -680,7 +746,7 @@ mod tests {
         for (format, mime) in [("png", "image/png"), ("jpeg", "image/jpeg")] {
             let (bytes, actual) = frame.image(format).unwrap();
             assert_eq!(actual, mime);
-            assert!(bytes.len() < 5 * 1024 * 1024);
+            assert!(bytes.len() < MAX_PNG);
             if format == "png" {
                 let (width, height, rgb) = super::super::capture::decode(&bytes).unwrap();
                 assert_eq!((width, height), (32, 24));
@@ -702,6 +768,119 @@ mod tests {
             ..frame
         };
         assert_eq!(invalid.image("jpeg").unwrap_err(), "capture.size_limit");
+    }
+
+    #[test]
+    fn native_1080p_noise_fits_the_png_and_wire_bounds() {
+        // Incompressible worst case for the native MS2130 mode; never a size_limit error.
+        let mut state = 0x9e37_79b9_u32;
+        let rgb = (0..MAX_SIDE as usize * 1080 * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        let frame = Frame {
+            width: MAX_SIDE,
+            height: 1080,
+            native: (MAX_SIDE, 1080),
+            rgb,
+            serial: 1,
+            generation: 1,
+            at: Instant::now(),
+        };
+        assert_eq!(fit(frame.native, MAX_SIDE), frame.native);
+        let png = frame.png().unwrap();
+        assert!(png.len() <= MAX_PNG, "{}", png.len());
+        assert!(png.len().div_ceil(3) * 4 < MAX_WIRE);
+        assert_eq!(super::super::capture::decode(&png).unwrap().2, frame.rgb);
+        assert!(frame.image("jpeg").is_ok());
+        assert_eq!(fit((3840, 2160), MAX_SIDE), (MAX_SIDE, 1080));
+        assert_eq!(fit((1080, 1920), 1280), (720, 1280));
+    }
+
+    #[test]
+    fn crop_is_exact_and_agent_view_downscale_keeps_thin_strokes() {
+        // 1-px strokes at x = 2 mod 3: nearest sampling at 1.5x reads only 0/1 mod 3.
+        let frame = Frame {
+            width: 1920,
+            height: 1080,
+            native: (1920, 1080),
+            rgb: (0..1920 * 1080)
+                .flat_map(|i| [if i % 1920 % 3 == 2 { 255 } else { 0 }; 3])
+                .collect(),
+            serial: 4,
+            generation: 2,
+            at: Instant::now(),
+        };
+        let view = frame.resized(1280, 720);
+        assert_eq!(
+            (view.width, view.height, view.native, view.serial),
+            (1280, 720, (1920, 1080), 4)
+        );
+        assert_eq!(view.rgb.len(), 1280 * 720 * 3);
+        let lit = (0..1280).filter(|x| view.rgb[x * 3] > 0).count();
+        assert!(lit >= 600, "{lit} of 640 strokes visible");
+        let mean = view.rgb.iter().map(|v| f64::from(*v)).sum::<f64>() / view.rgb.len() as f64;
+        assert!(
+            (mean - 85.0).abs() < 3.0,
+            "filtered average preserves brightness: {mean}"
+        );
+        let region = Region {
+            x: 5,
+            y: 7,
+            width: 4,
+            height: 2,
+        };
+        let crop = frame.crop(region);
+        assert_eq!((crop.width, crop.height, crop.native), (4, 2, (1920, 1080)));
+        // Columns 5..9: strokes at 5 and 8.
+        assert_eq!(
+            &crop.rgb[..12],
+            &[255, 255, 255, 0, 0, 0, 0, 0, 0, 255, 255, 255]
+        );
+        let whole = Region {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert!(matches!(frame.crop(whole), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn motion_mask_carries_to_a_scaled_view_conservatively() {
+        let blank = |width: u32, height: u32| Frame {
+            width,
+            height,
+            native: (96, 48),
+            rgb: vec![0; (width * height * 3) as usize],
+            serial: 1,
+            generation: 3,
+            at: Instant::now(),
+        };
+        let (a, mut b) = (blank(96, 48), blank(96, 48));
+        // One changed pixel in native tile (2, 1).
+        let i = (20 * 96 + 40) * 3;
+        b.rgb[i..i + 3].fill(255);
+        let mut mask = MotionMask::new(&a);
+        mask.learn(&a, &b).unwrap();
+        let view = blank(64, 32);
+        let scaled = mask.scaled(&view).unwrap();
+        // Native x 32..48, y 16..32 lies in view x 21..32, y 10..22: view tiles (1, 0), (1, 1).
+        let expected = [false, true, false, false, false, true, false, false];
+        assert_eq!(scaled.tiles, expected);
+        assert!(scaled.changed(&view, &view).is_ok());
+        let other = Frame {
+            generation: 4,
+            ..blank(64, 32)
+        };
+        assert!(matches!(
+            mask.scaled(&other),
+            Err("capture.geometry_changed")
+        ));
     }
 
     fn fake_frame(value: u8, at: Instant) -> Frame {
@@ -885,5 +1064,76 @@ mod tests {
         assert!(worker.join().unwrap().is_ok());
         assert_eq!(observed, Some((320, 240, 320 * 240 * 3)));
         assert!(start.elapsed() < Duration::from_secs(6));
+    }
+
+    /// Live before/after capture metrics. Frames stay in memory; only counts and timings are
+    /// printed. `before` replays the previously installed 720p, paeth-filtered pipeline.
+    #[test]
+    #[ignore = "requires the capture card: KEYFERRY_LIVE_SOURCE=ID [KEYFERRY_LIVE_MODE=before], --ignored --nocapture"]
+    fn live_capture_metrics_without_content() {
+        use super::super::ocr::{NativeOcr, Ocr};
+        let source = std::env::var("KEYFERRY_LIVE_SOURCE").expect("KEYFERRY_LIVE_SOURCE");
+        let (_, mut args) = super::super::capture::stream_setup(Some(&source)).unwrap();
+        let before = std::env::var("KEYFERRY_LIVE_MODE").as_deref() == Ok("before");
+        if before {
+            let at = args.iter().position(|a| a == "-video_size").unwrap();
+            args.splice(
+                at..at + 6,
+                ["-video_size".to_owned(), "1280x720".to_owned()],
+            );
+            let at = args.iter().position(|a| a == "-pred").unwrap();
+            args.drain(at..at + 2);
+        }
+        let state = Arc::new(Mutex::new(State {
+            requested_at: Some(Instant::now()),
+            ..State::default()
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reader_state, stopping) = (state.clone(), stop.clone());
+        let opened = Instant::now();
+        let worker = thread::spawn(move || {
+            let mut command = keyferry_core::process::command("ffmpeg");
+            command.args(args);
+            stream(command, 1, &reader_state, &stopping, true)
+        });
+        let never = AtomicBool::new(false);
+        let first = wait_latest(&state, None, FRAME_WAIT, &never).unwrap();
+        let first_frame_ms = opened.elapsed().as_millis();
+        let mut last = first.clone();
+        let mut gaps = Vec::new();
+        while first.at.elapsed() < Duration::from_secs(8) {
+            let next = wait_latest(&state, Some(last.serial), FRAME_WAIT, &never).unwrap();
+            gaps.push(next.at.duration_since(last.at).as_secs_f64() * 1e3);
+            last = next;
+        }
+        let fps =
+            (last.serial - first.serial) as f64 / last.at.duration_since(first.at).as_secs_f64();
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap().unwrap();
+        // The harness samples stream-only CPU when the ffmpeg child exits.
+        println!("STREAM_DONE");
+        thread::sleep(Duration::from_secs(1));
+        gaps.sort_by(f64::total_cmp);
+        let (width, height) = fit(last.native, 1280);
+        let view = last.resized(width, height);
+        let mut metrics = serde_json::json!({"mode":if before {"before-720p"} else {"after-native"},
+            "native":last.native,"first_frame_ms":first_frame_ms,"fps":fps,
+            "frame_gap_ms_p50":gaps[gaps.len() / 2],"frame_gap_ms_max":gaps[gaps.len() - 1]});
+        for (name, frame) in [("served", &*last), ("agent_view", &view)] {
+            let started = Instant::now();
+            let png = frame.png().unwrap();
+            let encode_ms = started.elapsed().as_secs_f64() * 1e3;
+            let started = Instant::now();
+            super::super::capture::decode(&png).unwrap();
+            let decode_ms = started.elapsed().as_secs_f64() * 1e3;
+            let jpeg = frame.image("jpeg").unwrap().0.len();
+            let started = Instant::now();
+            let boxes = NativeOcr.recognize(frame).map(|b| b.len());
+            let ocr_ms = started.elapsed().as_secs_f64() * 1e3;
+            metrics[name] = serde_json::json!({"size":[frame.width,frame.height],"png_bytes":png.len(),
+                "png_encode_ms":encode_ms,"png_decode_ms":decode_ms,"jpeg_bytes":jpeg,
+                "ocr_lines":boxes.ok(),"ocr_ms":ocr_ms});
+        }
+        println!("{metrics}");
     }
 }

@@ -306,12 +306,14 @@ The read-only HTTP capture API is:
 | `POST /v1/devices/{id}/capture/frame` | existing owner-mTLS + fresh device proof | that controller's latest frame and optional native OCR |
 
 Frame JSON requests require `device` and `source`; optional `after`/`epoch` wait for a fresh serial
-within the same daemon epoch, `region` crops screenshot pixels, `max_width` scales to 2..1280 pixels,
-and `ocr:true` returns OCR boxes from that exact frame. Responses include base64 PNG, dimensions,
+within the same daemon epoch, `region` crops native frame pixels, and `ocr:true` returns OCR boxes
+from that exact frame. Without `max_width` the image fits 1280x1280 (the agent view); `max_width`
+2..1920 bounds only the width, so 1920 returns native 1080p. OCR always reads native pixels and
+reports boxes in returned-image pixels. Responses include base64 PNG, dimensions,
 native dimensions, region, serial, daemon epoch, generation, frame age and capture status. Frames
-are memory-only, PNG is bounded to 5 MiB and response JSON to 7 MiB. A service admits one read at a
-time, at most ten frame requests/second and four capture streams. MCP uses full-frame geometry;
-direct API callers must account for region/scale before driving a pointer.
+are memory-only, PNG is bounded to 8 MiB and response JSON to about 11.7 MiB. A service admits one
+read at a time, at most ten frame requests/second and four capture streams. MCP uses full-frame
+geometry; direct API callers must account for region/scale before driving a pointer.
 
 First call `status`, then `calibrate` on a static, harmless approved target, then take a fresh
 `screenshot` before pointer input. The target HDMI output must be its only display or mirror the main
@@ -363,11 +365,13 @@ exists. Failed/possible-start UNKNOWN results return `isError:true` with command
 Inspect/reconcile uncertain outcomes; never replay them. `EMITTED` proves emission, not visible target
 behavior. MCP cancellation reaches the existing daemon cancellation mechanism.
 
-One continuous ffmpeg rawvideo pipe retains the latest RGB frame, scaled proportionally to at most
-1280 pixels on each axis. Comparison frames are bounded and memory-only. Capture faults clear the
-latest frame, report an explicit error and restart after backoff; counters remain visible. A stalled
-stream is a capture error, not a stable screen. Capture children belong to the daemon and stop
-when its capture service is dropped.
+One continuous ffmpeg pipe of unfiltered PNG frames retains the latest RGB frame, scaled
+proportionally to at most 1920 pixels on each axis; recognized cards stream a pinned native mode
+from one table (the Hagibis MS2130: 1920x1080 YUYV at 30 fps). MCP screenshots, OCR boxes, pointer
+coordinates and routines use the 1280-pixel agent view; OCR and calibration read native pixels.
+Comparison frames are bounded and memory-only. Capture faults clear the latest frame, report an explicit error
+and restart after backoff; counters remain visible. A stalled stream is a capture error, not a
+stable screen. Capture children belong to the daemon and stop when its capture service is dropped.
 `keyctl capture frame --out PATH` retains its independent one-shot behavior.
 
 Screens and OCR may contain secrets. They are never logged or written except to an explicit

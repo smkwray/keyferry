@@ -3570,7 +3570,7 @@ mod tests {
         fake_capture(&good.holder);
         let source = capture_source(&good.forwarder).await;
         let mut request = frame_request(&source);
-        request["max_width"] = serde_json::json!(1281);
+        request["max_width"] = serde_json::json!(keyferry_capture::frames::MAX_SIDE + 1);
         let (status, error) =
             call(&good.forwarder, "POST", "/v1/capture/frame", Some(request)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

@@ -238,7 +238,11 @@ async fn calibrated_simulator_binding_and_all_actions() {
                 uuid::Uuid::parse_str(probe["command"]["command_id"].as_str().unwrap()).unwrap();
             assert_eq!(transport.execution_count(id), 1);
         }
+        // Cursor evidence is fitted on native 2x frames, then bound to the agent view.
+        assert_eq!(result["calibration_frame"], json!([640, 480]));
+        assert!(s.frames.native_polls >= 10 && !s.frames.native);
         let g = s.geometry.as_ref().unwrap();
+        assert_eq!((g.screenshot, g.native), ((320, 240), (640, 480)));
         assert!((g.origin[0] - 20.0).abs() < 1.0);
         assert!((g.extent[1] - 180.0).abs() < 1.0);
         assert!(geometry::load(&s.root, SIMULATOR_DEVICE_ID, "fake-hdmi")
