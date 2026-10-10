@@ -215,6 +215,7 @@ void TestHealthyHolderWithCompetingControllers(unsigned count) {
     }
     // Another controller restarts; its connection availability is irrelevant.
     idf_test::reachable[1] = idf_test::now % 1000 < 500;
+    if (runtime.executions == 1) assert(runtime.in_flight && runtime.armed);
     if (runtime.in_flight) {
       assert(runtime.faults == stable_faults && runtime.armed);
       assert(transport.session_.epoch() == epoch && transport.session_.authenticated());
