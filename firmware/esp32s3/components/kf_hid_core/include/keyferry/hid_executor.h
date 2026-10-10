@@ -119,6 +119,9 @@ class ExecutorState final {
     bool mouse_enabled_{false};
     bool extended_pointer_{false};
     bool release_absolute_pending_{false};
+    // Report 4 may carry a button the host has not yet seen released. Only then does a release
+    // barrier send report 4: its coordinates would otherwise reposition the cursor.
+    bool absolute_buttons_unreleased_{false};
     bool absolute_button_target_{false};
     std::uint16_t absolute_x_{};
     std::uint16_t absolute_y_{};
