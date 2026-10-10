@@ -353,9 +353,13 @@ fn secure_text_request(device: &str, url: &str, token_file: &Path) -> Result<Val
         return Err("input.url");
     }
     let token = load_token(token_file).map_err(|_| "daemon.unavailable")?;
-    (Client { endpoint, token })
-        .request("GET", &format!("/v1/devices/{device}"), None)
-        .map_err(|_| "daemon.unavailable")?;
+    let status = (Client { endpoint, token })
+        .request_raw("GET", &format!("/v1/devices/{device}"), None)
+        .map_err(|_| "daemon.unavailable")?
+        .status;
+    if status >= 400 {
+        return Err("device.unavailable");
+    }
     let program = env::current_exe()
         .ok()
         .and_then(|path| {
@@ -1566,12 +1570,7 @@ fn run_stream(client: &Client, device: &str, options: &StreamOptions) -> u8 {
     let response = match client.sequence_post(&path, &create_body) {
         Ok(response) if response.status < 400 => response,
         Ok(response) => {
-            emit_stream_error(
-                device,
-                Some(&job_id),
-                http_error_code(response.status),
-                None,
-            );
+            emit_stream_error(device, Some(&job_id), &http_error_code(&response), None);
             return http_exit_code(response.status);
         }
         Err(_) => {
@@ -1686,7 +1685,7 @@ fn run_stream(client: &Client, device: &str, options: &StreamOptions) -> u8 {
                     Ok(response) => emit_stream_failure(
                         device,
                         &job_id,
-                        http_error_code(response.status),
+                        &http_error_code(&response),
                         None,
                         Some(&receipt),
                         http_exit_code(response.status),
@@ -1767,7 +1766,7 @@ fn run_stream(client: &Client, device: &str, options: &StreamOptions) -> u8 {
                 return emit_stream_failure(
                     device,
                     &job_id,
-                    http_error_code(response.status),
+                    &http_error_code(&response),
                     None,
                     (index > 0).then_some(&receipt),
                     http_exit_code(response.status),
@@ -1800,7 +1799,7 @@ fn run_stream(client: &Client, device: &str, options: &StreamOptions) -> u8 {
         receipt = match result {
             Ok(receipt) => receipt,
             Err((code, exit)) => {
-                return emit_stream_failure(device, &job_id, code, None, Some(&receipt), exit);
+                return emit_stream_failure(device, &job_id, &code, None, Some(&receipt), exit);
             }
         };
         emit_stream_progress(device, &receipt);
@@ -1857,15 +1856,15 @@ fn stream_status(
     device: &str,
     job_id: &str,
     epoch: &str,
-) -> Result<StreamReceipt, &'static str> {
+) -> Result<StreamReceipt, (String, u8)> {
     let path = format!("/v1/devices/{device}/text-streams/{job_id}");
     let response = client
         .request_raw("GET", &path, None)
-        .map_err(|_| "daemon.unavailable")?;
+        .map_err(|_| ("daemon.unavailable".to_owned(), 23))?;
     if response.status >= 400 {
-        return Err(http_error_code(response.status));
+        return Err((http_error_code(&response), http_exit_code(response.status)));
     }
-    parse_stream_receipt(&response.body, epoch, job_id)
+    parse_stream_receipt(&response.body, epoch, job_id).map_err(|code| (code.to_owned(), 25))
 }
 
 fn renew_stream_best_effort(client: &Client, device: &str, job_id: &str, epoch: &str) {
@@ -1930,7 +1929,7 @@ fn await_stream_child(
     index: u64,
     mut receipt: StreamReceipt,
     interrupted: &AtomicBool,
-) -> Result<StreamReceipt, (&'static str, u8)> {
+) -> Result<StreamReceipt, (String, u8)> {
     let mut renewed_at = std::time::Instant::now();
     let mut cancelled = false;
     loop {
@@ -1939,7 +1938,7 @@ fn await_stream_child(
         }
         if let Some(child) = receipt.current_child.as_ref() {
             if child.command_id != command_id {
-                return Err(("protocol.child_identity", 25));
+                return Err(("protocol.child_identity".to_owned(), 25));
             }
         }
         if interrupted.load(Ordering::Acquire) && !cancelled {
@@ -1951,8 +1950,7 @@ fn await_stream_child(
             renewed_at = std::time::Instant::now();
         }
         std::thread::sleep(SEQUENCE_POLL_INTERVAL);
-        receipt = stream_status(client, device, job_id, epoch)
-            .map_err(|code| (code, if code == "daemon.unavailable" { 23 } else { 25 }))?;
+        receipt = stream_status(client, device, job_id, epoch)?;
     }
 }
 
@@ -2623,7 +2621,7 @@ fn submit_prepared_with_interrupt(
                 device,
                 Some(command_id),
                 http_outcome(response.status),
-                Some(http_error_code(response.status)),
+                Some(&http_error_code(&response)),
             ));
             return code;
         }
@@ -2871,15 +2869,29 @@ fn http_exit_code(status: u16) -> u8 {
     }
 }
 
-fn http_error_code(status: u16) -> &'static str {
-    match status {
+/// The code for a request the daemon answered with an error. A 404 or 503 reports the daemon's
+/// own code when its body names one (for example `tailnet_route.unavailable`);
+/// `daemon.unavailable` means only that the local daemon could not be reached.
+fn http_error_code(response: &HttpResponse) -> String {
+    if matches!(response.status, 404 | 503) {
+        if let Some(code) = serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|body| body.get("error")?.as_str().map(str::to_owned))
+            .filter(|code| keyferry_core::is_error_code(code))
+        {
+            return code;
+        }
+    }
+    match response.status {
         400 | 413 => "input.rejected",
         401 | 403 | 422 => "policy.rejected",
         409 => "command.busy_or_conflict",
-        404 | 503 => "daemon.unavailable",
+        404 => "request.not_found",
+        503 => "device.unavailable",
         HTTP_FORWARD_UNCERTAIN => "command.outcome_unknown",
         _ => "protocol.http_error",
     }
+    .to_owned()
 }
 
 fn http_outcome(status: u16) -> SequenceOutcome {
@@ -3341,9 +3353,38 @@ mod tests {
     fn forwarded_uncertainty_is_unknown_never_rejected() {
         assert_eq!(http_outcome(502), SequenceOutcome::Unknown);
         assert_eq!(http_exit_code(502), 12);
-        assert_eq!(http_error_code(502), "command.outcome_unknown");
+        let response = |status, body: &str| HttpResponse {
+            status,
+            body: body.to_owned(),
+        };
+        assert_eq!(
+            http_error_code(&response(502, "{}")),
+            "command.outcome_unknown"
+        );
         assert_eq!(http_outcome(503), SequenceOutcome::Rejected);
         assert_eq!(http_exit_code(503), 23);
+    }
+
+    #[test]
+    fn unavailable_responses_report_the_daemon_code_not_an_unreachable_daemon() {
+        let response = |status, body: &str| HttpResponse {
+            status,
+            body: body.to_owned(),
+        };
+        let route = r#"{"error":"tailnet_route.unavailable","outcome":"REJECTED"}"#;
+        assert_eq!(
+            http_error_code(&response(503, route)),
+            "tailnet_route.unavailable"
+        );
+        let prose = r#"{"error":"endpoint did not accept produce a route proof"}"#;
+        assert_eq!(http_error_code(&response(503, prose)), "device.unavailable");
+        assert_eq!(http_error_code(&response(404, "")), "request.not_found");
+        // Codes for other statuses stay the stable families callers match on.
+        assert_eq!(
+            http_error_code(&response(409, r#"{"error":"tailnet_route.busy"}"#)),
+            "command.busy_or_conflict"
+        );
+        assert_eq!(http_exit_code(404), 23);
     }
 
     fn minimal_sequence(extra_action: &str) -> String {

@@ -125,12 +125,16 @@ Never save secrets in literal text, descriptions, metadata or ordinary parameter
 | `wait` | `ms`: 1..10000, inside the input command. |
 | `move`, `click` | `x,y`: screenshot pixels 0..1279; click adds optional left/right/middle `button`, `double`. |
 | `scroll` | `x,y,dx,dy`: detents -127..127, not both zero. |
-| `drag` | `from_x,from_y,to_x,to_y`, optional `button`; balanced 40 ms hold. |
+| `drag` | `from_x,from_y,to_x,to_y`, optional `button`; glides to the start, presses, glides while held, balanced 40 ms hold. |
 | `repeat` | `count`: 1..1000; `delay_ms`: 0..10000 between iterations; `steps`: 1..32 input-only leaves. No nested repeat/checkpoints. |
 | `expect_text` | Non-empty `query`, `timeout_ms`: 1..30000, optional `region`, `on_fail:stop`. `optional:true` skips only an empty optional marker. |
 | `click_text` | As above plus `button`, `double`; requires exactly one OCR match, clicks its center using calibration. |
 | `wait_for_change`, `wait_for_stable` | `timeout_ms`, optional screenshot-pixel `region`, `on_fail:stop`. |
 | `secure_text` | Optional `param` naming a secure parameter; requests the owner-only dialog on this controller. No secret input or storage. |
+
+Every pointer step glides, never jumps: eased absolute reports from the presumed position to the
+target, 120-240 ms by distance, buttons and scrolls after arrival. A pointer stretch over the input
+limits splits at step boundaries into consecutive commands that stop at the first failure.
 
 Numeric fields may be an exact `{integer_parameter}` template; text/query fields substitute text
 parameters within literals. Keys and regions are fixed. All unknown fields, nulls, non-integers,

@@ -220,7 +220,12 @@ fn stability_change_region_ocr_and_no_persistence() {
         .decode(png["content"][0]["data"].as_str().unwrap())
         .unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
-    assert!(!s.root.exists());
+    // Only the stick lease exists; frames and OCR are never persisted.
+    let persisted = fs::read_dir(&s.root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(persisted, ["device-leases"]);
     let mut changed = frame(320, 240, 1);
     changed.generation = 2;
     assert!(frames::difference(&frame(320, 240, 1), &changed, None).is_err());
@@ -242,6 +247,47 @@ fn stability_change_region_ocr_and_no_persistence() {
     );
     c.store(true, Ordering::Release);
     assert_eq!(s.frame(&c).unwrap_err()["code"], "request.cancelled");
+    s.lease = None;
+    fs::remove_dir_all(&s.root).unwrap();
+}
+
+#[test]
+fn one_agent_per_stick_and_a_lost_automatic_choice_never_rearms() {
+    let mut a = server();
+    let mut b = server();
+    b.root = a.root.clone();
+    let c = AtomicBool::new(false);
+    // Any device-scoped call claims the stick; eyes alone stay available to the other agent.
+    a.call("screenshot", &json!({}), &c).unwrap();
+    assert!(a.lease.is_some());
+    b.call("screenshot", &json!({}), &c).unwrap();
+    for name in ["key", "status"] {
+        let result = b.call(name, &json!({"keys":["SHIFT"]}), &c);
+        let error = match name {
+            "status" => result.unwrap()["structuredContent"]["selection_error"].clone(),
+            _ => result.unwrap_err(),
+        };
+        assert_eq!(error["code"], "device.in_use_by_other_agent", "{name}");
+    }
+    // Releasing (exit or crash closes the handle) frees the stick for the other agent.
+    a.lease = None;
+    b.call("screenshot", &json!({}), &c).unwrap();
+    assert!(b.lease.is_some());
+    // An automatic choice that stops matching stays unselected instead of re-arming.
+    b.device_choice = "lost";
+    b.device.clear();
+    b.lease = None;
+    assert_eq!(
+        b.call("key", &json!({"keys":["SHIFT"]}), &c).unwrap_err()["code"],
+        "device.select_required"
+    );
+    assert!(b.lease.is_none());
+    for id in ["../escape", "a b", ""] {
+        assert!(device_lease(&a.root, id).is_err());
+    }
+    let root = a.root.clone();
+    drop((a, b));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

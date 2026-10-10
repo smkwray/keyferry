@@ -1,4 +1,8 @@
 //! Controller-owned capture. Frames/OCR are transient response bodies, never events or logs.
+//!
+//! Admission is per source: one request in flight per source (a second reader of the same
+//! source gets `capture.busy` and shares the one held stream), while different sources never
+//! wait on each other. PNG/OCR encoding additionally takes a small CPU-sized global permit.
 use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use keyferry_capture::{
@@ -7,19 +11,60 @@ use keyferry_capture::{
     ocr::{NativeOcr, Ocr},
 };
 use keyferry_protocol::MAX_SCREENSHOT_SIDE;
-use std::sync::atomic::AtomicBool;
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 pub(crate) use keyferry_capture::frames::MAX_WIRE;
+const MAX_STREAMS: usize = 4;
+/// Local streams plus forwarded peer sources; bounds retained frames and blocking workers.
+const MAX_IN_FLIGHT: usize = 8;
+
+pub(crate) struct Service {
+    inventory: Mutex<Inventory>,
+    streams: Mutex<Streams>,
+    in_flight: Mutex<HashSet<String>>,
+    closed: AtomicBool,
+    encoders: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    pub fake: Mutex<HashMap<String, Frame>>,
+    #[cfg(test)]
+    pub fake_wait: Mutex<Duration>,
+}
 
 #[derive(Default)]
-pub(crate) struct Service {
-    inventory: Option<(Instant, Result<Vec<capture::Device>, &'static str>)>,
-    streams: HashMap<String, Capture>,
-    inventory_retry: Retry,
-    source_retry: Retry,
+struct Inventory {
+    cached: Option<(Instant, Result<Vec<capture::Device>, &'static str>)>,
+    retry: Retry,
+}
+
+#[derive(Default)]
+struct Streams {
+    stopped: bool,
+    by_source: HashMap<String, Arc<Mutex<Stream>>>,
+}
+
+struct Stream {
+    capture: Capture,
+    retry: Retry,
     last_request: Option<Instant>,
-    #[cfg(test)]
-    pub fake: Option<Frame>,
+}
+
+/// One admitted request for one source; released when the request's work finishes.
+pub(crate) struct Admission {
+    service: Arc<Service>,
+    source: String,
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        self.service
+            .in_flight
+            .lock()
+            .expect("capture admission")
+            .remove(&self.source);
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -36,38 +81,91 @@ pub(crate) struct FrameRequest {
     pub ocr: bool,
 }
 
-impl Service {
-    pub(crate) fn stop(&mut self) {
-        self.streams.clear();
+impl Default for Service {
+    fn default() -> Self {
+        let cpus = std::thread::available_parallelism().map_or(2, usize::from);
+        Self {
+            inventory: Mutex::default(),
+            streams: Mutex::default(),
+            in_flight: Mutex::default(),
+            closed: AtomicBool::new(false),
+            encoders: Arc::new(tokio::sync::Semaphore::new(
+                (cpus / 2).clamp(2, MAX_STREAMS),
+            )),
+            #[cfg(test)]
+            fake: Mutex::default(),
+            #[cfg(test)]
+            fake_wait: Mutex::default(),
+        }
     }
-    fn devices(&mut self) -> Result<Vec<capture::Device>, &'static str> {
+}
+
+impl Service {
+    pub(crate) fn admit(self: &Arc<Self>, source: &str) -> Result<Admission, &'static str> {
+        let mut in_flight = self.in_flight.lock().expect("capture admission");
+        if self.closed.load(Ordering::Acquire)
+            || in_flight.len() >= MAX_IN_FLIGHT
+            || !in_flight.insert(source.to_owned())
+        {
+            return Err("capture.busy");
+        }
+        Ok(Admission {
+            service: self.clone(),
+            source: source.to_owned(),
+        })
+    }
+
+    /// Refuses new requests; `stop` then releases every held stream.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.encoders.close();
+    }
+
+    pub(crate) fn stop(&self) {
+        let released = {
+            let mut streams = self.streams.lock().expect("capture streams");
+            streams.stopped = true;
+            std::mem::take(&mut streams.by_source)
+        };
+        drop(released);
+    }
+
+    fn devices(&self) -> Result<Vec<capture::Device>, &'static str> {
         self.devices_at(Instant::now(), capture::devices)
     }
     fn devices_at(
-        &mut self,
+        &self,
         now: Instant,
         discover: impl FnOnce() -> Result<Vec<capture::Device>, &'static str>,
     ) -> Result<Vec<capture::Device>, &'static str> {
-        if let Some((at, Ok(devices))) = &self.inventory {
+        // Discovery is serialized and cached; held streams never wait on it.
+        let mut inventory = self.inventory.lock().expect("capture inventory");
+        if let Some((at, Ok(devices))) = &inventory.cached {
             if now.saturating_duration_since(*at) < Duration::from_secs(10) {
                 return Ok(devices.clone());
             }
         }
-        let result = self.inventory_retry.attempt(now, || {
+        let result = inventory.retry.attempt(now, || {
             let devices = discover()?;
             if devices.is_empty() {
                 return Err("capture.source_unavailable");
             }
             Ok(devices)
         });
-        self.inventory = Some((now, result.clone()));
+        inventory.cached = Some((now, result.clone()));
         result
     }
 
-    fn sources(&mut self) -> serde_json::Value {
+    fn sources(&self) -> serde_json::Value {
         #[cfg(test)]
-        if self.fake.is_some() {
-            return serde_json::json!({"sources":[{"id":"local:fake-hdmi","name":"Fake HDMI capture","recognized":true,"controller":"local"}],"error":null});
+        {
+            let fake = self.fake.lock().expect("fake capture");
+            if !fake.is_empty() {
+                let mut ids = fake.keys().collect::<Vec<_>>();
+                ids.sort();
+                return serde_json::json!({"sources": ids.iter().map(|id| serde_json::json!({
+                    "id":format!("local:{id}"),"name":format!("Fake capture {id}"),"recognized":true,"controller":"local"})).collect::<Vec<_>>(),"error":null});
+            }
         }
         match self.devices() {
             Ok(devices) => serde_json::json!({"sources": devices.iter().map(|d| serde_json::json!({
@@ -76,62 +174,98 @@ impl Service {
         }
     }
 
-    fn frame(&mut self, request: &FrameRequest) -> Result<serde_json::Value, &'static str> {
-        request.timeout()?;
-        if self
-            .last_request
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+    /// The held stream for one source, opened on first use. Only the map lookup is shared.
+    fn stream(&self, id: &str) -> Result<Arc<Mutex<Stream>>, &'static str> {
+        if let Some(stream) = self
+            .streams
+            .lock()
+            .expect("capture streams")
+            .by_source
+            .get(id)
         {
-            return Err("capture.rate_limit");
+            return Ok(stream.clone());
         }
-        self.last_request = Some(Instant::now());
+        #[cfg(test)]
+        let faked = {
+            let fake = self.fake.lock().expect("fake capture");
+            if !fake.is_empty() && !fake.contains_key(id) {
+                return Err("capture.source_not_found");
+            }
+            !fake.is_empty()
+        };
+        #[cfg(not(test))]
+        let faked = false;
+        if !faked {
+            let devices = self.devices()?;
+            capture::select_source(&devices, Some(id)).map_err(|_| "capture.source_unavailable")?;
+        }
+        let mut streams = self.streams.lock().expect("capture streams");
+        if streams.stopped {
+            return Err("capture.busy");
+        }
+        if !streams.by_source.contains_key(id) && streams.by_source.len() >= MAX_STREAMS {
+            return Err("capture.stream_limit");
+        }
+        Ok(streams
+            .by_source
+            .entry(id.to_owned())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(Stream {
+                    capture: Capture::start(Some(id.to_owned())),
+                    retry: Retry::default(),
+                    last_request: None,
+                }))
+            })
+            .clone())
+    }
+
+    /// Waits for this source's next frame. Holds only this source's stream.
+    fn frame(
+        &self,
+        request: &FrameRequest,
+    ) -> Result<(Arc<Frame>, serde_json::Value), &'static str> {
+        let timeout = request.timeout()?;
         if request
             .max_width
             .is_some_and(|w| !(2..=MAX_SIDE).contains(&w))
         {
             return Err("capture.scale");
         }
-        #[cfg(test)]
-        if let Some(frame) = &self.fake {
-            if request.source != "local:fake-hdmi" {
-                return Err("capture.source_not_found");
-            }
-            let mut frame = frame.clone();
-            frame.at = Instant::now();
-            frame.serial = request.after.unwrap_or(0) + 1;
-            return encode(
-                &frame,
-                request,
-                serde_json::json!({"generation":frame.generation,"source":"local:fake-hdmi"}),
-            );
-        }
-        let mut retry = std::mem::take(&mut self.source_retry);
-        let result = retry.attempt(Instant::now(), || self.frame_inner(request));
-        // A short caller observation deadline is not a failed source or permission to reopen it.
-        if result == Err("capture.frame_timeout") {
-            retry = Retry::default();
-        }
-        self.source_retry = retry;
-        result
-    }
-
-    fn frame_inner(&mut self, request: &FrameRequest) -> Result<serde_json::Value, &'static str> {
         let id = request
             .source
             .strip_prefix("local:")
             .ok_or("capture.source_not_found")?;
-        if !self.streams.contains_key(id) {
-            let devices = self.devices()?;
-            capture::select_source(&devices, Some(id)).map_err(|_| "capture.source_unavailable")?;
-            if self.streams.len() >= 4 {
-                return Err("capture.stream_limit");
-            }
-            self.streams
-                .insert(id.to_owned(), Capture::start(Some(id.to_owned())));
+        let stream = self.stream(id)?;
+        let mut stream = stream.lock().expect("capture stream");
+        if stream
+            .last_request
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+        {
+            return Err("capture.rate_limit");
         }
-        let capture = self.streams.get_mut(id).expect("stream");
-        let frame = capture.latest(request.after, request.timeout()?, &AtomicBool::new(false))?;
-        encode(&frame, request, capture.status())
+        stream.last_request = Some(Instant::now());
+        #[cfg(test)]
+        let fake = self.fake.lock().expect("fake capture").get(id).cloned();
+        #[cfg(test)]
+        if let Some(mut frame) = fake {
+            let wait = *self.fake_wait.lock().expect("fake wait");
+            std::thread::sleep(wait);
+            frame.at = Instant::now();
+            frame.serial = request.after.unwrap_or(0) + 1;
+            return Ok((
+                Arc::new(frame),
+                serde_json::json!({"generation":1,"source":request.source}),
+            ));
+        }
+        let Stream { capture, retry, .. } = &mut *stream;
+        let result = retry.attempt(Instant::now(), || {
+            capture.latest(request.after, timeout, &AtomicBool::new(false))
+        });
+        // A short caller observation deadline is not a failed source or permission to reopen it.
+        if result.as_ref().err() == Some(&"capture.frame_timeout") {
+            *retry = Retry::default();
+        }
+        Ok((result?, capture.status()))
     }
 }
 
@@ -219,24 +353,22 @@ fn encode(
     Ok(result)
 }
 
+async fn list_sources(daemon: &Daemon) -> Result<serde_json::Value, ApiError> {
+    let service = daemon.0.capture.clone();
+    if service.closed.load(Ordering::Acquire) {
+        return Err(ApiError::conflict("capture.busy"));
+    }
+    tokio::task::spawn_blocking(move || service.sources())
+        .await
+        .map_err(|_| ApiError::internal("capture.worker"))
+}
+
 async fn local_sources(
     State(daemon): State<Daemon>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     authorize(&headers, &daemon)?;
-    let service = daemon.0.capture.clone();
-    let permit = daemon
-        .0
-        .capture_admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::conflict("capture.busy"))?;
-    let mut result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        service.lock().expect("capture service").sources()
-    })
-    .await
-    .map_err(|_| ApiError::internal("capture.worker"))?;
+    let mut result = list_sources(&daemon).await?;
     if let Some(forwarder) = daemon.forwarder() {
         let (sources, errors) = forwarder.capture_sources().await;
         result["sources"]
@@ -256,21 +388,7 @@ async fn peer_sources(
     authorize(&headers, &daemon)?;
     require_owner_channel(&headers)?;
     daemon.lookup(&id)?;
-    let service = daemon.0.capture.clone();
-    let permit = daemon
-        .0
-        .capture_admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::conflict("capture.busy"))?;
-    Ok(Json(
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            service.lock().expect("capture service").sources()
-        })
-        .await
-        .map_err(|_| ApiError::internal("capture.worker"))?,
-    ))
+    Ok(Json(list_sources(&daemon).await?))
 }
 
 fn require_owner_channel(headers: &HeaderMap) -> Result<(), ApiError> {
@@ -280,13 +398,12 @@ fn require_owner_channel(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn admit(daemon: &Daemon) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+fn admit(daemon: &Daemon, request: &FrameRequest) -> Result<Admission, ApiError> {
     daemon
         .0
-        .capture_admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::conflict("capture.busy"))
+        .capture
+        .admit(&request.source)
+        .map_err(ApiError::conflict)
 }
 
 async fn local_frame(
@@ -295,16 +412,16 @@ async fn local_frame(
     Json(request): Json<FrameRequest>,
 ) -> Result<Response, ApiError> {
     authorize(&headers, &daemon)?;
-    let permit = admit(&daemon)?;
+    let admission = admit(&daemon, &request)?;
     let timeout = request.timeout().map_err(ApiError::bad_request)?;
     // Only loopback exposes this route; a source never contains an address supplied by a client.
     if request.source.starts_with("local:") {
-        return serve_frame(daemon, request, permit).await;
+        return serve_frame(daemon, request, admission).await;
     }
     let forwarder = daemon
         .forwarder()
         .ok_or_else(|| ApiError::unavailable("capture.peer_offline"))?;
-    let _permit = permit;
+    let _admission = admission;
     tokio::time::timeout(timeout, forwarder.capture_frame(&daemon, request))
         .await
         .map_err(|_| ApiError::unavailable("capture.frame_timeout"))
@@ -318,7 +435,7 @@ async fn peer_frame(
 ) -> Result<Response, ApiError> {
     require_owner_channel(&headers)?;
     authorize(&headers, &daemon)?;
-    let permit = admit(&daemon)?;
+    let admission = admit(&daemon, &request)?;
     if request.device != id {
         return Err(ApiError::bad_request("capture.device_mismatch"));
     }
@@ -335,22 +452,39 @@ async fn peer_frame(
             return Err(ApiError::auth("capture.fresh_proof_required"));
         }
     }
-    serve_frame(daemon, request, permit).await
+    serve_frame(daemon, request, admission).await
 }
 
+/// The admission moves into each blocking phase, so an abandoned HTTP request keeps its source
+/// admitted until the worker that still holds the stream finishes.
 async fn serve_frame(
     daemon: Daemon,
     mut request: FrameRequest,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    admission: Admission,
 ) -> Result<Response, ApiError> {
     let service = daemon.0.capture.clone();
     let epoch = daemon.0.epoch;
     if request.epoch.as_deref() != Some(&epoch.to_string()) {
         request.after = None;
     }
+    let (admission, request, captured) = tokio::task::spawn_blocking(move || {
+        let captured = service.frame(&request);
+        (admission, request, captured)
+    })
+    .await
+    .map_err(|_| ApiError::internal("capture.worker"))?;
+    let (frame, status) = captured.map_err(ApiError::unavailable)?;
+    let encoder = daemon
+        .0
+        .capture
+        .encoders
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::conflict("capture.busy"))?;
     let mut result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        service.lock().expect("capture service").frame(&request)
+        let _held = (admission, encoder);
+        encode(&frame, &request, status)
     })
     .await
     .map_err(|_| ApiError::internal("capture.worker"))?
@@ -389,19 +523,19 @@ mod tests {
         assert_eq!(request.timeout().unwrap(), Duration::from_secs(3));
         for ms in [0, FRAME_WAIT.as_millis() as u64 + 1, u64::MAX] {
             request.timeout_ms = Some(ms);
-            let mut service = Service::default();
+            let service = Service::default();
             assert_eq!(service.frame(&request).unwrap_err(), "capture.timeout");
-            assert!(service.streams.is_empty() && service.last_request.is_none());
+            assert!(service.streams.lock().unwrap().by_source.is_empty());
         }
     }
 
     #[test]
     fn absent_inventory_is_inert_without_clients_and_backoff_is_on_demand() {
-        let mut service = Service::default();
+        let service = Service::default();
         let mut discoveries = Vec::new();
         let start = Instant::now();
-        assert!(service.inventory.is_none());
-        assert!(service.streams.is_empty());
+        assert!(service.inventory.lock().unwrap().cached.is_none());
+        assert!(service.streams.lock().unwrap().by_source.is_empty());
         for second in 0..=240 {
             let result = service.devices_at(start + Duration::from_secs(second), || {
                 discoveries.push(second);
@@ -410,7 +544,7 @@ mod tests {
             assert_eq!(result.unwrap_err(), "capture.source_unavailable");
         }
         assert_eq!(discoveries, [0, 2, 6, 14, 30, 62, 122, 182]);
-        assert!(service.streams.is_empty());
+        assert!(service.streams.lock().unwrap().by_source.is_empty());
         assert_eq!(service.sources()["error"], "capture.source_unavailable");
     }
     #[test]
@@ -506,6 +640,86 @@ mod tests {
             (Some(40), Some(1))
         );
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sources_are_admitted_independently_and_never_cross() {
+        use axum::body::{to_bytes, Body};
+        use tower_service::Service;
+        const WAIT: Duration = Duration::from_millis(400);
+        let daemon = Daemon::new(MemoryTokenStore::new("capture-token")).unwrap();
+        for (id, value) in [("card-a", 40), ("card-b", 200)] {
+            let frame = Frame {
+                width: 32,
+                height: 24,
+                native: (64, 48),
+                rgb: vec![value; 32 * 24 * 3],
+                serial: 1,
+                generation: 1,
+                at: Instant::now(),
+            };
+            daemon
+                .0
+                .capture
+                .fake
+                .lock()
+                .unwrap()
+                .insert(id.into(), frame);
+        }
+        *daemon.0.capture.fake_wait.lock().unwrap() = WAIT;
+        let request = |source: &str| {
+            let mut router = daemon.router();
+            let body = serde_json::json!({"device":"","source":format!("local:{source}")});
+            async move {
+                let response = router
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/capture/frame")
+                            .header(header::AUTHORIZATION, "Bearer capture-token")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let value: serde_json::Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), MAX_WIRE).await.unwrap(),
+                )
+                .unwrap();
+                (status, value)
+            }
+        };
+        let started = Instant::now();
+        let (a, b, same) = tokio::join!(request("card-a"), request("card-b"), async {
+            time::sleep(WAIT / 4).await;
+            request("card-a").await
+        });
+        let elapsed = started.elapsed();
+        // Different cards wait concurrently; the global lock made this take two waits.
+        assert!(elapsed < WAIT * 3 / 2, "{elapsed:?}");
+        assert_eq!((a.0, b.0), (StatusCode::OK, StatusCode::OK));
+        assert_eq!(a.1["mean_luma"].as_f64().unwrap().round(), 40.0);
+        assert_eq!(b.1["mean_luma"].as_f64().unwrap().round(), 200.0);
+        assert_eq!(a.1["capture"]["source"], "local:card-a");
+        assert_eq!(b.1["capture"]["source"], "local:card-b");
+        // A second reader of the same card shares its one stream and is told to retry.
+        assert_eq!(same.0, StatusCode::CONFLICT);
+        assert_eq!(same.1["error"], "capture.busy");
+        let service = &daemon.0.capture;
+        assert!(service.in_flight.lock().unwrap().is_empty());
+        assert_eq!(service.streams.lock().unwrap().by_source.len(), 2);
+        // A missing card fails alone; the other card keeps serving.
+        service.fake.lock().unwrap().remove("card-a");
+        time::sleep(Duration::from_millis(110)).await;
+        let (gone, ok) = tokio::join!(request("card-c"), request("card-b"));
+        assert_eq!(gone.1["error"], "capture.source_not_found");
+        assert_eq!(ok.0, StatusCode::OK);
+        assert!(daemon.metadata().is_empty());
+        daemon.shutdown(Duration::from_secs(1)).await;
+        assert_eq!(request("card-b").await.1["error"], "capture.busy");
+        assert!(service.streams.lock().unwrap().by_source.is_empty());
+    }
+
     #[tokio::test]
     #[ignore = "requires a real HDMI capture card; read-only isolated daemon, no stick commands"]
     async fn real_capture_through_isolated_daemon_http_api() {
