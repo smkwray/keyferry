@@ -472,17 +472,29 @@ impl Forwarder {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> OwnerExchange {
-        owner_exchange(
-            &self.connector,
-            &route.installation_id,
-            route.control,
-            method,
-            path,
-            body,
-            timeout,
-            MAX_FORWARD_RESPONSE,
-        )
-        .await
+        // A failed connection sent nothing. Read-only observations may also
+        // be repeated after a lost response; mutating requests never are.
+        for attempt in 0..3 {
+            let response = owner_exchange(
+                &self.connector,
+                &route.installation_id,
+                route.control,
+                method,
+                path,
+                body,
+                timeout,
+                MAX_FORWARD_RESPONSE,
+            )
+            .await;
+            if attempt == 2
+                || !(matches!(response, OwnerExchange::NotSent)
+                    || method == "GET" && matches!(response, OwnerExchange::Uncertain))
+            {
+                return response;
+            }
+            time::sleep(Duration::from_millis(150)).await;
+        }
+        unreachable!("bounded exchange returns its last result")
     }
 
     /// Asks the peer's live endpoint for a proof addressed to this installation and verifies it
@@ -602,7 +614,7 @@ impl Forwarder {
                 }
                 None => {
                     state.holders.remove(&device);
-                    println!("keyferryd lost the tailnet route to device {device}");
+                    crate::daemon_log!("keyferryd lost the tailnet route to device {device}");
                     missing.push(device);
                 }
             }
@@ -669,7 +681,7 @@ impl Forwarder {
             if state.holders.contains_key(&device) {
                 continue;
             }
-            println!(
+            crate::daemon_log!(
                 "keyferryd reaches device {device} through owner controller {}",
                 route
                     .name
@@ -722,7 +734,7 @@ impl Forwarder {
             state.holders.remove(device);
             // Direct evidence that the route is stale permits an immediate new search.
             state.last_discovery = None;
-            println!("keyferryd lost the tailnet route to device {device}");
+            crate::daemon_log!("keyferryd lost the tailnet route to device {device}");
         }
     }
 
@@ -1019,9 +1031,8 @@ impl Forwarder {
         let pin = self
             .command_pin(command_id)
             .filter(|pin| pin.device == device)?;
-        if pin.unknown {
-            return Some(unknown_command(command_id, device, StatusCode::OK));
-        }
+        // Keep observing an uncertain command at its original holder. A
+        // transient lost response must not permanently freeze its receipt.
         let path = format!("/v1/devices/{device}/commands/{command_id}");
         Some(
             match self
@@ -1033,6 +1044,9 @@ impl Forwarder {
                     content_type,
                     body,
                 } => passthrough(status, content_type, body),
+                OwnerExchange::NotSent | OwnerExchange::Uncertain if pin.unknown => {
+                    unknown_command(command_id, device, StatusCode::OK)
+                }
                 OwnerExchange::NotSent | OwnerExchange::Uncertain => route_unavailable(),
             },
         )
@@ -2231,6 +2245,7 @@ mod tests {
     struct Proxy {
         connections: AtomicUsize,
         drop_at: Mutex<Option<usize>>,
+        refuse_once_at: Mutex<Option<usize>>,
     }
 
     impl Proxy {
@@ -2251,7 +2266,11 @@ mod tests {
                 };
                 let index = control.connections.fetch_add(1, Ordering::SeqCst) + 1;
                 let drop_at = *control.drop_at.lock().unwrap();
+                let refuse_once = *control.refuse_once_at.lock().unwrap() == Some(index);
                 tokio::spawn(async move {
+                    if refuse_once {
+                        return;
+                    }
                     match drop_at {
                         Some(at) if index > at => drop(client),
                         Some(at) if index == at => drop_response(client, upstream).await,
@@ -2365,6 +2384,15 @@ mod tests {
         proof_secret: [u8; 32],
         received: Option<Received>,
     ) -> Harness {
+        harness_with_wifi(local, proof_secret, received, false).await
+    }
+
+    async fn harness_with_wifi(
+        local: Option<SimulatorTransport>,
+        proof_secret: [u8; 32],
+        received: Option<Received>,
+        wifi: bool,
+    ) -> Harness {
         let root = std::env::temp_dir().join(format!("keyferry-forward-{}", Uuid::now_v7()));
         let owner = TestOwner::new(OWNER);
         let (holder_id, _) = owner.issue(&root.join("holder"), DEVICE, HOLDER_SECRET);
@@ -2380,31 +2408,40 @@ mod tests {
             .with_screen_power(crate::ScreenPower::On);
         let file = Arc::new(Mutex::new(TestFile::default()));
         let gateway = TlsTransport::from_installation_store(&holder_store).unwrap();
-        gateway.set_test_session_snapshot(TlsSessionSnapshot {
-            link_path: TlsLinkPath::Wifi,
-            protocol_session_id: SESSION,
-            firmware_identity: None,
-        });
-        let holder = Daemon::with_device_transports_and_gateways(
-            MemoryTokenStore::new("holder-token-123456"),
-            vec![(
-                device_id(),
-                "Holder".to_owned(),
-                Arc::new(ProvingTransport {
-                    inner: holder_device.clone(),
-                    gateway: holder_id,
-                    controllers: HashMap::from([
-                        (forwarder_id, proof_secret),
-                        (eyes_id, [0x62; 32]),
-                    ]),
-                    file: Arc::clone(&file),
-                }) as Arc<dyn DeviceTransport>,
-                Some(GatewayAuthority {
-                    transport: gateway,
-                    daemon_boot_id: [0x71; 16],
-                }),
-            )],
-        )
+        if !wifi {
+            gateway.set_test_session_snapshot(TlsSessionSnapshot {
+                link_path: TlsLinkPath::Wifi,
+                protocol_session_id: SESSION,
+                firmware_identity: None,
+            });
+        }
+        let holder = if wifi {
+            Daemon::with_tls_transports(
+                MemoryTokenStore::new("holder-token-123456"),
+                vec![(device_id(), "Holder".to_owned(), gateway.clone())],
+            )
+        } else {
+            Daemon::with_device_transports_and_gateways(
+                MemoryTokenStore::new("holder-token-123456"),
+                vec![(
+                    device_id(),
+                    "Holder".to_owned(),
+                    Arc::new(ProvingTransport {
+                        inner: holder_device.clone(),
+                        gateway: holder_id,
+                        controllers: HashMap::from([
+                            (forwarder_id, proof_secret),
+                            (eyes_id, [0x62; 32]),
+                        ]),
+                        file: Arc::clone(&file),
+                    }) as Arc<dyn DeviceTransport>,
+                    Some(GatewayAuthority {
+                        transport: gateway.clone(),
+                        daemon_boot_id: [0x71; 16],
+                    }),
+                )],
+            )
+        }
         .unwrap();
         let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let control_address = control.local_addr().unwrap();
@@ -2521,6 +2558,195 @@ mod tests {
             time::sleep(Duration::from_millis(10)).await;
         }
         panic!("forwarded command did not finish");
+    }
+
+    #[tokio::test]
+    async fn ten_forwarded_300_character_commands_survive_holder_listener_replacement() {
+        use crate::discovery::{refresh_interfaces, BeaconPlan, PortableGatewayBinding};
+        use crate::tls::{read_frame, send_frame, tests::respond_on_name};
+        use keyferry_protocol::{message, result_code, Frame};
+
+        let harness = harness_with_wifi(None, FORWARDER_SECRET, None, true).await;
+        let transport = harness
+            .holder
+            .gateway(&device_id())
+            .unwrap()
+            .transport
+            .clone();
+        let binding = PortableGatewayBinding::Multi(
+            InstallationTlsSecretSet::load(harness.root.join("holder")).unwrap(),
+            vec![transport.clone()],
+        );
+        let mut listeners = Vec::new();
+        // macOS does not route arbitrary 127/8 aliases. Use two reserved local
+        // ports so the real accept/session lifetime check runs on every OS.
+        let reservations = [
+            std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap(),
+            std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap(),
+        ];
+        let first = BeaconPlan::loopback_test(reservations[0].local_addr().unwrap().port());
+        let second = BeaconPlan::loopback_test(reservations[1].local_addr().unwrap().port());
+        drop(reservations);
+        assert!(
+            refresh_interfaces(
+                &mut listeners,
+                &[second, first],
+                transport.host_id(),
+                &binding
+            )
+            .await
+        );
+        assert!(
+            !refresh_interfaces(
+                &mut listeners,
+                &[first, second, first],
+                transport.host_id(),
+                &binding
+            )
+            .await
+        );
+
+        let credentials = transport.test_credentials();
+        let gateway_id = transport.host_id();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let device_started = Arc::clone(&started);
+        let device_resume = Arc::clone(&resume);
+        let controller = harness.forwarder.forwarder().unwrap().installation_id;
+        let device = tokio::spawn(async move {
+            let tcp = TcpStream::connect(first.listener_address()).await.unwrap();
+            let name = keyferry_gateway::device_gateway_name(&DEVICE).unwrap();
+            let (mut stream, ready) =
+                respond_on_name(tcp, &credentials, &[0x33; 32], true, &name).await;
+            let session: [u8; 16] = ready.payload[..16].try_into().unwrap();
+            let mut paused = false;
+            let mut commands = HashSet::new();
+            while let Ok(frame) = read_frame(&mut stream).await {
+                match frame.message_type {
+                    message::ROUTE_PROOF_REQUEST => {
+                        assert_eq!(&frame.payload[..16], &controller);
+                        let input = keyferry_gateway::RouteProofInput {
+                            owner_id: OWNER,
+                            device_id: DEVICE,
+                            epoch: 1,
+                            policy_sequence: 1,
+                            policy_hash: [0x31; 32],
+                            gateway_installation_id: gateway_id,
+                            controller_installation_id: controller,
+                            controller_nonce: frame.payload[16..48].try_into().unwrap(),
+                            device_boot_nonce: [0x32; 16],
+                            endpoint_session_id: session,
+                            link_path: keyferry_gateway::GatewayLinkPath::Wifi,
+                            usb_ready: true,
+                        };
+                        let tag =
+                            keyferry_gateway::route_proof_tag(&FORWARDER_SECRET, &input).unwrap();
+                        let payload =
+                            keyferry_gateway::encode_route_proof_response(&input, &tag).unwrap();
+                        send_frame(
+                            &mut stream,
+                            Frame::v1(
+                                message::ROUTE_PROOF_RESPONSE,
+                                frame.sequence,
+                                payload.to_vec(),
+                            ),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    message::ARM | message::DISARM => {
+                        send_frame(
+                            &mut stream,
+                            Frame::v1(message::ACK, frame.sequence, vec![frame.message_type, 0, 0]),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    message::COMMAND => {
+                        let execute = frame.payload[52] == 1;
+                        let id: [u8; 16] = frame.payload[..16].try_into().unwrap();
+                        if execute {
+                            commands.insert(id);
+                        }
+                        let results: &[u8] = if execute {
+                            &[
+                                result_code::ACCEPTED,
+                                result_code::STARTED,
+                                result_code::EMITTED,
+                            ]
+                        } else {
+                            &[result_code::ACCEPTED, result_code::EMITTED]
+                        };
+                        for result in results {
+                            if execute && *result == result_code::EMITTED && !paused {
+                                paused = true;
+                                device_started.notify_one();
+                                device_resume.notified().await;
+                            }
+                            let mut payload = id.to_vec();
+                            payload.push(*result);
+                            send_frame(
+                                &mut stream,
+                                Frame::v1(message::COMMAND_RESULT, frame.sequence, payload),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    other => panic!("unexpected fixture message {other}"),
+                }
+            }
+            commands.len()
+        });
+        for _ in 0..200 {
+            if transport.is_ready() {
+                break;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(transport.is_ready());
+        let session = transport.session_snapshot().unwrap();
+        let (_, devices) = call(&harness.forwarder, "GET", "/v1/devices", None).await;
+        assert_eq!(devices["devices"][0]["link_path"], TAILNET_LINK_PATH);
+        for index in 0..10 {
+            let text: String = (0..300)
+                .map(|n| char::from(b'a' + ((n * 17 + index) % 26) as u8))
+                .collect();
+            let (status, receipt) = call(
+                &harness.forwarder,
+                "POST",
+                &format!("/v1/devices/{}/sequences", device_id()),
+                Some(serde_json::json!({
+                    "schema": "keyferry.keyboard-sequence.v1", "command_id": Uuid::now_v7().to_string(),
+                    "profile": "windows-us", "arm": "command-scoped", "start_within_ms": 5000,
+                    "timing": {"key_down_ms": 12, "release_gap_ms": 40},
+                    "actions": [{"type": "text", "value": text}]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{receipt}");
+            if index == 0 {
+                time::timeout(Duration::from_secs(2), started.notified())
+                    .await
+                    .unwrap();
+                // Remove the exact listener that accepted the in-flight command,
+                // then bind it again. The session and command must survive both.
+                assert!(refresh_interfaces(&mut listeners, &[second], gateway_id, &binding).await);
+                assert!(
+                    refresh_interfaces(&mut listeners, &[first, second], gateway_id, &binding)
+                        .await
+                );
+                assert_eq!(transport.session_snapshot(), Some(session.clone()));
+                resume.notify_one();
+            }
+            let result =
+                wait_for_outcome(&harness.forwarder, receipt["command_id"].as_str().unwrap()).await;
+            assert_eq!(result["outcome"], "EMITTED", "command {index}: {result}");
+            assert_eq!(result["terminal_zero_confirmed"], true);
+            assert_eq!(transport.session_snapshot(), Some(session.clone()));
+        }
+        transport.begin_maintenance().await.unwrap();
+        assert_eq!(device.await.unwrap(), 10);
     }
 
     #[tokio::test]
@@ -2830,11 +3056,15 @@ mod tests {
         }
         assert_eq!(harness.holder_device.execution_count(command_id), 1);
 
-        // Resubmitting the same command and asking for its outcome never contact the holder.
+        // Resubmitting never contacts the holder. Read-only outcome reconciliation may.
         let connections = harness.proxy.connections.load(Ordering::SeqCst);
         let (status, again) = call(forwarder, "POST", &uri, Some(sequence(command_id))).await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(again["outcome"], "UNKNOWN");
+        assert_eq!(
+            harness.proxy.connections.load(Ordering::SeqCst),
+            connections
+        );
         let (status, outcome) = call(
             forwarder,
             "GET",
@@ -2844,11 +3074,40 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(outcome["outcome"], "UNKNOWN");
-        assert_eq!(
-            harness.proxy.connections.load(Ordering::SeqCst),
-            connections
-        );
+        assert!(harness.proxy.connections.load(Ordering::SeqCst) > connections);
         time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.holder_device.execution_count(command_id), 1);
+        // Once the holder is reachable, observe its terminal receipt without replay.
+        *harness.proxy.drop_at.lock().unwrap() = None;
+        let (_, recovered) = call(
+            forwarder,
+            "GET",
+            &format!("/v1/devices/{device}/commands/{command_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(recovered["outcome"], "EMITTED");
+        assert_eq!(harness.holder_device.execution_count(command_id), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_holder_connection_failure_before_send_does_not_fail_command() {
+        let harness = harness(None, FORWARDER_SECRET).await;
+        let (_, devices) = call(&harness.forwarder, "GET", "/v1/devices", None).await;
+        assert_eq!(devices["devices"][0]["link_path"], TAILNET_LINK_PATH);
+        *harness.proxy.refuse_once_at.lock().unwrap() =
+            Some(harness.proxy.connections.load(Ordering::SeqCst) + 1);
+        let command_id = Uuid::now_v7();
+        let (status, response) = call(
+            &harness.forwarder,
+            "POST",
+            &format!("/v1/devices/{}/sequences", device_id()),
+            Some(sequence(command_id)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        let result = wait_for_outcome(&harness.forwarder, &command_id.to_string()).await;
+        assert_eq!(result["outcome"], "EMITTED");
         assert_eq!(harness.holder_device.execution_count(command_id), 1);
     }
 

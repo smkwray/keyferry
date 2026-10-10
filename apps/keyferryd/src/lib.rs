@@ -57,6 +57,8 @@ mod ble;
 mod capture;
 mod discovery;
 mod forward;
+#[doc(hidden)]
+pub mod logging;
 mod tailnet;
 mod tls;
 pub use ble::{run_ble_gateway, run_ble_gateways, BleGatewayError};

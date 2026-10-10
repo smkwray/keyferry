@@ -30,6 +30,8 @@ impl GatewayListenerRegistry {
             .iter()
             .copied()
             .map(BeaconPlan::listener_address)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         if state.addresses != addresses {
             state.generation = state.generation.wrapping_add(1).max(1);
@@ -54,6 +56,14 @@ pub struct BeaconPlan {
 }
 
 impl BeaconPlan {
+    #[cfg(test)]
+    pub(crate) fn loopback_test(port: u16) -> Self {
+        Self {
+            bind: SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+            destination: SocketAddrV4::new(Ipv4Addr::LOCALHOST, keyferry_protocol::discovery::PORT),
+        }
+    }
+
     /// Resolve the selected active private IPv4 broadcast interfaces into
     /// exact sources and directed-broadcast destinations. Point-to-point links
     /// such as Tailscale are deliberately excluded; the endpoint independently
@@ -65,7 +75,7 @@ impl BeaconPlan {
     fn selected_with_matches(
         interface_names: &BTreeSet<String>,
     ) -> io::Result<(Vec<Self>, BTreeSet<String>)> {
-        let mut plans = Vec::new();
+        let mut plans = BTreeSet::new();
         let mut matched = BTreeSet::new();
         for interface in getifaddrs::getifaddrs()? {
             #[cfg(windows)]
@@ -90,13 +100,11 @@ impl BeaconPlan {
                 continue;
             }
             if let Ok(plan) = Self::new(address.address, netmask) {
-                plans.push(plan);
+                plans.insert(plan);
                 matched.insert(selected_name.clone());
             }
         }
-        plans.sort_unstable();
-        plans.dedup();
-        Ok((plans, matched))
+        Ok((plans.into_iter().collect(), matched))
     }
 
     pub fn new(interface: Ipv4Addr, netmask: Ipv4Addr) -> Result<Self, &'static str> {
@@ -138,6 +146,10 @@ impl BeaconPlan {
 
     #[must_use]
     pub fn listener_address(self) -> SocketAddr {
+        #[cfg(test)]
+        if self.bind.port() != 0 {
+            return self.bind.into();
+        }
         SocketAddrV4::new(*self.bind.ip(), keyferry_protocol::roaming::DEVICE_TLS_PORT).into()
     }
 }
@@ -179,14 +191,14 @@ pub struct HostBeacon {
     packet: [u8; keyferry_protocol::discovery::BEACON_SIZE],
 }
 
-struct PortableGatewayInterface {
+pub(crate) struct PortableGatewayInterface {
     plan: BeaconPlan,
     beacon: HostBeacon,
     listener_task: JoinHandle<()>,
 }
 
 #[derive(Clone)]
-enum PortableGatewayBinding {
+pub(crate) enum PortableGatewayBinding {
     Single(crate::TlsTransport),
     Multi(crate::InstallationTlsSecretSet, Vec<crate::TlsTransport>),
 }
@@ -209,11 +221,11 @@ impl PortableGatewayInterface {
                 tokio::spawn(async move {
                     loop {
                         match listener.accept_one().await {
-                            Ok(peer) => println!(
+                            Ok(peer) => crate::daemon_log!(
                                 "owner-authorized Wi-Fi dongle session authenticated from {peer}"
                             ),
                             Err(error) => {
-                                eprintln!(
+                                crate::daemon_log!(
                                     "owner-authorized Wi-Fi dongle connection rejected: {error}"
                                 );
                                 time::sleep(Duration::from_secs(1)).await;
@@ -230,12 +242,12 @@ impl PortableGatewayInterface {
                 tokio::spawn(async move {
                     loop {
                         match listener.accept_one().await {
-                            Ok((peer, device_id)) => println!(
+                            Ok((peer, device_id)) => crate::daemon_log!(
                                 "owner-authorized Wi-Fi dongle session authenticated from {peer} for {}",
                                 uuid::Uuid::from_bytes(device_id)
                             ),
                             Err(error) => {
-                                eprintln!(
+                                crate::daemon_log!(
                                     "owner-authorized Wi-Fi dongle connection rejected: {error}"
                                 );
                                 time::sleep(Duration::from_secs(1)).await;
@@ -259,14 +271,64 @@ impl Drop for PortableGatewayInterface {
     }
 }
 
-async fn stop_interfaces(interfaces: &mut Vec<PortableGatewayInterface>) {
-    let mut stopping = std::mem::take(interfaces);
-    for interface in &stopping {
-        interface.listener_task.abort();
+/// Reconcile only changed listeners. Accepted sessions belong to TlsTransport's
+/// detached actors, so removing an accept loop cannot cancel device work.
+pub(crate) async fn refresh_interfaces(
+    interfaces: &mut Vec<PortableGatewayInterface>,
+    plans: &[BeaconPlan],
+    host_id: [u8; 16],
+    binding: &PortableGatewayBinding,
+) -> bool {
+    let desired = plans.iter().copied().collect::<BTreeSet<_>>();
+    let mut changed = false;
+    let mut retained = Vec::new();
+    for mut interface in std::mem::take(interfaces) {
+        // A netmask change alters only the beacon, not the TCP listener.
+        let replacement = desired.iter().find(|plan| plan.bind == interface.plan.bind);
+        if let Some(&plan) = replacement.filter(|_| !interface.listener_task.is_finished()) {
+            if plan != interface.plan {
+                match HostBeacon::bind(plan, host_id).await {
+                    Ok(beacon) => {
+                        interface.beacon = beacon;
+                        interface.plan = plan;
+                        changed = true;
+                    }
+                    Err(error) => crate::daemon_log!("LAN beacon refresh failed: {error}"),
+                }
+            }
+            retained.push(interface);
+        } else {
+            crate::daemon_log!(
+                "LAN listener removed: {}; task_finished={}",
+                interface.plan.listener_address(),
+                interface.listener_task.is_finished()
+            );
+            interface.listener_task.abort();
+            let _ = (&mut interface.listener_task).await;
+            changed = true;
+        }
     }
-    for interface in &mut stopping {
-        let _ = (&mut interface.listener_task).await;
+    for plan in desired {
+        if retained
+            .iter()
+            .any(|interface| interface.plan.bind == plan.bind)
+        {
+            continue;
+        }
+        match PortableGatewayInterface::bind(plan, host_id, binding.clone()).await {
+            Ok(interface) => {
+                retained.push(interface);
+                changed = true;
+            }
+            Err(error) => crate::daemon_log!(
+                "portable LAN interface unavailable ({}): {error}",
+                plan.bind_address()
+            ),
+        }
     }
+    retained.sort_unstable_by_key(|interface| interface.plan);
+    *interfaces = retained;
+    changed
 }
 
 fn encode_beacon(host_id: [u8; 16]) -> io::Result<[u8; keyferry_protocol::discovery::BEACON_SIZE]> {
@@ -312,7 +374,7 @@ impl HostBeacon {
         loop {
             interval.tick().await;
             if let Err(error) = self.announce_once().await {
-                eprintln!("discovery beacon send failed: {error}");
+                crate::daemon_log!("discovery beacon send failed: {error}");
             }
         }
     }
@@ -361,7 +423,7 @@ impl HostBeacon {
         const REFRESH_TICKS: u8 = 10;
 
         if let Err(error) = encode_beacon(host_id) {
-            eprintln!("portable discovery disabled: {error}");
+            crate::daemon_log!("portable discovery disabled: {error}");
             listener_registry.clear();
             return;
         }
@@ -371,6 +433,10 @@ impl HostBeacon {
         let mut interfaces = Vec::new();
         let mut refresh_in = 0;
         let mut last_missing = None;
+        crate::daemon_log!(
+            "LAN binding started; selected_interfaces={}",
+            interface_names.len()
+        );
         loop {
             interval.tick().await;
             let listener_stopped = interfaces
@@ -381,33 +447,15 @@ impl HostBeacon {
                     Ok((plans, matched)) => {
                         let missing = interface_names.len() - matched.len();
                         if last_missing != Some(missing) {
-                            eprintln!(
+                            crate::daemon_log!(
                                 "selected LAN interfaces active: {}/{}; unavailable: {missing}",
                                 matched.len(),
                                 interface_names.len()
                             );
                             last_missing = Some(missing);
                         }
-                        let active_plans = interfaces
-                            .iter()
-                            .map(|interface| interface.plan)
-                            .collect::<Vec<_>>();
-                        if listener_stopped || plans != active_plans {
-                            stop_interfaces(&mut interfaces).await;
-                            let mut refreshed = Vec::with_capacity(plans.len());
-                            for plan in plans {
-                                match PortableGatewayInterface::bind(plan, host_id, binding.clone())
-                                    .await
-                                {
-                                    Ok(interface) => refreshed.push(interface),
-                                    Err(error) => eprintln!(
-                                        "portable LAN interface unavailable ({}): {error}",
-                                        plan.bind_address()
-                                    ),
-                                }
-                            }
-                            interfaces = refreshed;
-                            eprintln!(
+                        if refresh_interfaces(&mut interfaces, &plans, host_id, &binding).await {
+                            crate::daemon_log!(
                                 "LAN listeners: {}",
                                 interfaces
                                     .iter()
@@ -425,7 +473,7 @@ impl HostBeacon {
                         refresh_in = REFRESH_TICKS;
                     }
                     Err(error) => {
-                        eprintln!("discovery interface refresh failed: {error}");
+                        crate::daemon_log!("discovery interface refresh failed: {error}");
                         // Preserve working sockets across a transient
                         // enumeration error, but retry promptly.
                         refresh_in = 1;
@@ -458,7 +506,7 @@ impl HostBeacon {
                 }
             }
             if failures > 0 {
-                eprintln!("discovery beacon send failed on {failures} interface(s)");
+                crate::daemon_log!("discovery beacon send failed on {failures} interface(s)");
                 refresh_in = 0;
             }
         }
@@ -468,6 +516,25 @@ impl HostBeacon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_address_interface_order_and_duplicates_do_not_change_registry() {
+        let first = BeaconPlan::new(
+            "192.168.30.126".parse().unwrap(),
+            "255.255.255.0".parse().unwrap(),
+        )
+        .unwrap();
+        let second = BeaconPlan::new(
+            "192.168.30.145".parse().unwrap(),
+            "255.255.255.0".parse().unwrap(),
+        )
+        .unwrap();
+        let registry = GatewayListenerRegistry::default();
+        registry.replace(&[first, second]);
+        let original = registry.snapshot();
+        registry.replace(&[second, first, second]);
+        assert_eq!(registry.snapshot(), original);
+    }
 
     #[test]
     fn plan_uses_exact_interface_and_directed_broadcast() {
