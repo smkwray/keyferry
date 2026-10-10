@@ -711,7 +711,10 @@ mod tests {
             parsed(&value)
         };
         assert!(record("2026-10-10").is_ok());
-        assert_eq!(record("2026-1-10").unwrap_err().code(), "recipe.verification");
+        assert_eq!(
+            record("2026-1-10").unwrap_err().code(),
+            "recipe.verification"
+        );
         let mut flag = definition(json!([{"type":"key","keys":["ESCAPE"]}]));
         flag["verified"] = json!(true);
         assert_eq!(parsed(&flag).unwrap_err().code(), "recipe.verification");
