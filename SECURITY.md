@@ -119,7 +119,8 @@ phrases, or a general-purpose secret vault on the dongle.
    shows the machine driven by the stick; device proof alone cannot establish that visual binding.
    Sources are opaque discovered IDs, never caller-supplied network addresses. Frame bodies and OCR
    text stay in memory; no events, logs, histories, or automatic disk writes contain them. Responses
-   bound both axes to 1280 pixels by default, PNG to 5 MiB and JSON to 7 MiB. Request bodies are
+   bound both axes to 1280 pixels by default and to 1920 on request, PNG to 8 MiB and JSON to about
+   11.7 MiB. Request bodies are
    bounded to 4 KiB; each capture service admits one in-flight read, at most ten frame reads/second
    and four camera streams. Discovery is cached for ten seconds and remote discovery waits at most
    four seconds. Missing sources, stale frames, invalid sizes and offline peers fail explicitly.

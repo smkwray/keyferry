@@ -10,6 +10,7 @@ use keyferry_layouts::recipe::{
     routines::{self, Step},
     RecipeV1,
 };
+use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -363,11 +364,11 @@ fn tool_result(value: Value, error: bool) -> Value {
 
 // One schema table governs tool listing AND runtime validation.
 fn tools() -> Vec<Value> {
-    let pixel = json!({"type":"integer","minimum":0,"maximum":frames::MAX_SIDE - 1});
+    let pixel = json!({"type":"integer","minimum":0,"maximum":MAX_SCREENSHOT_SIDE - 1});
     let boolean = json!({"type":"boolean"});
     let button = json!({"type":"string","enum":["left","right","middle"]});
     let region = json!({"type":"object","additionalProperties":false,"required":["x","y","width","height"],
-        "properties":{"x":pixel,"y":pixel,"width":{"type":"integer","minimum":1,"maximum":frames::MAX_SIDE},"height":{"type":"integer","minimum":1,"maximum":frames::MAX_SIDE}}});
+        "properties":{"x":pixel,"y":pixel,"width":{"type":"integer","minimum":1,"maximum":MAX_SCREENSHOT_SIDE},"height":{"type":"integer","minimum":1,"maximum":MAX_SCREENSHOT_SIDE}}});
     let mut result = Vec::new();
     let mut add = |name: &str,
                    description: &str,
@@ -1860,6 +1861,28 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.animation = None;
         self.loaded = true;
         self.require_pointer()?;
+        // Cursor evidence and the fit use native pixels; the binding is then expressed in
+        // the bounded agent view shared by screenshots, OCR boxes and pointer tools.
+        self.frames.request_native(true);
+        let fitted = self.calibrate_native(cancelled);
+        self.frames.request_native(false);
+        let (fitted, mask, mut result) = fitted?;
+        let view = self.frame(cancelled)?;
+        // Also rejects a capture restart between the native probes and this view.
+        let mask = mask.scaled(&view).map_err(failure)?;
+        let fitted = fitted.scaled(view.width, view.height);
+        geometry::save(&self.root, &fitted).map_err(failure)?;
+        self.bound_generation = Some(view.generation);
+        self.geometry = Some(fitted.clone());
+        self.animation = Some((view, mask, Instant::now()));
+        result["geometry"] = json!(fitted);
+        result["active_video_rectangle"] = json!(fitted.active_rectangle());
+        Ok(result)
+    }
+    fn calibrate_native(
+        &mut self,
+        cancelled: &AtomicBool,
+    ) -> Result<(Geometry, frames::MotionMask, Value), Value> {
         let (_, mask) = self.stationary(cancelled)?;
         if !mask.small() {
             return Err(failure("calibration.animated_or_ambiguous"));
@@ -1929,17 +1952,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         {
             return Err(failure("calibration.verification_failed"));
         }
-        geometry::save(&self.root, &fitted).map_err(failure)?;
-        self.bound_generation = Some(after.generation);
-        self.geometry = Some(fitted.clone());
-        self.animation = Some((after.clone(), mask, Instant::now()));
         let latency_ms = receipts
             .iter()
             .filter_map(|r| r["command"]["latency_ms"].as_u64())
             .max();
-        Ok(
-            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"latency_ms":latency_ms,"residual_rms_px":rms,"inlier_samples":inliers,"rejected_samples":positions.len()-2-inliers,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
-        )
+        let result = json!({"bound":true,"probes":receipts,"latency_ms":latency_ms,"calibration_frame":[after.width,after.height],"residual_rms_px":rms,"inlier_samples":inliers,"rejected_samples":positions.len()-2-inliers,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true});
+        Ok((fitted, mask, result))
     }
 }
 

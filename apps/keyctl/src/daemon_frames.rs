@@ -65,6 +65,7 @@ pub(super) struct DaemonFrames {
     inventory: Option<(Instant, Value)>,
     status: Value,
     ocr: bool,
+    native: bool,
     boxes: Option<Vec<TextBox>>,
     epoch: Option<String>,
 }
@@ -84,6 +85,7 @@ impl DaemonFrames {
             inventory: None,
             status: json!({}),
             ocr: false,
+            native: false,
             boxes: None,
             epoch: None,
         }
@@ -219,6 +221,9 @@ impl FrameSource for DaemonFrames {
     fn request_ocr(&mut self, ocr: bool) {
         self.ocr = ocr;
     }
+    fn request_native(&mut self, native: bool) {
+        self.native = native;
+    }
     fn ocr_result(&mut self) -> Option<Vec<TextBox>> {
         self.boxes.take()
     }
@@ -246,7 +251,12 @@ impl FrameSource for DaemonFrames {
             if remaining.is_zero() {
                 return Err("capture.frame_timeout");
             }
-            let request = json!({"device":self.device,"source":self.source,"after":after,"epoch":self.epoch,"ocr":self.ocr,"timeout_ms":remaining.as_millis().clamp(1, keyferry_capture::frames::FRAME_WAIT.as_millis())});
+            // Without max_width the controller serves bounded agent pixels and maps native OCR.
+            let mut request = json!({"device":self.device,"source":self.source,"after":after,"epoch":self.epoch,"ocr":self.ocr,
+                "timeout_ms":remaining.as_millis().clamp(1, keyferry_capture::frames::FRAME_WAIT.as_millis())});
+            if self.native {
+                request["max_width"] = json!(frames::MAX_SIDE);
+            }
             let value = match self.request_with_timeout(
                 "POST",
                 "/v1/capture/frame",
@@ -271,7 +281,7 @@ impl FrameSource for DaemonFrames {
             let decoder = png::Decoder::new_with_limits(
                 io::Cursor::new(png),
                 png::Limits {
-                    bytes: 5 * 1024 * 1024,
+                    bytes: (frames::MAX_SIDE * frames::MAX_SIDE * 3) as usize,
                 },
             );
             let mut reader = decoder.read_info().map_err(|_| "capture.invalid_frame")?;

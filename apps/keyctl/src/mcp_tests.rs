@@ -106,6 +106,27 @@ fn mapping_letterbox_scale_and_overscan() {
 }
 
 #[test]
+fn native_fit_binds_the_agent_view_at_matching_pixel_centres() {
+    // Fitted on a native 1920x1080 frame, used on the 1280x720 agent view.
+    let mut native = frame(1920, 1080, 1);
+    native.native = (1920, 1080);
+    let samples: Vec<_> = [[0.1, 0.2], [0.8, 0.2], [0.2, 0.8], [0.8, 0.7]]
+        .into_iter()
+        .map(|p| (p, [60.0 + 1800.0 * p[0], 30.0 + 1020.0 * p[1]]))
+        .collect();
+    let g = geometry::fit("d", "s", &native, &samples).unwrap();
+    let view = g.scaled(1280, 720);
+    let mut agent = frame(1280, 720, 2);
+    agent.native = (1920, 1080);
+    assert!(view.matches("d", "s", &agent) && !g.matches("d", "s", &agent));
+    for (x, y) in [(61.0, 31.0), (960.5, 540.5), (1858.0, 1048.0)] {
+        let expected = g.map(x, y).unwrap();
+        let p = view.map((x + 0.5) * 2.0 / 3.0 - 0.5, (y + 0.5) * 2.0 / 3.0 - 0.5);
+        assert!((0..2).all(|a| (p.unwrap()[a] - expected[a]).abs() < 1e-9));
+    }
+}
+
+#[test]
 fn cursor_differencing_synthetic_and_ambiguity() {
     let a = cursor_frame([0.1, 0.1], 1);
     let b = cursor_frame([0.7, 0.2], 2);

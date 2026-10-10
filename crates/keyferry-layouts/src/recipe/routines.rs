@@ -1,5 +1,6 @@
 //! Host-side routines in the existing recipe format. No I/O, history or input retries.
 use super::*;
+use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use serde_json::json;
 
 pub const MAX_STEPS: usize = 256;
@@ -517,7 +518,10 @@ pub fn validate_definition(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
                 &steps[begin..i],
                 recipe.timing,
                 recipe.start_within_ms.unwrap_or(5000),
-                &mut |x, y| Ok([f64::from(x) / 1279.0, f64::from(y) / 1279.0]),
+                &mut |x, y| {
+                    let last = f64::from(MAX_SCREENSHOT_SIDE - 1);
+                    Ok([f64::from(x) / last, f64::from(y) / last])
+                },
                 None,
             )? {
                 planned_ms += part.planned_ms;
@@ -699,7 +703,7 @@ fn substitute_step(
 }
 
 fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
-    let pixel = |n: u32| n < 1280;
+    let pixel = |n: u32| n < MAX_SCREENSHOT_SIDE;
     let (timeout, region) = match step {
         Step::Repeat {
             count,
@@ -783,8 +787,8 @@ fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
         || region.is_some_and(|r| {
             r.width == 0
                 || r.height == 0
-                || r.x.saturating_add(r.width) > 1280
-                || r.y.saturating_add(r.height) > 1280
+                || r.x.saturating_add(r.width) > MAX_SCREENSHOT_SIDE
+                || r.y.saturating_add(r.height) > MAX_SCREENSHOT_SIDE
         })
     {
         return Err(RecipeError::new("recipe.checkpoint"));
@@ -955,7 +959,7 @@ mod tests {
             json!([{"type":"expect_text","query":"ok","timeout_ms":100,"on_fail":"retry"}]),
             json!([{"type":"secure_text","text":"never-echo-this"}]),
             json!([{"type":"wait","ms":0}]),
-            json!([{"type":"move","x":1280,"y":0}]),
+            json!([{"type":"move","x":MAX_SCREENSHOT_SIDE,"y":0}]),
         ] {
             assert!(parsed(&definition(steps)).is_err());
         }

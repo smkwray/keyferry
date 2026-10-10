@@ -33,6 +33,20 @@ impl Geometry {
             (bottom - y + 1.0).max(0.0),
         ]
     }
+    /// The same binding in a proportionally scaled view of the fitted frame. Pixel centres
+    /// correspond: view coordinate u covers fitted coordinate (u + 0.5) / s - 0.5.
+    pub fn scaled(&self, width: u32, height: u32) -> Geometry {
+        let s = [
+            f64::from(width) / f64::from(self.screenshot.0),
+            f64::from(height) / f64::from(self.screenshot.1),
+        ];
+        Geometry {
+            screenshot: (width, height),
+            origin: [0, 1].map(|a| (self.origin[a] + 0.5) * s[a] - 0.5),
+            extent: [0, 1].map(|a| self.extent[a] * s[a]),
+            ..self.clone()
+        }
+    }
     pub fn matches(&self, device: &str, source: &str, f: &Frame) -> bool {
         self.schema == "keyferry.capture-geometry.v1"
             && self.device == device
