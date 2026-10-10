@@ -108,19 +108,33 @@ fn fake_ffmpeg(mode: &str) {
     let mut width = 2;
     let mut height = 1;
     for pair in args.windows(2) {
-        if pair[0] == "-video_size" || (pair[0] == "-vf" && pair[1].contains("scale=")) {
-            let size = pair[1].trim_start_matches("fps=5,scale=");
-            let (w, h) = size
-                .split_once(if pair[0] == "-vf" { ':' } else { 'x' })
-                .unwrap();
+        if pair[0] == "-video_size" {
+            let (w, h) = pair[1].split_once('x').unwrap();
             width = w.parse().unwrap();
             height = h.parse().unwrap();
+        } else if pair[0] == "-vf" {
+            if let Some((_, size)) = pair[1].split_once(",scale=") {
+                let mut axes = size.split(':');
+                // Numeric resize followed by flags; expression bounds leave this tiny fixture
+                // unchanged, just as they leave a real frame smaller than the bound unchanged.
+                if let (Ok(w), Ok(h)) = (
+                    axes.next().unwrap().parse::<u32>(),
+                    axes.next().unwrap().parse::<u32>(),
+                ) {
+                    width = w;
+                    height = h;
+                }
+            }
         }
     }
     let mut out = io::stdout().lock();
     for n in 0..400 {
-        let value = if mode == "warmup" && n >= 3 {
-            118
+        let value = if mode == "warmup" {
+            if n >= 3 {
+                118
+            } else {
+                0
+            }
         } else if mode == "ok" {
             0
         } else {
