@@ -52,14 +52,24 @@ def main():
         if result.returncode or result.stdout.strip() != "iTerm2":
             raise RuntimeError("iTerm focus could not be verified")
 
-    def ready():
-        result = run([args.keyctl, "status", args.device], timeout=15)
-        if result.returncode:
-            raise RuntimeError("exact-device status unavailable")
-        row = json.loads(result.stdout)
-        if (row["link"] != "authenticated" or row["armed"] or row.get("active_command_id")
-                or row.get("firmware", {}).get("board_compatibility_id") != 1):
-            raise RuntimeError("requires authenticated, disarmed, idle Waveshare")
+    def ready(index=None, wait=0.0):
+        # Another controller may share the stick; wait a bounded time for it to go idle.
+        started = time.perf_counter()
+        while True:
+            result = run([args.keyctl, "status", args.device], timeout=15)
+            if result.returncode:
+                raise RuntimeError("exact-device status unavailable")
+            row = json.loads(result.stdout)
+            if row["link"] != "authenticated" or row.get("firmware", {}).get(
+                    "board_compatibility_id") != 1:
+                raise RuntimeError("requires authenticated Waveshare")
+            if not row["armed"] and not row.get("active_command_id"):
+                break
+            if time.perf_counter() - started > wait:
+                raise RuntimeError("requires disarmed, idle Waveshare")
+            time.sleep(0.5)
+        if index is not None and time.perf_counter() - started > 1:
+            emit(sample=index, waited_for_idle_seconds=round(time.perf_counter() - started, 3))
         if row.get("link_path") != "tailnet":
             raise RuntimeError("probe requires a forwarded tailnet route")
         return row
@@ -104,7 +114,7 @@ def main():
             for index in range(1, args.shift_taps + 1):
                 if index % args.reverify_every == 0:
                     time.sleep(args.reverify_gap)
-                ready()
+                ready(index, wait=15.0)
                 command(index, "sequence", shift)
             emit(completed=args.shift_taps, operation="shift_tap")
         finally:
