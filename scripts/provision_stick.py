@@ -373,7 +373,13 @@ class Rom:
         self.backend.cmds.reset_chip(self.esp, "hard-reset")
 
     def close(self):
-        self.esp.__exit__(None, None, None)
+        try:
+            self.esp.__exit__(None, None, None)
+        finally:
+            # Release the COM handle so automatic ROM re-entry can reopen it in-process.
+            port = getattr(self.esp, "_port", None)
+            if port is not None and getattr(port, "is_open", False):
+                port.close()
 
 
 def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=print, new_device=False, port=None):
