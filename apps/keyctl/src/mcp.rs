@@ -542,6 +542,31 @@ struct Server<F: FrameSource, O: Ocr> {
     animation: Option<(Arc<Frame>, frames::MotionMask, Instant)>,
     observed_latency: Duration,
     last_observed: Option<Arc<Frame>>,
+    lease: Option<(String, std::fs::File)>,
+}
+
+/// One agent per stick on this controller: an OS file lock the system releases on exit or crash.
+fn device_lease(root: &Path, device: &str) -> Result<std::fs::File, Value> {
+    if device.is_empty()
+        || !device
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(failure("device.select_required"));
+    }
+    let directory = root.join("device-leases");
+    std::fs::create_dir_all(&directory).map_err(|_| failure("device.lease_unavailable"))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join(format!("{device}.lock")))
+        .map_err(|_| failure("device.lease_unavailable"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(failure("device.in_use_by_other_agent")),
+        Err(_) => Err(failure("device.lease_unavailable")),
+    }
 }
 
 impl<F: FrameSource, O: Ocr> Server<F, O> {
@@ -579,6 +604,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             animation: None,
             observed_latency: SETTLE,
             last_observed: None,
+            lease: None,
         }
     }
     fn dispatch(&mut self, request: Value, cancelled: &AtomicBool) -> Option<Value> {
@@ -671,23 +697,35 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.get_json("/v1/devices")
     }
     fn choose_device(&mut self) -> Result<(), Value> {
+        // A lost automatic choice never re-arms: the only remaining stick may be another agent's.
+        if self.device_choice == "lost" {
+            return Err(failure("device.select_required"));
+        }
         if self.device.is_empty() || self.device_choice.starts_with("automatic") {
             let inventory = self.devices()?;
             let chosen = automatic_device(&inventory)?;
             if self.device.is_empty() {
                 if let Some((id, why)) = chosen {
+                    self.lease(&id)?;
                     self.device = id;
                     self.device_choice = why;
                 }
             } else if chosen.as_ref().is_none_or(|(id, _)| id != &self.device) {
                 self.device.clear();
-                self.device_choice = "unselected";
+                self.device_choice = "lost";
+                self.lease = None;
                 self.clear_binding();
                 return Err(failure("device.select_required"));
             }
         }
         if self.device.is_empty() {
             return Err(failure("device.select_required"));
+        }
+        self.lease(&self.device.clone())
+    }
+    fn lease(&mut self, device: &str) -> Result<(), Value> {
+        if self.lease.as_ref().is_none_or(|(held, _)| held != device) {
+            self.lease = Some((device.to_owned(), device_lease(&self.root, device)?));
         }
         Ok(())
     }
@@ -858,6 +896,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                 }) {
                     return Err(failure("device.not_authenticated_or_authorized"));
                 }
+                self.lease(id)?;
                 self.device = id.into();
                 self.device_choice = "selected";
                 self.clear_binding();
