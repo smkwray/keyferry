@@ -1,7 +1,8 @@
 //! `keyferry.recipe.v1`: an explicitly saved, parameterized input plan (`protocol/recipe-v1.md`).
 //!
-//! Pure: no I/O and no clock. A recipe expands to one ordinary keyboard or input sequence and
-//! compiles through the production compilers, so it never gains authority a hand-written
+//! Pure: no I/O and no clock. Legacy actions expand to one sequence; routines compile contiguous
+//! input stretches around host checkpoints through the same production compilers, so neither
+//! gains authority a hand-written
 //! sequence lacks. Errors are stable codes with at most a parameter index; they never carry
 //! parameter values, action bodies, key arrays, or source JSON.
 
@@ -17,6 +18,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
+
+pub mod routines;
 
 /// The recipe and parameter-object size cap; a reader needs one byte more to let [`parse`] and
 /// [`parse_params`] report an oversize input.
@@ -83,6 +86,8 @@ impl std::error::Error for RecipeError {}
 #[serde(rename_all = "lowercase")]
 pub enum ParameterKind {
     Text,
+    Integer,
+    Secure,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -93,6 +98,16 @@ pub struct RecipeParameter {
     pub kind: ParameterKind,
     #[serde(default)]
     max_chars: Option<u64>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub minimum: Option<i64>,
+    #[serde(default)]
+    pub maximum: Option<i64>,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl RecipeParameter {
@@ -118,10 +133,25 @@ pub struct RecipeV1 {
     timing: Option<InputKeyboardTiming>,
     #[serde(default)]
     start_within_ms: Option<u64>,
+    #[serde(default)]
     actions: Vec<Value>,
+    #[serde(default)]
+    steps: Vec<Value>,
+    #[serde(default)]
+    pub target_os: Option<routines::TargetOs>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub verified: Option<routines::Verification>,
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 impl RecipeV1 {
+    #[must_use]
+    pub fn is_routine(&self) -> bool {
+        !self.steps.is_empty()
+    }
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -168,6 +198,7 @@ impl fmt::Debug for Params {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Route {
+    Routine,
     /// `POST /v1/devices/{id}/sequences`: keyboard-only, valid in every output mode.
     Sequences,
     /// `POST /v1/devices/{id}/input-sequences`: any pointer action; requires `MOUSE_RELATIVE_V1`.
@@ -178,6 +209,7 @@ impl Route {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Routine => "routine",
             Self::Sequences => "sequences",
             Self::InputSequences => "input-sequences",
         }
@@ -186,6 +218,7 @@ impl Route {
     #[must_use]
     pub const fn path(self) -> &'static str {
         match self {
+            Self::Routine => "",
             Self::Sequences => "/sequences",
             Self::InputSequences => "/input-sequences",
         }
@@ -269,6 +302,9 @@ pub fn parse(bytes: &[u8]) -> Result<RecipeV1, RecipeError> {
     if contains_null(&value) {
         return Err(RecipeError::new("recipe.schema"));
     }
+    if value.get("actions").is_some() == value.get("steps").is_some() {
+        return Err(RecipeError::new("recipe.schema"));
+    }
     let recipe: RecipeV1 =
         serde_json::from_value(value).map_err(|_| RecipeError::new("recipe.schema"))?;
     if recipe.schema != RECIPE_SCHEMA_V1 {
@@ -301,6 +337,34 @@ pub fn parse(bytes: &[u8]) -> Result<RecipeV1, RecipeError> {
             return Err(RecipeError::at("recipe.parameter_max_chars", index));
         }
     }
+    if recipe.is_routine() {
+        routines::validate_definition(&recipe)?;
+        return Ok(recipe);
+    }
+    if !recipe.steps.is_empty()
+        || recipe.actions.is_empty()
+        || recipe.target_os.is_some()
+        || !recipe.tags.is_empty()
+        || recipe.verified.is_some()
+        || recipe.author.is_some()
+        || recipe.parameters.iter().any(|p| {
+            p.kind != ParameterKind::Text
+                || p.description.is_some()
+                || p.pattern.is_some()
+                || p.minimum.is_some()
+                || p.maximum.is_some()
+                || p.optional
+        })
+    {
+        return Err(RecipeError::new("recipe.schema"));
+    }
+    if let Some(i) = recipe
+        .parameters
+        .iter()
+        .position(|p| routines::secret_name(&p.name))
+    {
+        return Err(RecipeError::at("recipe.secret_parameter", i));
+    }
     let placeholders = vec!["a".to_owned(); recipe.parameters.len()];
     let mut used = vec![false; recipe.parameters.len()];
     build_actions(&recipe, &placeholders, &mut used)?;
@@ -321,6 +385,9 @@ pub fn check_file_stem(recipe: &RecipeV1, stem: &str) -> Result<(), RecipeError>
 /// Worst-case compilation: every parameter at its `max_chars` of [`WORST_CASE_CHARACTER`]. A
 /// passing recipe cannot exceed a command limit or the body size with any allowed parameter value.
 pub fn validate(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
+    if recipe.is_routine() {
+        return routines::validate_definition(recipe);
+    }
     let values: Vec<String> = recipe
         .parameters
         .iter()
@@ -353,6 +420,9 @@ pub fn expand(
     unsupported: UnsupportedTextPolicy,
     command_id: &str,
 ) -> Result<Expanded, RecipeError> {
+    if recipe.is_routine() {
+        return Err(RecipeError::new("recipe.routine_executor_required"));
+    }
     validate(recipe)?;
     if params.0.keys().any(|key| {
         !recipe
@@ -1388,7 +1458,10 @@ mod tests {
             schema["$defs"]["text_action"]["properties"]["param"]["pattern"],
             name_pattern
         );
-        assert_eq!(parameter["type"]["const"], "text");
+        assert_eq!(
+            parameter["type"]["enum"],
+            serde_json::json!(["text", "integer", "secure"])
+        );
         assert_eq!(parameter["max_chars"]["maximum"], MAX_PARAMETER_CHARS);
         assert_eq!(parameter["max_chars"]["default"], DEFAULT_PARAMETER_CHARS);
 

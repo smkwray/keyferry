@@ -10,6 +10,7 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+regex = { version = "=1.13.1", default-features = false, features = ["std", "perf"] }
 keyferry-protocol = { path = "../keyferry-protocol" }
 serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

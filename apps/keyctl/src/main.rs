@@ -99,6 +99,10 @@ fn main() -> ExitCode {
         SERVICE_START_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::run(&args[1..], &url, &token_file));
     }
+    if args[0] == "routine" {
+        SERVICE_START_SETTLED.store(true, Ordering::Release);
+        return ExitCode::from(recipe::routine_cli(&args[1..], &url, &token_file));
+    }
     if args[0] == "capture" && args.get(1).is_some_and(|s| s == "calibrate") {
         SERVICE_START_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::calibrate_cli(&args[2..], &url, &token_file));
@@ -319,30 +323,40 @@ fn request_secure_text(args: &[String], url: &str, token_file: &Path) -> u8 {
         return 20;
     };
     let endpoint = match parse_endpoint(url) {
-        Ok(endpoint) if loopback_address(&endpoint).is_some() => endpoint,
+        Ok(e) if loopback_address(&e).is_some() => e,
         _ => {
-            emit_json_line(&serde_json::json!({"outcome": "REJECTED", "error": "input.url"}));
+            emit_json_line(&serde_json::json!({"outcome":"REJECTED","error":"input.url"}));
             return 20;
         }
     };
-    let token = match service_token(&endpoint, token_file) {
-        Ok(token) => token,
-        Err(_) => {
-            emit_json_line(
-                &serde_json::json!({"outcome": "REJECTED", "error": "daemon.unavailable"}),
-            );
-            return 23;
-        }
-    };
-    // Reuse the ordinary CLI connection path, including starting the installed service once if needed.
-    if (Client { endpoint, token })
-        .request("GET", &format!("/v1/devices/{device}"), None)
-        .is_err()
-    {
-        emit_json_line(&serde_json::json!({"outcome": "REJECTED", "error": "daemon.unavailable"}));
+    if service_token(&endpoint, token_file).is_err() {
+        emit_json_line(&serde_json::json!({"outcome":"REJECTED","error":"daemon.unavailable"}));
         return 23;
     }
-    let Some(program) = env::current_exe()
+    match secure_text_request(&device.to_string(), url, token_file) {
+        Ok(value) => {
+            emit_json_line(&value);
+            0
+        }
+        Err(code) => {
+            emit_json_line(&serde_json::json!({"outcome":"REJECTED","error":code}));
+            23
+        }
+    }
+}
+
+/// Only requests the separate owner dialog. Never waits on or receives its content.
+fn secure_text_request(device: &str, url: &str, token_file: &Path) -> Result<Value, &'static str> {
+    let device = uuid::Uuid::parse_str(device).map_err(|_| "input.device_uuid")?;
+    let endpoint = parse_endpoint(url).map_err(|_| "input.url")?;
+    if loopback_address(&endpoint).is_none() {
+        return Err("input.url");
+    }
+    let token = load_token(token_file).map_err(|_| "daemon.unavailable")?;
+    (Client { endpoint, token })
+        .request("GET", &format!("/v1/devices/{device}"), None)
+        .map_err(|_| "daemon.unavailable")?;
+    let program = env::current_exe()
         .ok()
         .and_then(|path| {
             path.parent().map(|parent| {
@@ -353,33 +367,18 @@ fn request_secure_text(args: &[String], url: &str, token_file: &Path) -> u8 {
                 })
             })
         })
-        .filter(|program| program.is_file())
-    else {
-        emit_json_line(&serde_json::json!({"outcome": "REJECTED", "error": "dialog.unavailable"}));
-        return 23;
-    };
-    let result = keyferry_core::process::command(program)
+        .filter(|p| p.is_file())
+        .ok_or("dialog.unavailable")?;
+    keyferry_core::process::command(program)
         .args(["--secure-text", &device.to_string()])
         .env("KEYFERRY_URL", url)
         .env("KEYFERRY_TOKEN_FILE", token_file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-    match result {
-        Ok(_) => {
-            emit_json_line(
-                &serde_json::json!({"device_id": device.to_string(), "outcome": "REQUESTED", "input_sent": false}),
-            );
-            0
-        }
-        Err(_) => {
-            emit_json_line(
-                &serde_json::json!({"outcome": "REJECTED", "error": "dialog.unavailable"}),
-            );
-            23
-        }
-    }
+        .spawn()
+        .map_err(|_| "dialog.unavailable")?;
+    Ok(serde_json::json!({"device_id":device.to_string(),"outcome":"REQUESTED","input_sent":false}))
 }
 
 fn loopback_address(endpoint: &Endpoint) -> Option<std::net::SocketAddr> {
@@ -1225,7 +1224,7 @@ fn default_recipe_dir() -> PathBuf {
 }
 
 fn help_text() -> &'static str {
-    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  mcp [--device UUID] [--source NAME_OR_ID]  (stdio agent KVM tools; mcp --help)\n  capture calibrate DEVICE [--source NAME_OR_ID]  (cursor binding and geometry; moves pointer)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
+    "keyctl [--url http://127.0.0.1:8042] [--token-file PATH] <command>\n  devices | list | status [DEVICE]  (exact selected-device status when DEVICE is given)\n  capabilities  (read local daemon capabilities)\n  mcp [--device UUID] [--source NAME_OR_ID]  (stdio agent KVM tools; mcp --help)\n  capture calibrate DEVICE [--source NAME_OR_ID]  (cursor binding and geometry; moves pointer)\n  capture list  (local HDMI/UVC video devices; no daemon)\n  capture frame --out PATH [--source NAME_OR_ID] [--size WxH] [--scale WxH]\n  capture --help  (privacy, camera permissions, timeout and exit codes)\n  file DEVICE PATH  (publish one read-only MESSAGE.TXT)\n  files DEVICE PATH...  (replace USB drive with 1..16 named files, 256 KiB total; requires v2 firmware)\n  file-status DEVICE  (list files on v2 firmware)\n  file-clear DEVICE  (clear whole USB file set)\n  keys  (local machine-readable canonical key registry and aliases such as COMMAND/CMD, OPTION/OPT)\n  secure-text DEVICE_UUID  (request a masked, expiring human dialog here; no text in arguments/stdin)\n  type DEVICE [--key-gap-ms N] [--key-down-ms N] [--send-after-seconds N] [--detach]\n  type --help  (text is read only from stdin)\n  stream DEVICE --input FILE [--validate]  (unbounded file-backed text stream)\n  stream --help\n  actions DEVICE  (JSON is read from stdin)\n  sequence DEVICE [--input json] [--detach]  (JSON is read from stdin)\n  sequence --help | --example | --validate  (local; no device contact)\n  input-sequence DEVICE [--input PATH] [--detach]\n  input-sequence --describe | --validate [--input PATH]  (local; no device contact)\n  routine list | run DEVICE NAME | save PATH [--replace] | validate NAME  (shared recipes; routine --help)\n  recipe --help | --example  (local; no device contact)\n  recipe list | inspect NAME | validate NAME | validate --input PATH  (local saved sequences; no device contact)\n  recipe import PATH [--replace]  (validate and save; the only library writer)\n  recipe run DEVICE NAME [--unsupported reject|replace] [--detach]  (parameters: one JSON object on stdin)\n  local-status --owner-kit PATH [--device UUID]  (direct USB; exact UUID for multi-device kits; password from stdin)\n  local-probe --owner-kit PATH [--device UUID] [--samples N]  (read-only USB probe metadata; passphrase from stdin)\n  local-recover --owner-kit PATH [--device UUID] ACTION  (exact USB stick; password from stdin; restart-network|forget-bluetooth|cancel-enrollment|usb-hid|ble-hid|reboot; some actions restart the stick; UNKNOWN is never retried automatically)\n  output-mode DEVICE [usb-hid|ble-hid]  (read or persist output; a change restarts the stick)\n  display-orientation DEVICE [normal|rotated-180]  (read or persist LCD orientation; a change restarts the stick)\n  screen-power DEVICE [on|off]  (read or persist live LCD power)\n  maintenance DEVICE begin|finish  (pause/resume exact local stick around direct USB policy work)\n  forget-bluetooth DEVICE  (forget Bluetooth keyboard output bond; distinct from USB local-recover forget-bluetooth; restarts into pairing)\n  arm DEVICE [command-scoped|temporary|always-ready]\n  disarm DEVICE\n  cancel DEVICE [COMMAND_ID]\n  outcome DEVICE COMMAND_ID\n  events"
 }
 
 fn run_local_helper(args: &[String]) -> u8 {
