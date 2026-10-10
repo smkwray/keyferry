@@ -1,4 +1,8 @@
-"""Bounded typing probe: random alphanumeric text, no Enter, metadata-only evidence."""
+"""Bounded typing probe: random alphanumeric text, no Enter, metadata-only evidence.
+
+With --shift-taps N it instead sends N single Shift taps (no text, no focus change, no Mac
+access), each right after an exact-device status read, waiting --reverify-gap seconds before
+every --reverify-every'th tap so the status read re-proves an aged holder first."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -13,8 +17,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keyctl", required=True)
     parser.add_argument("--device", required=True)
-    parser.add_argument("--focus-host", required=True, help="Authorized Mac hosting the USB target")
+    parser.add_argument("--focus-host", help="Authorized Mac hosting the USB target")
+    parser.add_argument("--shift-taps", type=int, default=0)
+    parser.add_argument("--reverify-every", type=int, default=3)
+    parser.add_argument("--reverify-gap", type=float, default=31.0)
     args = parser.parse_args()
+    if not args.shift_taps and not args.focus_host:
+        parser.error("--focus-host is required for the typing probe")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     output_lock = threading.Lock()
 
@@ -43,14 +52,24 @@ def main():
         if result.returncode or result.stdout.strip() != "iTerm2":
             raise RuntimeError("iTerm focus could not be verified")
 
-    def ready():
-        result = run([args.keyctl, "status", args.device], timeout=15)
-        if result.returncode:
-            raise RuntimeError("exact-device status unavailable")
-        row = json.loads(result.stdout)
-        if (row["link"] != "authenticated" or row["armed"] or row.get("active_command_id")
-                or row.get("firmware", {}).get("board_compatibility_id") != 1):
-            raise RuntimeError("requires authenticated, disarmed, idle Waveshare")
+    def ready(index=None, wait=0.0):
+        # Another controller may share the stick; wait a bounded time for it to go idle.
+        started = time.perf_counter()
+        while True:
+            result = run([args.keyctl, "status", args.device], timeout=15)
+            if result.returncode:
+                raise RuntimeError("exact-device status unavailable")
+            row = json.loads(result.stdout)
+            if row["link"] != "authenticated" or row.get("firmware", {}).get(
+                    "board_compatibility_id") != 1:
+                raise RuntimeError("requires authenticated Waveshare")
+            if not row["armed"] and not row.get("active_command_id"):
+                break
+            if time.perf_counter() - started > wait:
+                raise RuntimeError("requires disarmed, idle Waveshare")
+            time.sleep(0.5)
+        if index is not None and time.perf_counter() - started > 1:
+            emit(sample=index, waited_for_idle_seconds=round(time.perf_counter() - started, 3))
         if row.get("link_path") != "tailnet":
             raise RuntimeError("probe requires a forwarded tailnet route")
         return row
@@ -85,9 +104,25 @@ def main():
     clear = json.dumps(dict(schema="keyferry.keyboard-sequence.v1", profile="windows-us",
                            arm="command-scoped", start_within_ms=5000,
                            actions=[dict(type="chord", keys=["LEFT_CONTROL", "U"])]))
+    observer = threading.Thread(target=observe, daemon=True)
+    if args.shift_taps:
+        shift = json.dumps(dict(schema="keyferry.keyboard-sequence.v1", profile="windows-us",
+                                arm="command-scoped", start_within_ms=5000,
+                                actions=[dict(type="tap", key="LEFT_SHIFT")]))
+        observer.start()
+        try:
+            for index in range(1, args.shift_taps + 1):
+                if index % args.reverify_every == 0:
+                    time.sleep(args.reverify_gap)
+                ready(index, wait=15.0)
+                command(index, "sequence", shift)
+            emit(completed=args.shift_taps, operation="shift_tap")
+        finally:
+            stop.set()
+            observer.join(timeout=16)
+        return
     ready()
     focus()
-    observer = threading.Thread(target=observe, daemon=True)
     observer.start()
     try:
         command(0, "sequence", clear)
