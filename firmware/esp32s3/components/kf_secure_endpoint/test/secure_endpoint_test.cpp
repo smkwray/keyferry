@@ -282,10 +282,12 @@ void TestConfigurationValidation() {
       keyferry::endpoint::kLilygoTDongleS3CompatibilityId;
   assert(keyferry::endpoint::ValidateFirmwareIdentity(identity));
   identity.board_compatibility_id = 3;
+  assert(keyferry::endpoint::ValidateFirmwareIdentity(identity));
+  identity.board_compatibility_id = 4;
   assert(!keyferry::endpoint::ValidateFirmwareIdentity(identity));
 }
 
-void TestHandshakeAndControlBoundary() {
+void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   std::array<std::uint8_t, 16> device_id{};
   for (std::size_t index = 0; index < device_id.size(); ++index) {
     device_id[index] = static_cast<std::uint8_t>(0x20 + index);
@@ -301,8 +303,7 @@ void TestHandshakeAndControlBoundary() {
   FirmwareIdentity identity{};
   const std::array<std::uint8_t, 5> release{'0', '.', '1', '.', '0'};
   std::copy(release.begin(), release.end(), identity.release.begin());
-  identity.board_compatibility_id =
-      keyferry::endpoint::kWaveshareGeekV1_1CompatibilityId;
+  identity.board_compatibility_id = board_id;
   identity.mouse_relative_v1 = true;
   identity.ble_hid_output_v1 = true;
   identity.targeted_gateway_transfer_v1 = true;
@@ -399,7 +400,7 @@ void TestHandshakeAndControlBoundary() {
           static_cast<std::uint32_t>(
               keyferry::protocol::Capability::kLocalManagementV1)));
   assert(std::equal(release.begin(), release.end(), identity_response.payload + 8));
-  assert(identity_response.payload[40] == 1 && identity_response.payload[44] == 1);
+  assert(identity_response.payload[40] == board_id && identity_response.payload[44] == 1);
   assert(std::equal(identity.elf_sha256.begin(), identity.elf_sha256.end(),
                     identity_response.payload + 45));
 
@@ -723,6 +724,7 @@ int main(int argc, char** argv) {
   std::puts("test: handshake-control");
   std::fflush(stdout);
   TestHandshakeAndControlBoundary();
+  TestHandshakeAndControlBoundary(3);
   std::puts("test: malformed-oversize");
   std::fflush(stdout);
   TestMalformedAndOversizeFailClosed();

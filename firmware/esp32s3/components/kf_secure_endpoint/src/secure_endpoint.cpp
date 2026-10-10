@@ -152,7 +152,8 @@ bool ValidateFirmwareIdentity(const FirmwareIdentity& identity) {
   const auto terminator = std::find(identity.release.begin(), identity.release.end(), 0);
   const bool known_board =
       identity.board_compatibility_id == kWaveshareGeekV1_1CompatibilityId ||
-      identity.board_compatibility_id == kLilygoTDongleS3CompatibilityId;
+      identity.board_compatibility_id == kLilygoTDongleS3CompatibilityId ||
+      identity.board_compatibility_id == kM5stackAtomS3LiteCompatibilityId;
   if (terminator == identity.release.begin() || terminator == identity.release.end() ||
       !known_board ||
       !AnyNonzero(identity.elf_sha256.data(), identity.elf_sha256.size())) {
