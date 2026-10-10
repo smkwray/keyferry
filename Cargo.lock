@@ -2717,6 +2717,7 @@ dependencies = [
 name = "keyferry-capture"
 version = "0.0.0"
 dependencies = [
+ "image",
  "keyferry-core",
  "png",
  "serde",

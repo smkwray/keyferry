@@ -163,11 +163,11 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
         assert!(!values.iter().any(|arg| arg == "-frames:v"));
         assert!(values
             .windows(2)
-            .any(|pair| pair == ["-vf", "fps=5,scale=960:540"]));
+            .any(|pair| pair == ["-vf", "fps=15,scale=960:540:flags=fast_bilinear"]));
         assert_eq!(values.last().unwrap(), "pipe:1");
         assert!(!values.iter().any(|value| value.contains("private.png")));
         if backend == Backend::Dshow {
-            assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "16M"]));
+            assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "4M"]));
         }
     }
 }

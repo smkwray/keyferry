@@ -37,6 +37,7 @@ struct FakeFrames {
     visible: Visual,
     delay: Duration,
     animate: bool,
+    busy: bool,
     never_change: bool,
     started: Instant,
 }
@@ -60,6 +61,7 @@ impl FakeFrames {
             },
             delay: Duration::ZERO,
             animate: false,
+            busy: false,
             never_change: false,
             started: Instant::now(),
         }
@@ -132,6 +134,20 @@ impl FrameSource for FakeFrames {
                         let i = (y * f.width + x) as usize * 3;
                         f.rgb[i..i + 3].fill(value);
                     }
+                }
+            }
+        }
+        if self.busy {
+            // Notification panel plus a late-changing unlearned glyph, away from probe targets.
+            let value = if (self.started.elapsed().as_millis() / 200).is_multiple_of(2) {
+                200
+            } else {
+                60
+            };
+            for y in 25..85 {
+                for x in 270..310 {
+                    let i = (y * f.width + x) as usize * 3;
+                    f.rgb[i..i + 3].fill(value);
                 }
             }
         }
@@ -228,7 +244,7 @@ fn dispatch_lifecycle_schema_and_duplicate_id_no_replay() {
             &c,
         )
         .unwrap();
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 16);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
     for tool in tools() {
         assert!(
             validate(&json!({}), &tool["inputSchema"])
@@ -322,6 +338,109 @@ fn cursor_differencing_synthetic_and_ambiguity() {
 }
 
 #[test]
+fn robust_fit_rejects_two_outliers_and_reports_pixel_residuals() {
+    let f = frame(320, 240, 1);
+    let mut samples: Vec<_> = [
+        [0.12, 0.15],
+        [0.80, 0.20],
+        [0.25, 0.78],
+        [0.73, 0.72],
+        [0.45, 0.42],
+        [0.60, 0.60],
+    ]
+    .into_iter()
+    .map(|p| (p, [20.0 + 280.0 * p[0], 30.0 + 180.0 * p[1]]))
+    .collect();
+    samples[0].1 = [280.0, 200.0];
+    samples[5].1 = [5.0, 5.0];
+    let (g, inliers, rms) = geometry::robust_fit("d", "s", &f, &samples).unwrap();
+    assert_eq!(inliers, 4);
+    assert!(rms < 0.001);
+    assert!((g.extent[0] - 280.0).abs() < 0.001);
+    samples[1].1 = [5.0, 5.0];
+    assert!(geometry::robust_fit("d", "s", &f, &samples).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_desktop_calibration_and_moves_use_the_production_path() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    s.frames.busy = true;
+    s.frames.animate = true;
+    s.frames.delay = Duration::from_millis(250);
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c=AtomicBool::new(false);
+        let calibration=s.dispatch(json!({"jsonrpc":"2.0","id":"busy-calibration","method":"tools/call","params":{"name":"calibrate","arguments":{}}}),&c).unwrap();
+        assert_eq!(calibration["result"]["isError"],false,"{calibration}");
+        assert!(calibration["result"]["structuredContent"]["residual_rms_px"].as_f64().unwrap()<1.0);
+        s.call("screenshot",&json!({}),&c).unwrap();
+        for (i,(x,y)) in [(100,130),(200,160)].into_iter().enumerate() {
+            let start=Instant::now();
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":format!("move-{i}"),"method":"tools/call","params":{"name":"move","arguments":{"x":x,"y":y,"format":"jpeg"}}}),&c).unwrap();
+            assert_eq!(response["result"]["isError"],false,"{response}");
+            let result=&response["result"]["structuredContent"];
+            assert_eq!(result["settled"],true,"{result}");
+            assert_eq!(result["settle_method"],"cursor-at-target");
+            assert!(start.elapsed()<Duration::from_millis(1000));
+            // Delay begins at admission; latency_ms begins after the EMITTED receipt.
+            assert!(start.elapsed()>=Duration::from_millis(250));
+            assert!(result["latency_ms"].as_u64().unwrap()>0);
+            assert_eq!(response["result"]["content"][0]["mimeType"],"image/jpeg");
+            let id=uuid::Uuid::parse_str(result["command"]["command_id"].as_str().unwrap()).unwrap();
+            assert_eq!(transport.execution_count(id),1);
+        }
+        // A newly appearing panel outside the action ROI cannot prolong a settled click.
+        s.animation.as_mut().unwrap().1 = frames::MotionMask::new(s.last_observed.as_ref().unwrap());
+        let clicked = s.call("click", &json!({"x":100,"y":150,"format":"png"}), &c).unwrap();
+        assert_eq!(clicked["structuredContent"]["settled"],true);
+        assert_eq!(clicked["structuredContent"]["settle_region"]["width"],256);
+        assert_eq!(clicked["content"][0]["mimeType"],"image/png");
+    }).await.unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
+    for fault in [false, true] {
+        let faults = if fault {
+            vec![SimulationFault::LostAfterStart]
+        } else {
+            vec![]
+        };
+        let (mut s, transport, _, task) = harness(faults, true).await;
+        let root = s.root.clone();
+        tokio::task::spawn_blocking(move || {
+            init(&mut s);
+            let c=AtomicBool::new(false);
+            s.call("screenshot",&json!({}),&c).unwrap();
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":"batch","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"move","arguments":{"x":200,"y":160,"uncalibrated":true}}]}}}),&c).unwrap();
+            let result=&response["result"]["structuredContent"];
+            assert_eq!(response["result"]["isError"],fault,"{response}");
+            assert_eq!(result["actions"].as_array().unwrap().len(),if fault {1} else {2});
+            assert_eq!(response["result"]["content"].as_array().unwrap().iter().filter(|c|c["type"]=="image").count(),1);
+            for action in result["actions"].as_array().unwrap() {
+                let command=if fault {&action["error"]["command"]} else {&action["command"]};
+                let id=uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
+                assert_eq!(transport.execution_count(id),1);
+            }
+            let prior=transport.control_request_counts();
+            let malformed=s.dispatch(json!({"jsonrpc":"2.0","id":"invalid-batch","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"calibrate","arguments":{}}]}}}),&c).unwrap();
+            assert_eq!(malformed["result"]["isError"],true);
+            assert_eq!(transport.control_request_counts(),prior);
+            s.frames.never_change=true;
+            let response=s.dispatch(json!({"jsonrpc":"2.0","id":"unsettled-batch","method":"tools/call","params":{"name":"batch","arguments":{"return_screenshot":false,"actions":[{"tool":"move","arguments":{"x":130,"y":150,"uncalibrated":true}},{"tool":"move","arguments":{"x":220,"y":100,"uncalibrated":true}}]}}}),&c).unwrap();
+            assert_eq!(response["result"]["structuredContent"]["actions"].as_array().unwrap().len(),1);
+            assert_eq!(response["result"]["structuredContent"]["stopped_at"],0);
+            assert_eq!(response["result"]["content"].as_array().unwrap().len(),1);
+        }).await.unwrap();
+        task.abort();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn stability_change_region_ocr_and_no_persistence() {
     let mut s = server();
     let c = AtomicBool::new(false);
@@ -356,6 +475,13 @@ fn stability_change_region_ocr_and_no_persistence() {
     let before = s.call("screenshot", &json!({}), &c).unwrap();
     let data = before["content"][0]["data"].as_str().unwrap();
     let bytes = STANDARD.decode(data).unwrap();
+    assert_eq!(before["content"][0]["mimeType"], "image/jpeg");
+    assert_eq!(&bytes[..2], b"\xff\xd8");
+    let png = s.call("screenshot", &json!({"format":"png"}), &c).unwrap();
+    assert_eq!(png["content"][0]["mimeType"], "image/png");
+    let bytes = STANDARD
+        .decode(png["content"][0]["data"].as_str().unwrap())
+        .unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     assert!(!s.root.exists());
     let mut changed = frame(320, 240, 1);
@@ -571,7 +697,7 @@ async fn calibrated_simulator_binding_and_all_actions() {
         let result = s.calibrate(&c).unwrap();
         assert_eq!(result["bound"], true);
         let probes = result["probes"].as_array().unwrap();
-        assert_eq!(probes.len(), 8);
+        assert_eq!(probes.len(), 10);
         for probe in probes {
             let id =
                 uuid::Uuid::parse_str(probe["command"]["command_id"].as_str().unwrap()).unwrap();
@@ -652,7 +778,8 @@ async fn delayed_animated_capture_calibrates_and_settles_every_mcp_action() {
             assert_eq!(result["settled"], true, "{name}: {result}");
             let latency = result["latency_ms"].as_u64().unwrap();
             assert!((1400..=2600).contains(&latency), "{name}: {latency}");
-            assert!(start.elapsed() >= Duration::from_millis(1750));
+            assert!(start.elapsed() >= Duration::from_millis(1400));
+            assert_eq!(response["result"]["content"][0]["type"], "image");
             let command = if result.get("command").is_some() { &result["command"] } else { result };
             assert_eq!(command["outcome"], "EMITTED");
             let id = uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
