@@ -564,8 +564,12 @@ def source_checks() -> None:
 
 def build_checks(build: Path) -> None:
     private_header = build / "private-config" / "keyferry_hil_private.h"
+    cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
+    explicit = re.search(r"^KEYFERRY_PRIVATE_HEADER:FILEPATH=(.+)$", cache, re.MULTILINE)
+    if explicit:
+        private_header = Path(explicit[1])
     if not private_header.is_file():
-        fail("generated private HIL configuration is absent")
+        fail("private HIL configuration input is absent")
     description = json.loads((build / "project_description.json").read_text(encoding="utf-8"))
     components = set(description["build_components"])
     required = {

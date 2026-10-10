@@ -54,13 +54,7 @@ endif()
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_17)
 
 if(KEYFERRY_PRIVATE_HEADER)
-    add_custom_target(keyferry_private_config_refresh ALL
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${KEYFERRY_PRIVATE_HEADER}"
-            "${KEYFERRY_PRIVATE_CONFIG_DIR}/keyferry_hil_private.h"
-        COMMENT "Refreshing explicit private device configuration"
-        VERBATIM
-    )
+    add_custom_target(keyferry_private_config_refresh ALL)
 else()
     add_custom_target(keyferry_private_config_refresh ALL
         COMMAND

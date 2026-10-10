@@ -76,7 +76,7 @@ def descriptor():
     return data
 
 
-def atom_usb_descriptors(image, report):
+def atom_usb_descriptors(image, report, pid=0x4004):
     # Exact three-interface USB personality, including unchanged IF0/IF1.
     config = bytes.fromhex(
         "09025b000301008032"
@@ -85,7 +85,8 @@ def atom_usb_descriptors(image, report):
         "09040200010300000609211101000122"
     ) + len(report).to_bytes(2, "little") + bytes.fromhex("0705830308000a")
     require(config in image, "Atom IF0/IF1/IF2 descriptor differs or MSC is present")
-    require(bytes.fromhex("12010002000000403a300440020101020301") in image,
+    device = bytes.fromhex("12010002000000403a30") + pid.to_bytes(2, "little") + bytes.fromhex("020101020301")
+    require(device in image,
             "Atom VID/PID or bcdDevice 0102 differs")
 
 
@@ -110,13 +111,13 @@ def inspect_build(build, data):
         from check_msc_size_probe import inspect_file_handoff
         inspect_file_handoff(build)
         require(flash.get("0x120000") == "keyferry_hil_endpoint.bin", "app-only offset differs")
-    elif board == "m5stack_atoms3_lite":
+    elif board in ("m5stack_atoms3_lite", "lilygo_t_dongle_s3"):
         for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
             require(token in cache, "Atom storage build enabled")
         for token in ("# CONFIG_TINYUSB_MSC_ENABLED is not set", "# CONFIG_SPIRAM is not set",
                       "# CONFIG_TINYUSB_CDC_ENABLED is not set"):
             require(token in config, "Atom storage/PSRAM/CDC differs")
-        atom_usb_descriptors(image, data)
+        atom_usb_descriptors(image, data, 0x4004)
         require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Atom first-install offset differs")
         from check_esp_transport import build_checks
         build_checks(build)
