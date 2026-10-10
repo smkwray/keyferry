@@ -198,6 +198,32 @@ fn stability_change_region_ocr_and_no_persistence() {
             .unwrap()["matched"],
         true
     );
+    // A small edit far below the 1% mean margin matches only through the action's
+    // animation mask; the masked blink and clock alone never match.
+    s.frames.change_after = None;
+    s.frames.animate = true;
+    let f = s.frame(&c).unwrap();
+    assert_eq!(
+        s.wait("wait_for_change", &json!({"timeout_ms":300}), f, &c)
+            .unwrap()["timed_out"],
+        true
+    );
+    s.stationary(&c).unwrap();
+    let f = s.frame(&c).unwrap();
+    assert_eq!(
+        s.wait("wait_for_change", &json!({"timeout_ms":400}), f, &c)
+            .unwrap()["timed_out"],
+        true
+    );
+    let f = s.frame(&c).unwrap();
+    s.frames.visible.revision = 1;
+    let v = s
+        .wait("wait_for_change", &json!({"timeout_ms":1000}), f, &c)
+        .unwrap();
+    assert_eq!(v["matched"], true);
+    assert!(v["difference"].as_f64().unwrap() < 0.001, "{v}");
+    s.frames.animate = false;
+    s.frames.visible.revision = 0;
     let result = s
         .call("find_text", &json!({"query":"SAFE TEST"}), &c)
         .unwrap();
