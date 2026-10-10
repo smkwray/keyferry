@@ -157,7 +157,12 @@ fn parse(args: &[String]) -> Result<Request, Error> {
 pub fn run(args: &[String]) -> u8 {
     let backend = Backend::current();
     // Program injection belongs only to tests; production always resolves ffmpeg on PATH.
-    match execute(args, backend, || Command::new("ffmpeg"), TIMEOUT) {
+    match execute(
+        args,
+        backend,
+        || keyferry_core::process::command("ffmpeg"),
+        TIMEOUT,
+    ) {
         Ok(Some(value)) => {
             println!("{value}");
             0
@@ -188,6 +193,13 @@ fn execute(
     if request == Request::Help {
         return Ok(None);
     }
+    #[cfg(windows)]
+    let devices = if backend == Backend::Dshow {
+        crate::windows_devices::devices().map_err(|_| list_error())?
+    } else {
+        list(backend, &command, timeout)?
+    };
+    #[cfg(not(windows))]
     let devices = list(backend, &command, timeout)?;
     match request {
         Request::List => Ok(Some(json!({"schema": "keyferry.capture-devices.v1",
@@ -279,7 +291,7 @@ fn bounded_output(
     limit: usize,
     backend: Backend,
 ) -> Result<Output, Error> {
-    let mut child = crate::hide_console(&mut command)
+    let mut child = command
         .env_remove("FFREPORT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,7 +349,7 @@ fn bounded_output(
 pub fn stop_child(child: &mut Child) {
     #[cfg(windows)]
     {
-        let _ = crate::hide_console(&mut Command::new("taskkill"))
+        let _ = keyferry_core::process::command("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -630,7 +642,7 @@ fn signal(rgb: &[u8]) -> (&'static str, f64) {
 /// The probe bounds the native geometry; showinfo detects a later input-mode change.
 pub fn stream_setup(source: Option<&str>) -> Result<(String, u32, u32, Vec<String>), &'static str> {
     let backend = Backend::current();
-    let devices = list(backend, &|| Command::new("ffmpeg"), TIMEOUT).map_err(|e| e.code)?;
+    let devices = devices()?;
     let device = select_source(&devices, source).map_err(|e| e.code)?;
     let options = FrameOptions {
         out: PathBuf::new(),
@@ -638,7 +650,7 @@ pub fn stream_setup(source: Option<&str>) -> Result<(String, u32, u32, Vec<Strin
         size: None,
         scale: None,
     };
-    let mut command = Command::new("ffmpeg");
+    let mut command = keyferry_core::process::command("ffmpeg");
     command.args(frame_args(backend, device, &options));
     let output = bounded_output(command, TIMEOUT, MAX_FRAME_BYTES, backend).map_err(|e| e.code)?;
     if !output.status.success() {
@@ -686,7 +698,19 @@ mod tests;
 
 /// Local inventory; only recognized HDMI capture devices auto-select.
 pub fn devices() -> Result<Vec<Device>, &'static str> {
-    list(Backend::current(), &|| Command::new("ffmpeg"), TIMEOUT).map_err(|e| e.code)
+    #[cfg(windows)]
+    {
+        crate::windows_devices::devices()
+    }
+    #[cfg(not(windows))]
+    {
+        list(
+            Backend::current(),
+            &|| keyferry_core::process::command("ffmpeg"),
+            TIMEOUT,
+        )
+        .map_err(|e| e.code)
+    }
 }
 pub fn recognized(device: &Device) -> bool {
     select_source(std::slice::from_ref(device), None).is_ok()

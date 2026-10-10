@@ -11,6 +11,7 @@ name = "keyferry-fw"
 path = "src/main.rs"
 
 [dependencies]
+keyferry-core = { path = "../../crates/keyferry-core" }
 keyferry-firmware = { path = "../../crates/keyferry-firmware" }
 serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

@@ -14,7 +14,7 @@ pub fn scaled_size(native: (u32, u32)) -> (u32, u32) {
 
 use std::{
     io::{BufRead, BufReader, Read},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -128,6 +128,8 @@ pub trait FrameSource {
 #[derive(Default)]
 struct State {
     source: Option<String>,
+    requested_at: Option<Instant>,
+    retry: Retry,
     latest: Option<Arc<Frame>>,
     error: Option<&'static str>,
     last_failure: Option<&'static str>,
@@ -136,63 +138,135 @@ struct State {
     serial: u64,
 }
 
+/// Demand-driven retry policy; the clock and attempted work are injectable on the live path.
+#[derive(Default)]
+pub struct Retry {
+    failures: u32,
+    next: Option<Instant>,
+}
+
+impl Retry {
+    pub fn attempt<T>(
+        &mut self,
+        now: Instant,
+        work: impl FnOnce() -> Result<T, &'static str>,
+    ) -> Result<T, &'static str> {
+        if self.next.is_some_and(|next| now < next) {
+            return Err("capture.source_unavailable");
+        }
+        match work() {
+            Ok(value) => {
+                self.failures = 0;
+                self.next = None;
+                Ok(value)
+            }
+            Err(code) => {
+                self.failed(now);
+                Err(code)
+            }
+        }
+    }
+    fn failed(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        let seconds = (2_u64.saturating_pow(self.failures.min(6))).min(60);
+        self.next = Some(now + Duration::from_secs(seconds));
+    }
+}
+
+const IDLE: Duration = Duration::from_secs(3);
+
 pub struct Capture {
     state: Arc<Mutex<State>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    source: Option<String>,
 }
 
 impl Capture {
+    /// Construction is inert. Only latest() can request a discovery/probe/stream.
     pub fn start(source: Option<String>) -> Self {
-        let state = Arc::new(Mutex::new(State::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let shared = state.clone();
-        let stopping = stop.clone();
-        let worker = thread::spawn(move || {
-            let mut selected = source;
-            while !stopping.load(Ordering::Acquire) {
-                match super::capture::stream_setup(selected.as_deref()) {
-                    Ok((id, w, h, args)) => {
-                        selected = Some(id);
-                        let generation = {
-                            let mut s = shared.lock().expect("capture state");
-                            s.source = selected.clone();
-                            s.generation += 1;
-                            s.generation
-                        };
-                        let result = stream(&args, (w, h), generation, &shared, &stopping);
-                        if !stopping.load(Ordering::Acquire) {
-                            let mut s = shared.lock().expect("capture state");
-                            s.latest = None;
-                            s.error = Some(result.err().unwrap_or("capture.process_ended"));
-                            s.last_failure = s.error;
-                        }
-                    }
-                    Err(code) => {
-                        let mut s = shared.lock().expect("capture state");
-                        s.error = Some(code);
-                        s.last_failure = Some(code);
-                    }
-                }
-                if stopping.load(Ordering::Acquire) {
-                    break;
-                }
-                // Bounded backoff. Capture restarts never replay input commands.
-                for _ in 0..20 {
-                    if stopping.load(Ordering::Acquire) {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                shared.lock().expect("capture state").restarts += 1;
-            }
-        });
         Self {
-            state,
-            stop,
-            worker: Some(worker),
+            state: Arc::new(Mutex::new(State::default())),
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            source,
         }
     }
+
+    fn request_at(
+        &mut self,
+        now: Instant,
+        spawn: impl FnOnce(Option<String>, Arc<Mutex<State>>, Arc<AtomicBool>) -> JoinHandle<()>,
+    ) -> Result<(), &'static str> {
+        let mut state = self.state.lock().expect("capture state");
+        state.requested_at = Some(now);
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return Ok(());
+        }
+        if state.retry.next.is_some_and(|next| now < next) {
+            return Err("capture.source_unavailable");
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        state.error = None;
+        state.latest = None;
+        drop(state);
+        self.worker = Some(spawn(
+            self.source.clone(),
+            self.state.clone(),
+            self.stop.clone(),
+        ));
+        Ok(())
+    }
+}
+
+fn spawn_worker(
+    source: Option<String>,
+    shared: Arc<Mutex<State>>,
+    stopping: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        // One attempt per explicit request; never an automatic restart/discovery loop.
+        let result =
+            super::capture::stream_setup(source.as_deref()).and_then(|(id, w, h, args)| {
+                let generation = {
+                    let mut s = shared.lock().expect("capture state");
+                    s.source = Some(id);
+                    s.generation += 1;
+                    s.generation
+                };
+                // A request that expired during discovery/probing must not start a stream.
+                if idle(&shared, Instant::now()) || stopping.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                stream(&args, (w, h), generation, &shared, &stopping)
+            });
+        finish_attempt(&shared, result, Instant::now());
+    })
+}
+
+fn finish_attempt(state: &Arc<Mutex<State>>, result: Result<(), &'static str>, now: Instant) {
+    let mut s = state.lock().expect("capture state");
+    s.latest = None;
+    if let Err(code) = result {
+        s.last_failure = Some(code);
+        s.error = Some("capture.source_unavailable");
+        s.retry.failed(now);
+        s.restarts += 1;
+    }
+}
+
+fn idle(state: &Arc<Mutex<State>>, now: Instant) -> bool {
+    state
+        .lock()
+        .expect("capture state")
+        .requested_at
+        .is_none_or(|at| now.saturating_duration_since(at) >= IDLE)
 }
 
 impl FrameSource for Capture {
@@ -202,18 +276,27 @@ impl FrameSource for Capture {
         timeout: Duration,
         cancelled: &AtomicBool,
     ) -> Result<Arc<Frame>, &'static str> {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("request.cancelled");
+        }
+        self.request_at(Instant::now(), spawn_worker)?;
         let start = Instant::now();
         loop {
             if cancelled.load(Ordering::Acquire) {
                 return Err("request.cancelled");
             }
-            let s = self.state.lock().expect("capture state");
+            let mut s = self.state.lock().expect("capture state");
             if let Some(frame) = &s.latest {
                 if after.is_none_or(|n| frame.serial > n)
                     && frame.at.elapsed() < Duration::from_secs(2)
                 {
-                    return Ok(frame.clone());
+                    let frame = frame.clone();
+                    s.retry = Retry::default();
+                    return Ok(frame);
                 }
+            }
+            if let Some(code) = s.error {
+                return Err(code);
             }
             if start.elapsed() >= timeout {
                 return Err(s.error.unwrap_or("capture.frame_timeout"));
@@ -250,7 +333,7 @@ fn stream(
     state: &Arc<Mutex<State>>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), &'static str> {
-    let mut child = crate::hide_console(&mut Command::new("ffmpeg"))
+    let mut child = keyferry_core::process::command("ffmpeg")
         .args(args)
         .env_remove("FFREPORT")
         .stdin(Stdio::null())
@@ -316,6 +399,9 @@ fn stream(
         if stop.load(Ordering::Acquire) {
             break Ok(());
         }
+        if idle(state, Instant::now()) {
+            break Ok(());
+        }
         if changed.load(Ordering::Acquire) {
             break Err("capture.resolution_changed");
         }
@@ -345,9 +431,54 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "requires ffmpeg on PATH; local raw-pipe and process-tree shutdown smoke"]
-    fn continuous_raw_pipe_stops_owned_process_tree() {
-        let state = Arc::new(Mutex::new(State::default()));
+    fn zero_requests_never_discover_or_spawn() {
+        let capture = Capture::start(Some("absent".into()));
+        assert!(capture.worker.is_none());
+        assert!(capture.state.lock().unwrap().requested_at.is_none());
+        assert_eq!(capture.status()["generation"], 0);
+        assert_eq!(capture.status()["restarts"], 0);
+    }
+
+    #[test]
+    fn missing_source_attempts_require_demand_and_back_off_to_sixty_seconds() {
+        let mut capture = Capture::start(Some("absent".into()));
+        let start = Instant::now();
+        let mut attempts = Vec::new();
+        for second in 0..=240 {
+            let now = start + Duration::from_secs(second);
+            let _ = capture.request_at(now, |_, state, _| {
+                attempts.push(second);
+                // Fake discovery/spawner uses the same admission and failure policy as production.
+                finish_attempt(&state, Err("capture.source_unavailable"), now);
+                thread::spawn(|| {})
+            });
+            if let Some(worker) = capture.worker.take() {
+                worker.join().unwrap();
+            }
+        }
+        assert_eq!(attempts, [0, 2, 6, 14, 30, 62, 122, 182]);
+        // Passing time without requests cannot invoke the spawner, including after backoff.
+        assert!(capture.worker.is_none());
+        assert_eq!(capture.state.lock().unwrap().generation, 0);
+    }
+
+    #[test]
+    fn idle_deadline_is_measured_from_last_frame_request() {
+        let capture = Capture::start(None);
+        let now = Instant::now();
+        assert!(idle(&capture.state, now));
+        capture.state.lock().unwrap().requested_at = Some(now);
+        assert!(!idle(&capture.state, now + IDLE - Duration::from_millis(1)));
+        assert!(idle(&capture.state, now + IDLE));
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg on PATH; local raw-pipe and idle process-tree shutdown smoke"]
+    fn continuous_raw_pipe_stops_owned_process_tree_after_idle() {
+        let state = Arc::new(Mutex::new(State {
+            requested_at: Some(Instant::now()),
+            ..State::default()
+        }));
         let stop = Arc::new(AtomicBool::new(false));
         let args = [
             "-hide_banner",
@@ -384,9 +515,9 @@ mod tests {
             .latest
             .as_ref()
             .map(|f| (f.width, f.height, f.rgb.len()));
-        stop.store(true, Ordering::Release);
         assert!(worker.join().unwrap().is_ok());
         assert_eq!(observed, Some((320, 240, 320 * 240 * 3)));
         assert!(start.elapsed() < Duration::from_secs(6));
+        assert!(start.elapsed() >= IDLE);
     }
 }

@@ -357,7 +357,7 @@ fn request_secure_text(args: &[String], url: &str, token_file: &Path) -> u8 {
         emit_json_line(&serde_json::json!({"outcome": "REJECTED", "error": "dialog.unavailable"}));
         return 23;
     };
-    let result = Command::new(program)
+    let result = keyferry_core::process::command(program)
         .args(["--secure-text", &device.to_string()])
         .env("KEYFERRY_URL", url)
         .env("KEYFERRY_TOKEN_FILE", token_file)
@@ -399,12 +399,12 @@ fn app_start_command(
             if !exists(&explorer) {
                 return None;
             }
-            let mut command = Command::new(explorer);
+            let mut command = keyferry_core::process::command(explorer);
             command.arg(program);
             Some(command)
         }
         Platform::MacOs | Platform::Other => {
-            let mut command = Command::new(program);
+            let mut command = keyferry_core::process::command(program);
             command.args(args);
             Some(command)
         }
@@ -1262,7 +1262,7 @@ fn run_local_helper(args: &[String]) -> u8 {
             return 23;
         }
     };
-    match Command::new(helper)
+    match keyferry_core::process::command(helper)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

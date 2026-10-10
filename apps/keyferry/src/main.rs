@@ -2169,7 +2169,7 @@ fn install_api_actions(
         // The masked prompt is the same separate process `keyctl secure-text` starts; the
         // secret never enters this window, its status text, or the clipboard.
         let launched = std::env::current_exe().and_then(|program| {
-            std::process::Command::new(program)
+            keyferry_core::process::command(program)
                 .args(["--secure-text", &device_id])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())

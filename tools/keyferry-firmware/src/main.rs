@@ -25,13 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_ELF_BYTES: usize = 32 * 1024 * 1024;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ROM_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const APPLY_TIMEOUT: Duration = Duration::from_secs(300);
 // Two complete flash passes have unmeasured duration on USB Serial/JTAG.
@@ -218,7 +213,7 @@ impl RomProbeRunner for ProductionRomProbe {
     ) -> Result<Vec<u8>, &'static str> {
         let (python, helper) = backend_paths()?;
 
-        let mut command = Command::new(python);
+        let mut command = keyferry_core::process::command(python);
         command
             .arg("-I")
             .arg(helper)
@@ -234,8 +229,6 @@ impl RomProbeRunner for ProductionRomProbe {
             .arg("--partition-table-size")
             .arg(requirements.partition_table_size_bytes.to_string())
             .stdin(Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
             .spawn()
@@ -338,7 +331,7 @@ fn create_private_backup_dir(path: &Path) -> Result<(), &'static str> {
         fs::create_dir(path).map_err(|_| "input.output")?;
         let sid = current_windows_sid()?;
         let grant = format!("*{sid}:(OI)(CI)F");
-        let status = Command::new("icacls")
+        let status = keyferry_core::process::command("icacls")
             .arg(path)
             .args(["/inheritance:r", "/grant:r", &grant, "/q"])
             .output()
@@ -352,7 +345,7 @@ fn create_private_backup_dir(path: &Path) -> Result<(), &'static str> {
 
 #[cfg(windows)]
 fn current_windows_sid() -> Result<String, &'static str> {
-    let output = Command::new("whoami")
+    let output = keyferry_core::process::command("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()
         .map_err(|_| "input.output_acl")?;
@@ -416,7 +409,7 @@ impl ProductionBackupRunner {
         helper: &Path,
     ) -> Result<serde_json::Value, &'static str> {
         let requirements = package.rom_probe_requirements().map_err(PlanError::code)?;
-        let mut command = Command::new(python);
+        let mut command = keyferry_core::process::command(python);
         command
             .arg("-I")
             .arg(helper)
@@ -436,8 +429,6 @@ impl ProductionBackupRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
         let mut child = ReapChild(
             command
                 .spawn()
@@ -610,7 +601,7 @@ impl FirmwareUpdateBackend for ProductionFirmwareBackend<'_> {
             .rom_probe_requirements()
             .map_err(|_| BackendFailure::Unavailable)?;
         let (python, helper) = backend_paths().map_err(|_| BackendFailure::Unavailable)?;
-        let mut command = Command::new(python);
+        let mut command = keyferry_core::process::command(python);
         command
             .arg("-I")
             .arg(helper)
@@ -628,8 +619,6 @@ impl FirmwareUpdateBackend for ProductionFirmwareBackend<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
         let mut child = command.spawn().map_err(|_| BackendFailure::Unavailable)?;
         let stdin = child.stdin.take().ok_or(BackendFailure::Unavailable)?;
         let stdout = child.stdout.take().ok_or(BackendFailure::Unavailable)?;
@@ -831,7 +820,7 @@ fn clone_command(
     requirements: RomProbeRequirements,
 ) -> Result<Command, &'static str> {
     let (python, helper) = backend_paths()?;
-    let mut command = Command::new(python);
+    let mut command = keyferry_core::process::command(python);
     command
         .arg("-I")
         .arg(helper)
@@ -846,8 +835,6 @@ fn clone_command(
         .arg(requirements.partition_table_offset.to_string())
         .arg("--partition-table-size")
         .arg(requirements.partition_table_size_bytes.to_string());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
     Ok(command)
 }
 

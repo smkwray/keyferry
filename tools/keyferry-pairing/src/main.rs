@@ -16,8 +16,6 @@ use keyferry_protocol::{
 use rcgen::{CertificateParams, KeyPair, PublicKeyData, PKCS_ECDSA_P256_SHA256};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
-use std::process::Command;
 use std::{
     env, fs,
     fs::OpenOptions,
@@ -2520,7 +2518,7 @@ fn create_private_dir(path: &Path) -> Result<(), &'static str> {
 fn restrict_windows_acl(path: &Path) -> Result<(), &'static str> {
     let sid = current_windows_sid()?;
     let grant = format!("*{sid}:(OI)(CI)F");
-    let status = Command::new("icacls")
+    let status = keyferry_core::process::command("icacls")
         .arg(path)
         .args(["/inheritance:r", "/grant:r", &grant, "/q"])
         .output()
@@ -2535,7 +2533,7 @@ fn restrict_windows_acl(path: &Path) -> Result<(), &'static str> {
 fn restrict_windows_file_acl(path: &Path) -> Result<(), &'static str> {
     let sid = current_windows_sid()?;
     let grant = format!("*{sid}:F");
-    let status = Command::new("icacls")
+    let status = keyferry_core::process::command("icacls")
         .arg(path)
         .args(["/inheritance:r", "/grant:r", &grant, "/q"])
         .output()
@@ -2548,7 +2546,7 @@ fn restrict_windows_file_acl(path: &Path) -> Result<(), &'static str> {
 
 #[cfg(windows)]
 fn current_windows_sid() -> Result<String, &'static str> {
-    let identity = Command::new("whoami")
+    let identity = keyferry_core::process::command("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()
         .map_err(|_| "could not query the current Windows identity")?;

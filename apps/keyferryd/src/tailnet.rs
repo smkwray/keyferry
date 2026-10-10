@@ -9,8 +9,6 @@ use tokio::{io::AsyncReadExt, process::Command, time};
 
 const TAILSCALE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TAILSCALE_IP_OUTPUT: usize = 256;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Returns this computer's single canonical Tailscale IPv4 address, if Tailscale reports one.
 pub async fn discover_local_tailscale_ipv4() -> Option<IpAddr> {
@@ -30,15 +28,13 @@ async fn run_tailscale<T>(
     parse: impl Fn(&[u8]) -> Option<T>,
 ) -> Option<T> {
     for binary in tailscale_candidates() {
-        let mut child = Command::new(&binary);
+        let mut child = Command::from(keyferry_core::process::command(&binary));
         child
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        child.creation_flags(CREATE_NO_WINDOW);
         let Ok(mut child) = child.spawn() else {
             continue;
         };
@@ -147,11 +143,5 @@ mod tests {
         ] {
             assert!(candidates.contains(&PathBuf::from(required)));
         }
-    }
-
-    #[test]
-    fn tailscale_client_never_allocates_a_console_window() {
-        let source = include_str!("tailnet.rs");
-        assert!(source.contains("child.creation_flags(CREATE_NO_WINDOW);"));
     }
 }

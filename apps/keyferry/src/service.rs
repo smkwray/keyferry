@@ -5,12 +5,12 @@
 //! stops it on exit. Where no service is defined, as in a development run, both steps report
 //! [`ServiceOutcome::NotInstalled`] and change nothing.
 
-use crate::tailnet::{bounded_lossy, hide_console, output_with_timeout, DiscoveryError};
+use crate::tailnet::{bounded_lossy, output_with_timeout, DiscoveryError};
 use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
@@ -255,9 +255,8 @@ fn require(completion: Completion, action: &str) -> Result<(), String> {
 
 /// Runs a service-manager command without a console window, bounded in time and output.
 pub fn run_command(invocation: &Invocation) -> Result<Completion, String> {
-    let mut command = Command::new(&invocation.program);
+    let mut command = keyferry_core::process::command(&invocation.program);
     command.args(&invocation.args).stdin(Stdio::null());
-    hide_console(&mut command);
     let output =
         output_with_timeout(command, COMMAND_TIMEOUT, MAX_COMMAND_OUTPUT).map_err(|error| {
             match error {

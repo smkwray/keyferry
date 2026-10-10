@@ -15,7 +15,11 @@ fn main() {
         fake_ffmpeg(&mode);
         return;
     }
-    run_tests();
+    if cfg!(windows) {
+        run_native_windows_tests();
+    } else {
+        run_tests();
+    }
 }
 
 fn fake_ffmpeg(mode: &str) {
@@ -139,6 +143,47 @@ fn value(output: &Output, exit: i32) -> Value {
     assert_eq!(text.lines().count(), 1);
     assert!(!text.contains("private-target-content"));
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn run_native_windows_tests() {
+    // A hostile fake ffmpeg on PATH cannot affect Windows native discovery.
+    let directory = env::temp_dir().join(format!("keyctl-native-capture-{}", uuid::Uuid::now_v7()));
+    fs::create_dir(&directory).unwrap();
+    let fake = directory.join("ffmpeg.exe");
+    fs::copy(env::current_exe().unwrap(), &fake).unwrap();
+    let list = value(&invoke(&directory, "bad-list", &["list"]), 0);
+    assert_eq!(list["backend"], "dshow");
+    assert!(list["devices"].is_array());
+    let out = directory.join("frame.png");
+    let missing = value(
+        &invoke(
+            &directory,
+            "timeout",
+            &[
+                "frame",
+                "--out",
+                out.to_str().unwrap(),
+                "--source",
+                "keyferry-absent-test-source",
+            ],
+        ),
+        20,
+    );
+    assert_eq!(missing["error"]["code"], "capture.source_not_found");
+    assert!(!directory.join("heartbeat").exists());
+    assert!(!out.exists());
+    fs::remove_file(fake).unwrap();
+    // Inventory still works with no ffmpeg executable at all.
+    let without_ffmpeg = value(&invoke(&directory, "ok", &["list"]), 0);
+    assert_eq!(without_ffmpeg["devices"], list["devices"]);
+    assert_eq!(
+        value(&invoke(&directory, "ok", &["frame"]), 20)["error"]["code"],
+        "capture.arguments"
+    );
+    fs::remove_dir_all(directory).unwrap();
+    println!(
+        "capture_cli: passed native Windows discovery without ffmpeg and absent-source no-spawn"
+    );
 }
 
 fn run_tests() {
