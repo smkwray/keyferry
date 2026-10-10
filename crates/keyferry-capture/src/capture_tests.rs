@@ -160,14 +160,14 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
     ] {
         let values = frame_args(backend, &device, &options);
         assert!(values.windows(2).any(|pair| pair == ["-i", input]));
-        assert!(values.windows(2).any(|pair| pair == ["-frames:v", "1"]));
+        assert!(!values.iter().any(|arg| arg == "-frames:v"));
         assert!(values
             .windows(2)
-            .any(|pair| pair == ["-vf", "scale=960:540"]));
+            .any(|pair| pair == ["-vf", "fps=5,scale=960:540"]));
         assert_eq!(values.last().unwrap(), "pipe:1");
         assert!(!values.iter().any(|value| value.contains("private.png")));
         if backend == Backend::Dshow {
-            assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "256M"]));
+            assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "16M"]));
         }
     }
 }

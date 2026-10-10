@@ -14,7 +14,7 @@ pub fn scaled_size(native: (u32, u32)) -> (u32, u32) {
 
 use std::{
     io::{BufRead, BufReader, Read},
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -131,6 +131,8 @@ struct State {
     requested_at: Option<Instant>,
     retry: Retry,
     latest: Option<Arc<Frame>>,
+    ready: bool,
+    last_frame_at: Option<Instant>,
     error: Option<&'static str>,
     last_failure: Option<&'static str>,
     restarts: u64,
@@ -173,7 +175,10 @@ impl Retry {
     }
 }
 
-const IDLE: Duration = Duration::from_secs(3);
+/// Hold the HDMI sink across pauses between clients; change this one policy constant.
+pub const IDLE: Duration = Duration::from_secs(30 * 60);
+pub const WARMUP: Duration = Duration::from_secs(6);
+pub const FRAME_WAIT: Duration = Duration::from_secs(15);
 
 pub struct Capture {
     state: Arc<Mutex<State>>,
@@ -215,6 +220,8 @@ impl Capture {
         }
         state.error = None;
         state.latest = None;
+        state.ready = false;
+        state.last_frame_at = None;
         drop(state);
         self.worker = Some(spawn(
             self.source.clone(),
@@ -232,20 +239,21 @@ fn spawn_worker(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // One attempt per explicit request; never an automatic restart/discovery loop.
-        let result =
-            super::capture::stream_setup(source.as_deref()).and_then(|(id, w, h, args)| {
-                let generation = {
-                    let mut s = shared.lock().expect("capture state");
-                    s.source = Some(id);
-                    s.generation += 1;
-                    s.generation
-                };
-                // A request that expired during discovery/probing must not start a stream.
-                if idle(&shared, Instant::now()) || stopping.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                stream(&args, (w, h), generation, &shared, &stopping)
-            });
+        let result = super::capture::stream_setup(source.as_deref()).and_then(|(id, args)| {
+            let generation = {
+                let mut s = shared.lock().expect("capture state");
+                s.source = Some(id);
+                s.generation += 1;
+                s.generation
+            };
+            // A request that expired during discovery/probing must not start a stream.
+            if idle(&shared, Instant::now()) || stopping.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let mut command = keyferry_core::process::command("ffmpeg");
+            command.args(args);
+            stream(command, generation, &shared, &stopping, true)
+        });
         finish_attempt(&shared, result, Instant::now());
     })
 }
@@ -255,7 +263,7 @@ fn finish_attempt(state: &Arc<Mutex<State>>, result: Result<(), &'static str>, n
     s.latest = None;
     if let Err(code) = result {
         s.last_failure = Some(code);
-        s.error = Some("capture.source_unavailable");
+        s.error = Some(code);
         s.retry.failed(now);
         s.restarts += 1;
     }
@@ -280,30 +288,7 @@ impl FrameSource for Capture {
             return Err("request.cancelled");
         }
         self.request_at(Instant::now(), spawn_worker)?;
-        let start = Instant::now();
-        loop {
-            if cancelled.load(Ordering::Acquire) {
-                return Err("request.cancelled");
-            }
-            let mut s = self.state.lock().expect("capture state");
-            if let Some(frame) = &s.latest {
-                if after.is_none_or(|n| frame.serial > n)
-                    && frame.at.elapsed() < Duration::from_secs(2)
-                {
-                    let frame = frame.clone();
-                    s.retry = Retry::default();
-                    return Ok(frame);
-                }
-            }
-            if let Some(code) = s.error {
-                return Err(code);
-            }
-            if start.elapsed() >= timeout {
-                return Err(s.error.unwrap_or("capture.frame_timeout"));
-            }
-            drop(s);
-            thread::sleep(Duration::from_millis(10));
-        }
+        wait_latest(&self.state, after, timeout, cancelled)
     }
     fn status(&self) -> serde_json::Value {
         let s = self.state.lock().expect("capture state");
@@ -326,29 +311,178 @@ fn kill(child: &Arc<Mutex<Child>>) {
     super::capture::stop_child(&mut child);
 }
 
+/// The one-shot CLI and daemon use the same reader, warm-up and failure handling.
+pub fn one_shot(command: Command, timeout: Duration) -> Result<Arc<Frame>, &'static str> {
+    let state = Arc::new(Mutex::new(State {
+        requested_at: Some(Instant::now()),
+        ..State::default()
+    }));
+    let stop = Arc::new(AtomicBool::new(false));
+    let shared = state.clone();
+    let stopping = stop.clone();
+    let worker = thread::spawn(move || {
+        let result = stream(command, 1, &shared, &stopping, false);
+        finish_attempt(&shared, result, Instant::now());
+    });
+    let result = wait_latest(&state, None, timeout, &AtomicBool::new(false));
+    stop.store(true, Ordering::Release);
+    let _ = worker.join();
+    result.map_err(|code| {
+        if code == "capture.frame_timeout" {
+            "capture.timeout"
+        } else {
+            code
+        }
+    })
+}
+
+fn wait_latest(
+    state: &Arc<Mutex<State>>,
+    after: Option<u64>,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Arc<Frame>, &'static str> {
+    let start = Instant::now();
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("request.cancelled");
+        }
+        let mut s = state.lock().expect("capture state");
+        if s.ready {
+            if let Some(frame) = &s.latest {
+                if after.is_none_or(|n| frame.serial > n)
+                    && frame.at.elapsed() < Duration::from_secs(2)
+                {
+                    let frame = frame.clone();
+                    s.retry = Retry::default();
+                    return Ok(frame);
+                }
+            }
+        }
+        if let Some(code) = s.error {
+            return Err(code);
+        }
+        if start.elapsed() >= timeout {
+            return Err("capture.frame_timeout");
+        }
+        drop(s);
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+// PNG chunk framing bounds memory before decoding and carries geometry in the same stream.
+// There is no separate geometry probe that would close/reopen the HDMI sink.
+fn read_png(reader: &mut impl Read) -> Result<Vec<u8>, &'static str> {
+    const LIMIT: usize = 64 * 1024 * 1024;
+    let mut signature = [0; 8];
+    reader
+        .read_exact(&mut signature)
+        .map_err(|_| "capture.frame_failed")?;
+    if &signature != b"\x89PNG\r\n\x1a\n" {
+        return Err("capture.invalid_frame");
+    }
+    let mut bytes = signature.to_vec();
+    loop {
+        let mut header = [0; 8];
+        reader
+            .read_exact(&mut header)
+            .map_err(|_| "capture.invalid_frame")?;
+        let length = u32::from_be_bytes(header[..4].try_into().expect("length")) as usize;
+        let next = bytes
+            .len()
+            .checked_add(length)
+            .and_then(|n| n.checked_add(12))
+            .filter(|n| *n <= LIMIT)
+            .ok_or("capture.output_limit")?;
+        let end = &header[4..] == b"IEND";
+        bytes.extend_from_slice(&header);
+        bytes.resize(next, 0);
+        reader
+            .read_exact(&mut bytes[next - length - 4..])
+            .map_err(|_| "capture.invalid_frame")?;
+        if end {
+            return Ok(bytes);
+        }
+    }
+}
+
+fn read_frame(reader: &mut impl Read, generation: u64, at: Instant) -> Result<Frame, &'static str> {
+    let bytes = read_png(reader)?;
+    let (width, height, rgb) = super::capture::decode(&bytes).map_err(|e| e.code)?;
+    Ok(Frame {
+        width,
+        height,
+        native: (width, height),
+        rgb,
+        serial: 0,
+        generation,
+        at,
+    })
+}
+
+fn publish(
+    state: &Arc<Mutex<State>>,
+    mut frame: Frame,
+    opened: Instant,
+    bounded: bool,
+) -> Result<(), &'static str> {
+    let valid = super::capture::signal(&frame.rgb).0 == "present";
+    let mut s = state.lock().expect("capture state");
+    if s.latest.as_ref().is_some_and(|f| f.native != frame.native) {
+        return Err("capture.resolution_changed");
+    }
+    s.last_frame_at = Some(frame.at);
+    s.ready |= valid || frame.at.saturating_duration_since(opened) >= WARMUP;
+    if bounded {
+        let (width, height) = scaled_size(frame.native);
+        if (width, height) != frame.native {
+            let mut rgb = Vec::with_capacity((width * height * 3) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    let i = (((y * frame.height / height) * frame.width + x * frame.width / width)
+                        * 3) as usize;
+                    rgb.extend_from_slice(&frame.rgb[i..i + 3]);
+                }
+            }
+            frame.rgb = rgb;
+            frame.width = width;
+            frame.height = height;
+        }
+    }
+    s.serial += 1;
+    frame.serial = s.serial;
+    s.latest = Some(Arc::new(frame));
+    Ok(())
+}
+
 fn stream(
-    args: &[String],
-    native: (u32, u32),
+    mut command: Command,
     generation: u64,
     state: &Arc<Mutex<State>>,
     stop: &Arc<AtomicBool>,
+    bounded: bool,
 ) -> Result<(), &'static str> {
-    let mut child = keyferry_core::process::command("ffmpeg")
-        .args(args)
+    let mut child = command
         .env_remove("FFREPORT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|_| "capture.process_start")?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "capture.ffmpeg_missing"
+            } else {
+                "capture.process_start"
+            }
+        })?;
     let mut stdout = child.stdout.take().ok_or("capture.pipe")?;
     let stderr = child.stderr.take().ok_or("capture.pipe")?;
     let child = Arc::new(Mutex::new(child));
-    let changed = Arc::new(AtomicBool::new(false));
-    let changed_reader = changed.clone();
+    let busy = Arc::new(AtomicBool::new(false));
+    let busy_reader = busy.clone();
     let diagnostic = thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        // Read one bounded line at a time; never retain, print, or return FFmpeg messages.
+        // Discard bounded lines immediately; never retain or return device/FFmpeg text.
         loop {
             let mut line = Vec::new();
             if reader
@@ -360,75 +494,151 @@ fn stream(
             {
                 break;
             }
-            let text = String::from_utf8_lossy(&line);
-            if text.contains("showinfo") {
-                if let Some(size) = text
-                    .split(" s:")
-                    .nth(1)
-                    .and_then(|s| s.split_whitespace().next())
-                {
-                    if size != format!("{}x{}", native.0, native.1) {
-                        changed_reader.store(true, Ordering::Release);
-                    }
-                }
+            if source_busy(&String::from_utf8_lossy(&line)) {
+                busy_reader.store(true, Ordering::Release);
             }
         }
     });
-    let (width, height) = scaled_size(native);
+    let opened = Instant::now();
     let reading_state = state.clone();
-    let reader = thread::spawn(move || loop {
-        let mut rgb = vec![0; width as usize * height as usize * 3];
-        if stdout.read_exact(&mut rgb).is_err() {
-            break;
+    let reader = thread::spawn(move || -> Result<(), &'static str> {
+        loop {
+            let mut frame = read_frame(&mut stdout, generation, Instant::now())?;
+            frame.at = Instant::now();
+            publish(&reading_state, frame, opened, bounded)?;
         }
-        let mut s = reading_state.lock().expect("capture state");
-        s.serial += 1;
-        s.error = None;
-        s.latest = Some(Arc::new(Frame {
-            width,
-            height,
-            native,
-            rgb,
-            serial: s.serial,
-            generation,
-            at: Instant::now(),
-        }));
     });
-    let start = Instant::now();
     let result = loop {
-        if stop.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || idle(state, Instant::now()) {
             break Ok(());
-        }
-        if idle(state, Instant::now()) {
-            break Ok(());
-        }
-        if changed.load(Ordering::Acquire) {
-            break Err("capture.resolution_changed");
         }
         if reader.is_finished() {
-            break Err("capture.process_ended");
+            break Err("capture.frame_failed");
         }
         let stale = state
             .lock()
             .expect("capture state")
-            .latest
-            .as_ref()
-            .filter(|f| f.generation == generation)
-            .map_or(start.elapsed(), |f| f.at.elapsed());
-        if stale > Duration::from_secs(5) {
+            .last_frame_at
+            .map_or(opened.elapsed(), |at| at.elapsed());
+        if stale > FRAME_WAIT {
             break Err("capture.frame_timeout");
         }
         thread::sleep(Duration::from_millis(20));
     };
     kill(&child);
-    let _ = reader.join();
+    let reader_result = reader.join().unwrap_or(Err("capture.process_io"));
     let _ = diagnostic.join();
-    result
+    if result.is_err() && busy.load(Ordering::Acquire) {
+        Err("capture.source_busy")
+    } else if result == Err("capture.frame_failed") {
+        reader_result
+    } else {
+        result
+    }
+}
+
+fn source_busy(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "device or resource busy",
+        "already in use",
+        "being used by another",
+        "0x80070020",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_frame(value: u8, at: Instant) -> Frame {
+        let frame = Frame {
+            width: 2,
+            height: 2,
+            native: (2, 2),
+            rgb: vec![value; 12],
+            serial: 0,
+            generation: 1,
+            at,
+        };
+        // Fake sources supply bytes through the production framing/decoding path.
+        read_frame(&mut std::io::Cursor::new(frame.png().unwrap()), 1, at).unwrap()
+    }
+
+    #[test]
+    fn warmup_black_then_picture_and_permanent_black_no_signal() {
+        let opened = Instant::now();
+        let state = Arc::new(Mutex::new(State::default()));
+        publish(&state, fake_frame(0, opened), opened, true).unwrap();
+        assert!(!state.lock().unwrap().ready);
+        publish(
+            &state,
+            fake_frame(0, opened + WARMUP - Duration::from_millis(1)),
+            opened,
+            true,
+        )
+        .unwrap();
+        assert!(!state.lock().unwrap().ready);
+        publish(&state, fake_frame(118, opened), opened, true).unwrap();
+        let frame = wait_latest(&state, None, Duration::ZERO, &AtomicBool::new(false)).unwrap();
+        assert_eq!(super::super::capture::signal(&frame.rgb).0, "present");
+
+        let state = Arc::new(Mutex::new(State::default()));
+        publish(&state, fake_frame(0, opened + WARMUP), opened, true).unwrap();
+        let frame = wait_latest(&state, None, Duration::ZERO, &AtomicBool::new(false)).unwrap();
+        assert_eq!(super::super::capture::signal(&frame.rgb).0, "no-signal");
+    }
+
+    #[test]
+    fn requests_reuse_the_live_owner_and_warm_up_each_reopen() {
+        let mut capture = Capture::start(None);
+        let now = Instant::now();
+        capture
+            .request_at(now, |_, state, stop| {
+                thread::spawn(move || {
+                    publish(&state, fake_frame(118, Instant::now()), now, true).unwrap();
+                    while !stop.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                })
+            })
+            .unwrap();
+        let frame = capture
+            .latest(None, Duration::from_secs(1), &AtomicBool::new(false))
+            .unwrap();
+        capture
+            .request_at(now + Duration::from_secs(10), |_, _, _| {
+                panic!("per-frame reopen")
+            })
+            .unwrap();
+        assert_eq!(
+            capture
+                .latest(None, Duration::from_secs(1), &AtomicBool::new(false))
+                .unwrap()
+                .serial,
+            frame.serial
+        );
+        assert!(!idle(&capture.state, now + Duration::from_secs(29 * 60)));
+        assert!(idle(&capture.state, now + Duration::from_secs(10) + IDLE));
+    }
+
+    #[test]
+    fn busy_diagnostics_are_fixed_codes_and_png_input_is_bounded() {
+        assert!(source_busy("Device or resource busy"));
+        assert!(source_busy(
+            "Could not run graph (device already in use by other application)"
+        ));
+        assert!(!source_busy("private screen and device text"));
+        let mut malformed = b"\x89PNG\r\n\x1a\n".to_vec();
+        malformed.extend_from_slice(&u32::MAX.to_be_bytes());
+        malformed.extend_from_slice(b"IDAT");
+        assert_eq!(
+            read_png(&mut std::io::Cursor::new(malformed)).unwrap_err(),
+            "capture.output_limit"
+        );
+    }
 
     #[test]
     fn zero_requests_never_discover_or_spawn() {
@@ -468,6 +678,7 @@ mod tests {
         let now = Instant::now();
         assert!(idle(&capture.state, now));
         capture.state.lock().unwrap().requested_at = Some(now);
+        assert!(!idle(&capture.state, now + Duration::from_secs(29 * 60)));
         assert!(!idle(&capture.state, now + IDLE - Duration::from_millis(1)));
         assert!(idle(&capture.state, now + IDLE));
     }
@@ -489,22 +700,26 @@ mod tests {
             "lavfi",
             "-i",
             "testsrc=size=320x240:rate=15",
-            "-vf",
-            "showinfo",
             "-threads",
             "1",
             "-filter_threads",
             "1",
             "-pix_fmt",
             "rgb24",
+            "-c:v",
+            "png",
             "-f",
-            "rawvideo",
+            "image2pipe",
             "pipe:1",
         ]
         .map(str::to_owned);
         let reader_state = state.clone();
         let stopping = stop.clone();
-        let worker = thread::spawn(move || stream(&args, (320, 240), 1, &reader_state, &stopping));
+        let worker = thread::spawn(move || {
+            let mut command = keyferry_core::process::command("ffmpeg");
+            command.args(args);
+            stream(command, 1, &reader_state, &stopping, true)
+        });
         let start = Instant::now();
         while state.lock().unwrap().latest.is_none() && start.elapsed() < Duration::from_secs(5) {
             thread::sleep(Duration::from_millis(10));
@@ -515,9 +730,9 @@ mod tests {
             .latest
             .as_ref()
             .map(|f| (f.width, f.height, f.rgb.len()));
+        state.lock().unwrap().requested_at = Some(Instant::now() - IDLE);
         assert!(worker.join().unwrap().is_ok());
         assert_eq!(observed, Some((320, 240, 320 * 240 * 3)));
         assert!(start.elapsed() < Duration::from_secs(6));
-        assert!(start.elapsed() >= IDLE);
     }
 }

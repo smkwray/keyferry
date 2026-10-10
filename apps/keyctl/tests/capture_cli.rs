@@ -15,6 +15,7 @@ fn main() {
         fake_ffmpeg(&mode);
         return;
     }
+    one_shot_warmup();
     if cfg!(windows) {
         run_native_windows_tests();
     } else {
@@ -51,20 +52,6 @@ fn fake_ffmpeg(mode: &str) {
         return;
     }
     assert_eq!(args.last().unwrap(), "pipe:1");
-    if args.windows(2).any(|p| p == ["-f", "rawvideo"]) {
-        let mut out = io::stdout().lock();
-        loop {
-            if out
-                .write_all(&[40, 80, 120].repeat(4))
-                .and_then(|()| out.flush())
-                .is_err()
-            {
-                return;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-    assert!(args.windows(2).any(|pair| pair == ["-frames:v", "1"]));
     if mode == "timeout" {
         let path = env::var_os("KEYCTL_FAKE_HEARTBEAT").unwrap();
         for n in 0..400 {
@@ -93,8 +80,8 @@ fn fake_ffmpeg(mode: &str) {
     let mut width = 2;
     let mut height = 1;
     for pair in args.windows(2) {
-        if pair[0] == "-video_size" || pair[0] == "-vf" {
-            let size = pair[1].trim_start_matches("scale=");
+        if pair[0] == "-video_size" || (pair[0] == "-vf" && pair[1].contains("scale=")) {
+            let size = pair[1].trim_start_matches("fps=5,scale=");
             let (w, h) = size
                 .split_once(if pair[0] == "-vf" { ':' } else { 'x' })
                 .unwrap();
@@ -102,15 +89,50 @@ fn fake_ffmpeg(mode: &str) {
             height = h.parse().unwrap();
         }
     }
-    let pixels = [0, 0, 0].repeat(width as usize * height as usize);
-    let mut encoder = png::Encoder::new(io::stdout().lock(), width, height);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .unwrap()
-        .write_image_data(&pixels)
-        .unwrap();
+    let mut out = io::stdout().lock();
+    for n in 0..400 {
+        let value = if mode == "warmup" && n >= 3 {
+            118
+        } else if mode == "ok" {
+            0
+        } else {
+            118
+        };
+        let pixels = [value; 3].repeat(width as usize * height as usize);
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+        if out.write_all(&bytes).and_then(|()| out.flush()).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn one_shot_warmup() {
+    let mut command = keyferry_core::process::command(env::current_exe().unwrap());
+    command
+        .args(["-f", "image2pipe", "pipe:1"])
+        .env("KEYCTL_FAKE_FFMPEG", "warmup");
+    let start = Instant::now();
+    let frame = keyferry_capture::frames::one_shot(command, Duration::from_secs(10)).unwrap();
+    assert_eq!(keyferry_capture::capture::signal(&frame.rgb).0, "present");
+    assert!(start.elapsed() >= Duration::from_millis(150));
+    let mut command = keyferry_core::process::command(env::current_exe().unwrap());
+    command
+        .args(["-f", "image2pipe", "pipe:1"])
+        .env("KEYCTL_FAKE_FFMPEG", "ok");
+    let start = Instant::now();
+    let frame = keyferry_capture::frames::one_shot(command, Duration::from_secs(10)).unwrap();
+    assert_eq!(keyferry_capture::capture::signal(&frame.rgb).0, "no-signal");
+    assert!(start.elapsed() >= keyferry_capture::frames::WARMUP);
+    assert!(start.elapsed() < Duration::from_secs(9));
 }
 
 fn invoke(directory: &Path, mode: &str, args: &[&str]) -> Output {
