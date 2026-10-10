@@ -157,6 +157,7 @@ def run_cpp_check(compiler: str) -> None:
                     ROOT / "firmware/esp32s3/components/kf_config_store/src/roaming_config.cpp",
                     ROOT
                     / "firmware/esp32s3/components/kf_esp_transport/src/transport_policy.cpp",
+                    ROOT / "firmware/esp32s3/components/kf_esp_transport/src/transport_arbiter.cpp",
                     ROOT
                     / "firmware/esp32s3/components/kf_esp_transport/test/transport_policy_test.cpp",
                 ],
@@ -417,6 +418,32 @@ def run_cpp_check(compiler: str) -> None:
             [ROOT / "firmware/esp32s3/components/kf_status/include",
              ROOT / "firmware/esp32s3/components/kf_esp_status_display/include"],
             [ROOT / "firmware/esp32s3/components/kf_status/test/status_led_test.cpp"],
+        ))
+        transport = ROOT / "firmware/esp32s3/components/kf_esp_transport"
+        # Only platform/crypto headers are substituted. Compile the production
+        # transport owner loop with its real endpoint and arbitration sources.
+        shims = tmp / "idf-transport"
+        for header in (
+            "esp_event.h", "esp_log.h", "esp_netif.h", "esp_random.h",
+            "esp_timer.h", "esp_tls.h", "esp_tls_errors.h", "esp_wifi.h",
+            "freertos/FreeRTOS.h", "freertos/event_groups.h", "freertos/task.h",
+            "mbedtls/md.h", "mbedtls/ssl.h", "mbedtls/x509_crt.h",
+        ):
+            path = shims / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('#include "idf_transport_test_stubs.h"\n', encoding="utf-8")
+        _, policy_includes, policy_sources = next(
+            check for check in checks if check[0] == "transport-policy-test")
+        checks.append((
+            "esp-transport-test",
+            [shims, transport / "test", *policy_includes,
+             ROOT / "firmware/esp32s3/components/kf_ble_transport/include",
+             ROOT / "firmware/esp32s3/components/kf_esp_discovery/include",
+             ROOT / "firmware/esp32s3/components/kf_discovery/include"],
+            [*policy_sources[:-1],
+             transport / "src/gateway_handoff.cpp",
+             ROOT / "firmware/esp32s3/components/kf_discovery/src/discovery.cpp",
+             transport / "test/esp_transport_test.cpp"],
         ))
         for name, includes, sources in checks:
             executable = tmp / (f"{name}.exe" if sys.platform == "win32" else name)

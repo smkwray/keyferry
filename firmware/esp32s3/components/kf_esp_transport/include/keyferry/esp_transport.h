@@ -140,6 +140,8 @@ class EspTransport final : public endpoint::Effects {
   void RejectWifi(protocol::WifiRejectReason reason);
   void CloseWifiAttempt();
   void ClearPeerAuthorization();
+  void RememberWifiOwner();
+  void ObserveInputCompletion(const std::uint8_t* data, std::size_t length);
   std::uint32_t WifiPreferenceRemainingMs(std::uint64_t now_ms) const;
   void RecordWifi(WifiStage stage, std::int32_t error = 0);
 
@@ -156,6 +158,10 @@ class EspTransport final : public endpoint::Effects {
   void* tls_{nullptr};
   std::array<char, kIpv4TextCapacity> resolved_host_ipv4_{};
   std::size_t resolved_host_ipv4_length_{0};
+  std::array<char, kIpv4TextCapacity> last_good_ipv4_{};
+  std::size_t last_good_ipv4_length_{0};
+  std::array<std::uint8_t, 16> last_good_installation_id_{};
+  bool retry_last_good_{false};
   endpoint::TlsClientPolicy accepted_tls_policy_{};
   std::array<std::uint8_t, 16> active_host_id_{};
   std::array<std::uint8_t, 32> active_link_secret_{};
@@ -182,6 +188,9 @@ class EspTransport final : public endpoint::Effects {
   std::uint64_t candidate_started_ms_{0};
   std::uint64_t last_route_proof_ms_{0};
   std::uint32_t ble_generation_{0};
+  // Conservative until this arm's correlated terminal neutral result, or a
+  // completed explicit disarm. Rejected/unknown work never permits handoff.
+  std::uint32_t input_arm_sequence_{0};
   bool station_initialized_{false};
   bool wifi_connecting_{false};
   bool ble_authentication_requested_{false};

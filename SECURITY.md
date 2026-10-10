@@ -147,6 +147,12 @@ phrases, or a general-purpose secret vault on the dongle.
     a separate bounded recovery phase. The target exposes no command authority before correlated
     ACCEPT. Lost START responses are observed and never retried; the controller changes authority
     only after the target proves `transferred`. See ADR 0012.
+    A healthy authenticated holder is retained across other-controller beacons/restarts and
+    failures of an unused carrier; no selection timer or losing candidate may revoke it. Ordinary
+    discovery stops while held. A real transport failure clears input and authority before bounded
+    reconnect; the last authenticated address is one routing hint, never cached authorization.
+    Endpoint handoff refuses an outstanding arm until its correlated emitted neutral result or
+    completed explicit disarm. Rejected or uncertain results require explicit disarm.
 11. **Physical firmware update:** Plan accepts one strict package, qualified private unit record, and
     exact local serial port after manual ROM entry. It never discovers ports or manufactures boot
     mode. Live ROM, canonical eFuse summary, flash, security, and exact-length preserved-region

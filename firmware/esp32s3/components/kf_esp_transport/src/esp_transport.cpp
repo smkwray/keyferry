@@ -317,6 +317,10 @@ bool EspTransport::HandleGatewayHandoff(
                            route_proof_session_id_ == active_session_id_;
 
   if (request.operation == protocol::GatewayHandoffOperation::kStart) {
+    if (input_arm_sequence_ != 0 || session_.control_reply_pending()) {
+      set_rejection(protocol::GatewayHandoffStatus::kBusy);
+      return true;
+    }
     if (config_.authority_mode != AuthorityMode::kOwnerRoaming ||
         candidate_path_ == Path::kNone ||
         (candidate_path_ == Path::kWifi && resolved_host_ipv4_length_ == 0) ||
@@ -393,6 +397,7 @@ bool EspTransport::HandleGatewayHandoff(
       status->status = protocol::GatewayHandoffStatus::kInvalidTransition;
       return true;
     }
+    RememberWifiOwner();
     *status = gateway_handoff_.Status(request.operation, now_ms);
     return true;
   }
@@ -452,6 +457,7 @@ bool EspTransport::SendTls(const std::uint8_t* data, std::size_t length) {
         return false;
       }
     }
+    ObserveInputCompletion(data, length);
     return true;
   }
   if (candidate_path_ != Path::kWifi || tls_ == nullptr) {
@@ -473,7 +479,29 @@ bool EspTransport::SendTls(const std::uint8_t* data, std::size_t length) {
       return false;
     }
   }
+  ObserveInputCompletion(data, length);
   return true;
+}
+
+void EspTransport::ObserveInputCompletion(const std::uint8_t* data,
+                                         const std::size_t length) {
+  if (input_arm_sequence_ == 0) return;
+  std::array<std::uint8_t, protocol::kMaxDecodedFrame> scratch{};
+  protocol::DecodedFrame frame{};
+  if (protocol::DecodeWireFrame(data, length, scratch.data(), scratch.size(),
+                                &frame) == protocol::CodecError::kOk &&
+      frame.sequence == input_arm_sequence_ && frame.payload_length >= 17 &&
+      frame.payload[16] == static_cast<std::uint8_t>(protocol::ResultCode::kEmitted)) {
+    const auto type = static_cast<protocol::MessageType>(frame.message_type);
+    const bool neutral =
+        (type == protocol::MessageType::kCommandResult && frame.payload_length == 17) ||
+        (type == protocol::MessageType::kInputCommandResultV1 &&
+         frame.payload_length == 21 && frame.payload[17] == 3) ||
+        (type == protocol::MessageType::kInputCommandResultV2 &&
+         frame.payload_length == 22 && frame.payload[17] == 3 && frame.payload[18] == 3);
+    if (neutral) input_arm_sequence_ = 0;
+  }
+  SecureClear(scratch.data(), scratch.size());
 }
 
 bool EspTransport::SessionAuthenticated(std::uint64_t epoch,
@@ -492,13 +520,17 @@ bool EspTransport::SessionAuthenticated(std::uint64_t epoch,
 
 bool EspTransport::CommandScopedArm(std::uint64_t epoch,
                                     std::uint32_t next_command_sequence) {
-  return delegate_.CommandScopedArm(epoch, next_command_sequence);
+  if (!delegate_.CommandScopedArm(epoch, next_command_sequence)) return false;
+  input_arm_sequence_ = next_command_sequence;
+  return true;
 }
 
 bool EspTransport::Disarm(std::uint64_t epoch) { return delegate_.Disarm(epoch); }
 
 bool EspTransport::DisarmComplete(std::uint64_t epoch) {
-  return delegate_.DisarmComplete(epoch);
+  if (!delegate_.DisarmComplete(epoch)) return false;
+  input_arm_sequence_ = 0;
+  return true;
 }
 
 bool EspTransport::AuthenticatedFrame(std::uint64_t epoch,
@@ -614,6 +646,10 @@ bool EspTransport::InitializeStation() {
 }
 
 bool EspTransport::StartWifiCandidate() {
+  if (arbiter_.active_path() != Path::kNone || session_.authenticated() ||
+      candidate_path_ != Path::kNone) {
+    return false;
+  }
   auto events = static_cast<EventGroupHandle_t>(wifi_events_);
   xEventGroupClearBits(events, kStationGotIp | kStationDisconnected);
   advertised_installation_id_.fill(0);
@@ -708,6 +744,8 @@ bool EspTransport::PollWifiCandidate(std::uint64_t now_ms) {
     RejectWifi(WifiReject::kTlsFailed);
     return false;
   }
+  now_ms = NowMs();
+  arbiter_.WifiTlsVerified(now_ms);
   if (!BeginEndpointTls(observation, authorization)) return false;
   endpoint_tls_started_ = true;
   candidate_started_ms_ = now_ms;
@@ -715,6 +753,16 @@ bool EspTransport::PollWifiCandidate(std::uint64_t now_ms) {
 }
 
 bool EspTransport::ResolveHostAddress(std::uint32_t timeout_ms) {
+  if (retry_last_good_) {
+    retry_last_good_ = false;
+    resolved_host_ipv4_ = last_good_ipv4_;
+    resolved_host_ipv4_length_ = last_good_ipv4_length_;
+    advertised_installation_id_ = last_good_installation_id_;
+    // This retained address is only a hint. The usual TLS policy, exact peer
+    // identity and fresh device authentication still apply, even after reboot
+    // of that controller. One failure resumes ordinary beacon discovery.
+    return resolved_host_ipv4_length_ != 0;
+  }
   discovery::HostSelection selection{};
   if (config_.authority_mode == AuthorityMode::kOwnerRoaming) {
     if (!discovery::ReceiveRoamingBeacon(
@@ -1141,7 +1189,9 @@ bool EspTransport::BeginEndpointTls(
 }
 
 bool EspTransport::StartBleTls(std::uint64_t now_ms) {
-  if (!ble_authentication_requested_ || ble_generation_ == 0 ||
+  if (arbiter_.active_path() != Path::kNone || session_.authenticated() ||
+      candidate_path_ != Path::kNone ||
+      !ble_authentication_requested_ || ble_generation_ == 0 ||
       !ble_peripheral_.ready(ble_generation_)) {
     return false;
   }
@@ -1288,7 +1338,7 @@ void EspTransport::ApplyActions(const ArbitrationActions& actions,
   }
   if (actions.cancel_wifi) {
     wifi_connecting_ = false;
-    (void)esp_wifi_disconnect();
+    if (arbiter_.active_path() != Path::kWifi) (void)esp_wifi_disconnect();
     if (candidate_path_ == Path::kWifi &&
         arbiter_.active_path() != Path::kWifi) {
       RejectWifi(WifiPreferenceRemainingMs(NowMs()) == 0
@@ -1300,7 +1350,7 @@ void EspTransport::ApplyActions(const ArbitrationActions& actions,
       endpoint_authenticated_ = false;
     }
   }
-  if (actions.stop_ble) {
+  if (actions.stop_ble && arbiter_.active_path() != Path::kBluetooth) {
     if (candidate_path_ == Path::kBluetooth) {
       session_.TransportFault();
       ble_tls_.Close();
@@ -1312,7 +1362,9 @@ void EspTransport::ApplyActions(const ArbitrationActions& actions,
     ble_handshake_active_ = false;
     ble_peripheral_.Stop();
   }
-  if (actions.start_wifi && !StartWifiCandidate()) {
+  if (actions.start_wifi && arbiter_.active_path() == Path::kNone &&
+      !session_.authenticated() && candidate_path_ == Path::kNone &&
+      !StartWifiCandidate()) {
     CandidateFailed(now_ms);
   }
   if (actions.start_ble_advertising &&
@@ -1352,6 +1404,7 @@ void EspTransport::PromoteAuthenticatedCandidate(std::uint64_t now_ms) {
       return;
     }
     published_path_.store(candidate_path_, std::memory_order_release);
+    RememberWifiOwner();
     if (candidate_path_ == Path::kWifi) {
       RecordWifi(WifiStage::kAuthenticated);
     }
@@ -1372,6 +1425,7 @@ void EspTransport::PromoteAuthenticatedCandidate(std::uint64_t now_ms) {
     return;
   }
   published_path_.store(candidate_path_, std::memory_order_release);
+  RememberWifiOwner();
   if (candidate_path_ == Path::kWifi) {
     RecordWifi(WifiStage::kAuthenticated);
   }
@@ -1397,15 +1451,18 @@ void EspTransport::CandidateFailed(std::uint64_t now_ms) {
   ble_authentication_requested_ = false;
   ble_handshake_active_ = false;
   ArbitrationActions actions{};
-  if (failed_path == Path::kBluetooth || arbiter_.ble_connected()) {
+  if (failed_path == Path::kWifi) {
+    actions = arbiter_.WifiAttemptFinished(false, now_ms);
+  } else if (failed_path == Path::kBluetooth || arbiter_.ble_connected()) {
     actions = arbiter_.BleCandidateFailed(now_ms);
-  } else if (failed_path == Path::kWifi || arbiter_.wifi_candidate_active()) {
+  } else if (arbiter_.wifi_candidate_active()) {
     actions = arbiter_.WifiAttemptFinished(false, now_ms);
   }
   ApplyActions(actions, now_ms);
 }
 
 void EspTransport::ActiveTransportLost(std::uint64_t now_ms) {
+  retry_last_good_ = candidate_path_ == Path::kWifi && last_good_ipv4_length_ != 0;
   RejectWifi(WifiReject::kTransportFailed);
   session_.TransportFault();
   CloseCurrentTls();
@@ -1484,6 +1541,7 @@ void EspTransport::CloseCurrentTls(const bool finish_wifi_attempt) {
 }
 
 void EspTransport::ClearPeerAuthorization() {
+  input_arm_sequence_ = 0;
   accepted_tls_policy_ = {};
   active_host_id_.fill(0);
   SecureClear(active_link_secret_.data(), active_link_secret_.size());
@@ -1493,6 +1551,14 @@ void EspTransport::ClearPeerAuthorization() {
   route_proof_session_id_.fill(0);
   SecureClear(route_proof_digest_.data(), route_proof_digest_.size());
   route_proof_expires_ms_ = 0;
+}
+
+void EspTransport::RememberWifiOwner() {
+  if (candidate_path_ == Path::kWifi && session_.authenticated()) {
+    last_good_ipv4_ = resolved_host_ipv4_;
+    last_good_ipv4_length_ = resolved_host_ipv4_length_;
+    last_good_installation_id_ = active_host_id_;
+  }
 }
 
 std::uint32_t EspTransport::WifiPreferenceRemainingMs(

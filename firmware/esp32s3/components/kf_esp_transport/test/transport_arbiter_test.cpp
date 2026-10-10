@@ -113,14 +113,12 @@ void TestIdleBleAdvertisingPeriodicallyRetriesWifi() {
   actions = arbiter.Poll(keyferry::protocol::kBleWifiPreferenceMs);
   assert(actions.cancel_wifi);
   assert(!actions.start_wifi);
-  actions = arbiter.Poll(keyferry::protocol::kBleAdvertisingDelayMs +
-                         keyferry::protocol::kBleWifiRetryIntervalMs - 1);
+  actions = arbiter.Poll(keyferry::protocol::kBleWifiPreferenceMs + 249);
   assert(!actions.start_wifi);
-  actions = arbiter.Poll(keyferry::protocol::kBleAdvertisingDelayMs +
-                         keyferry::protocol::kBleWifiRetryIntervalMs);
-  assert(actions.stop_ble && actions.start_wifi);
+  actions = arbiter.Poll(keyferry::protocol::kBleWifiPreferenceMs + 250);
+  assert(!actions.stop_ble && actions.start_wifi);
   assert(arbiter.wifi_candidate_active());
-  assert(!arbiter.ble_advertising());
+  assert(arbiter.ble_advertising());
 }
 
 void TestFastWifiRetryStillAllowsFullBleAdvertisingWindow() {
@@ -128,24 +126,17 @@ void TestFastWifiRetryStillAllowsFullBleAdvertisingWindow() {
   arbiter.Boot(0);
   arbiter.Poll(keyferry::protocol::kBleAdvertisingDelayMs);
   arbiter.Poll(keyferry::protocol::kBleWifiPreferenceMs);
-  auto actions = arbiter.Poll(keyferry::protocol::kBleAdvertisingDelayMs +
-                              keyferry::protocol::kBleWifiRetryIntervalMs);
-  assert(actions.stop_ble && actions.start_wifi);
+  auto actions = arbiter.Poll(keyferry::protocol::kBleWifiPreferenceMs + 250);
+  assert(!actions.stop_ble && actions.start_wifi);
 
-  const auto wifi_failed_ms = keyferry::protocol::kBleAdvertisingDelayMs +
-                              keyferry::protocol::kBleWifiRetryIntervalMs + 1;
+  const auto wifi_failed_ms = keyferry::protocol::kBleWifiPreferenceMs + 251;
   actions = arbiter.WifiAttemptFinished(false, wifi_failed_ms);
   assert(!actions.start_ble_advertising);
-  const auto advertising_started_ms =
-      wifi_failed_ms + keyferry::protocol::kBleAdvertisingDelayMs;
-  actions = arbiter.Poll(advertising_started_ms);
-  assert(actions.start_ble_advertising);
-  actions = arbiter.Poll(advertising_started_ms +
-                         keyferry::protocol::kBleWifiRetryIntervalMs - 1);
+  assert(arbiter.ble_advertising());
+  actions = arbiter.Poll(wifi_failed_ms + 499);
   assert(!actions.start_wifi);
-  actions = arbiter.Poll(advertising_started_ms +
-                         keyferry::protocol::kBleWifiRetryIntervalMs);
-  assert(actions.stop_ble && actions.start_wifi);
+  actions = arbiter.Poll(wifi_failed_ms + 500);
+  assert(!actions.stop_ble && actions.start_wifi);
 }
 
 void TestWifiOnlyNeverRequestsBle() {
@@ -155,14 +146,11 @@ void TestWifiOnlyNeverRequestsBle() {
   actions = arbiter.WifiAttemptFinished(false, 100);
   assert(actions.fail_closed && !actions.start_wifi &&
          !actions.start_ble_advertising);
-  actions = arbiter.Poll(100 +
-                         keyferry::protocol::kBleWifiRetryIntervalMs - 1);
+  actions = arbiter.Poll(349);
   assert(!actions.start_wifi && !actions.start_ble_advertising);
-  actions = arbiter.Poll(100 +
-                         keyferry::protocol::kBleWifiRetryIntervalMs);
+  actions = arbiter.Poll(350);
   assert(actions.start_wifi && !actions.start_ble_advertising);
-  actions = arbiter.Poll(100 +
-                         keyferry::protocol::kBleWifiRetryIntervalMs + 1);
+  actions = arbiter.Poll(351);
   assert(!actions.start_ble_advertising);
 }
 
@@ -182,7 +170,7 @@ void TestBothUnavailableFailsClosedWithoutRadioAction() {
   auto actions = arbiter.Boot(0, TransportAvailability{false, false});
   assert(!actions.start_wifi && !actions.start_ble_advertising);
   actions = arbiter.Disable(Path::kBluetooth, 1);
-  assert(actions.fail_closed && !actions.start_wifi &&
+  assert(!actions.fail_closed && !actions.start_wifi &&
          !actions.start_ble_advertising);
 }
 
@@ -190,7 +178,7 @@ void TestDisablingBleKeepsWifiSelectionAlive() {
   TransportArbiter arbiter;
   arbiter.Boot(0);
   auto actions = arbiter.Disable(Path::kBluetooth, 1);
-  assert(actions.fail_closed && !actions.start_wifi &&
+  assert(!actions.fail_closed && !actions.start_wifi &&
          !actions.start_ble_advertising);
   assert(arbiter.wifi_candidate_active());
 }
@@ -227,6 +215,48 @@ void TestFreshBootAfterAnActivePathRestartsSelection() {
   assert(arbiter.generation() > generation);
 }
 
+void AssertNoActions(const keyferry::transport::ArbitrationActions& actions) {
+  assert(!actions.start_wifi && !actions.cancel_wifi &&
+         !actions.start_ble_advertising && !actions.stop_ble &&
+         !actions.start_ble_authentication && !actions.fail_closed);
+}
+
+void TestUnusedCarrierCannotRevokeEitherHolder() {
+  for (const auto owner : {Path::kWifi, Path::kBluetooth}) {
+    TransportArbiter arbiter;
+    arbiter.Boot(0);
+    arbiter.QuiesceForTargetedHandoff();
+    assert(arbiter.InstallTargetedOwner(owner));
+    const auto generation = arbiter.generation();
+    const auto other = owner == Path::kWifi ? Path::kBluetooth : Path::kWifi;
+    assert(!arbiter.InstallTargetedOwner(other));
+    for (std::uint64_t now = 1; now < 180000; now += 1000) {
+      AssertNoActions(arbiter.Disable(other, now));
+      AssertNoActions(arbiter.Poll(now));
+      AssertNoActions(arbiter.WifiAttemptFinished(true, now));
+      AssertNoActions(arbiter.BleConnected(now));
+      AssertNoActions(arbiter.BleAuthenticated(now));
+      AssertNoActions(arbiter.BleCandidateFailed(now));
+      assert(arbiter.active_path() == owner && arbiter.generation() == generation);
+    }
+    const auto actions = arbiter.ActiveTransportLost(180000);
+    assert(actions.fail_closed && arbiter.active_path() == Path::kNone);
+    assert(arbiter.generation() == generation + 1);
+  }
+}
+
+void TestVerifiedWifiGetsItsFullAuthenticationBudget() {
+  TransportArbiter arbiter;
+  arbiter.Boot(0);
+  arbiter.WifiTlsVerified(14990);
+  auto actions = arbiter.Poll(15000);
+  assert(!actions.cancel_wifi);
+  actions = arbiter.Poll(34989);
+  assert(!actions.cancel_wifi);
+  actions = arbiter.Poll(34990);
+  assert(actions.cancel_wifi);
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +274,8 @@ int main() {
   TestDisablingBleKeepsWifiSelectionAlive();
   TestTargetedHandoffQuiescesOrdinarySelection();
   TestFreshBootAfterAnActivePathRestartsSelection();
+  TestUnusedCarrierCannotRevokeEitherHolder();
+  TestVerifiedWifiGetsItsFullAuthenticationBudget();
   std::puts("transport_arbiter_test: ok");
   return 0;
 }
