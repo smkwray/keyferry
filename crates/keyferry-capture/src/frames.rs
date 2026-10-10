@@ -250,7 +250,7 @@ fn stream(
     state: &Arc<Mutex<State>>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), &'static str> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = crate::hide_console(&mut Command::new("ffmpeg"))
         .args(args)
         .env_remove("FFREPORT")
         .stdin(Stdio::null())

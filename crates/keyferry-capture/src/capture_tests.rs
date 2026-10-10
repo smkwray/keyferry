@@ -258,3 +258,21 @@ fn error_exit_codes_are_explicit() {
         assert_eq!(Error::new(code, "test").exit(), exit);
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn background_capture_child_has_no_console() {
+    let mut command = Command::new("pwsh");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CaptureConsole { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; if ([CaptureConsole]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 1 }; Write-Output 'no-console'"#,
+    ]);
+    let output = bounded_output(command, TIMEOUT, MAX_LIST_BYTES, Backend::current()).unwrap();
+    assert!(output.status.success(), "capture child acquired a console");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "no-console"
+    );
+}

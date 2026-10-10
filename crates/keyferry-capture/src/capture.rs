@@ -279,7 +279,7 @@ fn bounded_output(
     limit: usize,
     backend: Backend,
 ) -> Result<Output, Error> {
-    let mut child = command
+    let mut child = crate::hide_console(&mut command)
         .env_remove("FFREPORT")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,7 +337,7 @@ fn bounded_output(
 pub fn stop_child(child: &mut Child) {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = crate::hide_console(&mut Command::new("taskkill"))
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
