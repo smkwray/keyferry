@@ -9,8 +9,8 @@ from scripts.qualify_windows_target import CHECKS, assess, build_sequence, glide
 
 class WindowsTargetTests(unittest.TestCase):
     def test_exact_present_composite_identity_only(self):
-        device = str(uuid.UUID(int=1))
-        parent = {'instance_id': 'USB\\VID_303A&PID_4008\\'+uuid.UUID(device).hex,
+        device = str(uuid.UUID(int=1 << 64))
+        parent = {'instance_id': 'USB\\VID_303A&PID_4008\\'+uuid.UUID(device).hex[:31],
                   'service': 'usbccgp'}
         self.assertTrue(local_usb_matches(device, [parent]))
         for field, value in [('instance_id', parent['instance_id'].replace('303A', '1234')),
@@ -18,7 +18,7 @@ class WindowsTargetTests(unittest.TestCase):
                              ('service', 'HidUsb'), ('instance_id', parent['instance_id']+'0')]:
             self.assertFalse(local_usb_matches(device, [dict(parent, **{field: value})]))
         self.assertFalse(local_usb_matches(device, []))
-        self.assertFalse(local_usb_matches(str(uuid.UUID(int=2)), [parent]))
+        self.assertFalse(local_usb_matches(str(uuid.UUID(int=2 << 64)), [parent]))
 
     def test_glide_starts_at_current_pixel_and_eases(self):
         actions = glide((0.1, 0.2), (0.8, 0.7))
@@ -50,6 +50,8 @@ class WindowsTargetTests(unittest.TestCase):
         self.assertFalse(assess('relative', (20, 30), (20, 30), [], {'outcome': 'REJECTED', 'error': {'code': 'daemon.unavailable'}}, (1001, 1001))['passed'])
         self.assertFalse(assess('relative', (20, 30), (20, 30), [], {'outcome': 'UNKNOWN'}, (1001, 1001))['passed'])
         self.assertFalse(assess('relative', (20, 30), (21, 30), [], emitted, (1001, 1001))['passed'])
+        self.assertTrue(assess('relative', (20, 30), (80, 30), [], emitted, (1001, 1001))['passed'])  # moved and stayed
+        self.assertFalse(assess('relative', (20, 30), (20, 30), [], emitted, (1001, 1001))['passed'])  # snapped back
         events = [dict(kind='key', char=c) for c in 'abc']
         self.assertTrue(assess('typing', (0, 0), (0, 0), events, emitted, (1001, 1001))['passed'])
         self.assertFalse(assess('typing', (0, 0), (0, 0), events[:2], emitted, (1001, 1001))['passed'])

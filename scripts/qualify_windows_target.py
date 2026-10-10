@@ -26,7 +26,9 @@ def hidden_run(command, **kwargs):
 
 
 def local_usb_matches(device, instances):
-    serial = uuid.UUID(device).hex.upper()
+    # The USB serial string carries the first 31 hex digits of the device id: TinyUSB's
+    # string-descriptor buffer holds 31 characters (seen identically on Windows and macOS).
+    serial = uuid.UUID(device).hex.upper()[:31]
     return any(re.fullmatch(r'USB\\VID_303A&PID_[0-9A-F]{4}\\' + serial,
                             item['instance_id'].upper())
                and item['service'].lower() == 'usbccgp' for item in instances)
@@ -119,8 +121,12 @@ def assess(check, before, after, events, command, size):
     elif check == 'relative':
         accepted = emitted or (command.get('outcome') == 'REJECTED' and
                                (command.get('error') or {}).get('code') == 'input.capability_required')
-        passed = accepted and after == before
-        passed &= all(e['position'] == before for e in events if e['kind'] in ('move', 'drag1'))
+        if emitted:
+            # Relative+absolute sticks: the cursor moves right and stays (no snap back at command end).
+            passed = after[0] - before[0] >= 20 and abs(after[1] - before[1]) <= 2
+        else:
+            # Absolute-only (macOS) sticks refuse relative input before arming; nothing may move.
+            passed = accepted and after == before
     elif check == 'typing':
         passed = emitted and ''.join(e.get('char', '') for e in events if e['kind'] == 'key') == 'abc'
     return dict(check=check, passed=bool(passed), before=before, after=after,
