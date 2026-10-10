@@ -5,6 +5,8 @@ param(
     [string]$Settings = '',
     [switch]$DryRun,
     [switch]$NewDevice,
+    [ValidatePattern('^(|COM[1-9][0-9]{0,2})$')]
+    [string]$Port = '',
     # Internal adapter; uses the existing program+credential installer, not a
     # second install implementation. The Python state machine invokes it once.
     [string]$ApplyInstallation = ''
@@ -56,5 +58,6 @@ $argsList = @("$PSScriptRoot/provision_stick.py", '--main-root', $MainRoot,
     '--board-profile', $BoardProfile, '--settings', $Settings)
 if ($DryRun) { $argsList += '--dry-run' }
 if ($NewDevice) { $argsList += '--new-device' }
+if ($Port) { $argsList += @('--port', $Port) }
 & $python @argsList
 exit $LASTEXITCODE

@@ -376,7 +376,7 @@ class Rom:
         self.esp.__exit__(None, None, None)
 
 
-def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=print, new_device=False):
+def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=print, new_device=False, port=None):
     """Shared production state machine. Write intent is durable before erase."""
     private.mkdir(parents=True, exist_ok=True)
     current = private / ("provision-current-" + profile["id"] + ".json")
@@ -458,6 +458,12 @@ def execute(tools, private, profile, approval, dry_run=False, timeout=90, emit=p
             candidates = [p for p in baseline if p == saved]
             if len(candidates) == 1:
                 selected = candidates[0]
+        if selected is None and port:
+            # Operator-named port for a stick already attached; identity is still read below.
+            named = [p for p in baseline if p["port"] == port and p["vid"] == 0x303A]
+            if len(named) != 1:
+                raise Stop("NAMED_303A_PORT_NOT_PRESENT")
+            selected = named[0]
         while selected is None and time.monotonic() < deadline:
             selected = select_port(baseline, tools.ports())
             if selected is None:
@@ -568,6 +574,7 @@ def main():
     parser.add_argument("--settings", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--new-device", action="store_true")
+    parser.add_argument("--port", help="COM port of a stick already attached in ROM mode")
     args = parser.parse_args()
     profile = load(ROOT / "firmware/esp32s3/boards" / args.board_profile / "board.json")
     private = args.main_root / "hardware/evidence/private"
@@ -592,7 +599,7 @@ def main():
                   end="" if line == "." or line.startswith("WAIT:") else "\n")
         with process_lock(private), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             execute(tools, private, profile, approval, args.dry_run,
-                    emit=console_line, new_device=args.new_device)
+                    emit=console_line, new_device=args.new_device, port=args.port)
         return 0
     except Exception as error:
         print("STOP: " + (str(error) if isinstance(error, Stop) else "TOOL_OR_INPUT_FAILURE"))
