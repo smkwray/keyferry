@@ -2714,6 +2714,7 @@ dependencies = [
 name = "keyferry-capture"
 version = "0.0.0"
 dependencies = [
+ "ab_glyph",
  "image",
  "keyferry-core",
  "png",

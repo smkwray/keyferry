@@ -10,10 +10,11 @@ use keyferry_layouts::recipe::{
     routines::{self, Step},
     RecipeV1,
 };
+use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -35,6 +36,7 @@ const SETTLE: Duration = Duration::from_millis(350);
 const ANIMATION_SAMPLE: Duration = Duration::from_millis(1100);
 // Live MCP comparison: JPEG was 32x smaller and returned 27% faster than fast PNG.
 const DEFAULT_IMAGE_FORMAT: &str = "jpeg";
+const GLIDE_HELP: &str = " The pointer always glides (~120-240 ms, eased) from its last position; buttons press after arrival.";
 const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
 
 fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
@@ -362,11 +364,11 @@ fn tool_result(value: Value, error: bool) -> Value {
 
 // One schema table governs tool listing AND runtime validation.
 fn tools() -> Vec<Value> {
-    let pixel = json!({"type":"integer","minimum":0,"maximum":frames::MAX_SIDE - 1});
+    let pixel = json!({"type":"integer","minimum":0,"maximum":MAX_SCREENSHOT_SIDE - 1});
     let boolean = json!({"type":"boolean"});
     let button = json!({"type":"string","enum":["left","right","middle"]});
     let region = json!({"type":"object","additionalProperties":false,"required":["x","y","width","height"],
-        "properties":{"x":pixel,"y":pixel,"width":{"type":"integer","minimum":1,"maximum":frames::MAX_SIDE},"height":{"type":"integer","minimum":1,"maximum":frames::MAX_SIDE}}});
+        "properties":{"x":pixel,"y":pixel,"width":{"type":"integer","minimum":1,"maximum":MAX_SCREENSHOT_SIDE},"height":{"type":"integer","minimum":1,"maximum":MAX_SCREENSHOT_SIDE}}});
     let mut result = Vec::new();
     let mut add = |name: &str,
                    description: &str,
@@ -374,17 +376,21 @@ fn tools() -> Vec<Value> {
                    required: &[&str],
                    read_only: bool| {
         let action = ["move", "click", "drag", "scroll", "key", "type_text"].contains(&name);
+        let pointer = ["move", "click", "drag", "scroll"].contains(&name);
         let mut properties = properties;
         if action {
             properties["return_screenshot"] = json!({"type":"boolean","default":true});
             properties["format"] =
                 json!({"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT});
         }
-        let description = if action {
+        let mut description = if action {
             format!("{description} Returns the observed post-action image by default (return_screenshot:false opts out), settled, latency_ms from EMITTED to visible change, and frame_id. Moves return when a compact cursor change is seen near the target; other actions require adaptive quiet on fresh frames within 3 s. settled:false never authorizes replay.")
         } else {
             description.to_owned()
         };
+        if pointer {
+            description.push_str(GLIDE_HELP);
+        }
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
     };
@@ -448,7 +454,7 @@ fn tools() -> Vec<Value> {
     );
     let actions: Vec<Value> = result.iter().filter(|t| ["move", "click", "drag", "scroll", "key", "type_text"].contains(&t["name"].as_str().unwrap_or("")))
         .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"],"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean"}}})).collect();
-    result.push(json!({"name":"batch","description":r#"Ad-hoc input through the routine executor: contiguous actions merge into one bounded command. Example: {"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":800}],"settle":false}. Per-action settle:true inserts a stable checkpoint; settle defaults true after the last stretch. Stops on non-EMITTED/failed check; never retries. One final image by default."#,
+    result.push(json!({"name":"batch","description":r#"Ad-hoc input through the routine executor: contiguous actions merge into one bounded command. Example: {"actions":[{"tool":"key","arguments":{"keys":["ESCAPE"]},"repeat":10,"delay_ms":800}],"settle":false}. Per-action settle:true inserts a stable checkpoint; settle defaults true after the last stretch. Stops on non-EMITTED/failed check; never retries. One final image by default. Pointer glides can split a long stretch into consecutive commands."#,
         "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"repeat":{"type":"integer","minimum":1,"maximum":1000},"delay_ms":{"type":"integer","minimum":0,"maximum":10000},"settle":{"type":"boolean","default":true},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
         "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}));
     result
@@ -842,6 +848,103 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
         Ok(result)
     }
+    /// Presumed pointer position (normalized HID) for the device, shared by every session on
+    /// this controller. Absent or malformed means unknown: the next glide starts at
+    /// `routines::GLIDE.origin`.
+    fn pointer_path(&self) -> PathBuf {
+        self.root.join(format!("{}.pointer.json", self.device))
+    }
+    fn presumed(&self) -> Option<[f64; 2]> {
+        let at: [f64; 2] = serde_json::from_slice(&fs::read(self.pointer_path()).ok()?).ok()?;
+        at.iter().all(|v| (0.0..=1.0).contains(v)).then_some(at)
+    }
+    /// Best effort: a lost write only costs one origin report on the next glide.
+    fn presume(&self, at: [f64; 2]) {
+        let tmp = self
+            .root
+            .join(format!(".pointer-{}.tmp", uuid::Uuid::now_v7()));
+        let written = fs::create_dir_all(&self.root)
+            .and_then(|()| fs::write(&tmp, json!(at).to_string()))
+            .and_then(|()| fs::rename(&tmp, self.pointer_path()));
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(self.pointer_path());
+        }
+    }
+    /// Submit input ending with the pointer at `end`. A command that may have started presumes
+    /// `end` (an interrupted glide stops on the segment toward it); one that cannot have
+    /// started leaves the presumed position unchanged.
+    fn submit_tracked(
+        &mut self,
+        actions: Vec<Value>,
+        pointer: bool,
+        end: Option<[f64; 2]>,
+        timing: Option<keyferry_layouts::InputKeyboardTiming>,
+        start_within_ms: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
+        let result = self.submission_config(actions, pointer, timing, start_within_ms, cancelled);
+        let started = match &result {
+            Ok(_) => true,
+            Err(error) => error["command"]["possible_start"] == true,
+        };
+        if let Some(end) = end.filter(|_| pointer && started) {
+            self.presume(end);
+        }
+        result
+    }
+    /// Compile input steps through this session's mapping from the presumed pointer position
+    /// into one or more consecutive commands; sends nothing.
+    fn stretch(
+        &self,
+        frame: &Frame,
+        steps: &[Step],
+        recipe: Option<&RecipeV1>,
+        uncalibrated: bool,
+    ) -> Result<Vec<routines::Stretch>, Value> {
+        let mut mapping_error = None;
+        routines::compile_stretch(
+            steps,
+            recipe.and_then(routines::timing),
+            recipe.map_or(5000, routines::start_within),
+            &mut |x, y| {
+                self.point(frame, f64::from(x), f64::from(y), uncalibrated)
+                    .map_err(|e| {
+                        mapping_error = Some(e);
+                        routines::mapping_error()
+                    })
+            },
+            self.presumed(),
+        )
+        .map_err(|e| mapping_error.unwrap_or_else(|| failure(e.code())))
+    }
+    fn submit_stretch(
+        &mut self,
+        stretch: routines::Stretch,
+        recipe: Option<&RecipeV1>,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
+        self.submit_tracked(
+            stretch.actions,
+            stretch.pointer,
+            stretch.cursor,
+            recipe.and_then(routines::timing),
+            recipe.map_or(5000, routines::start_within),
+            cancelled,
+        )
+    }
+    /// Glide to `p`, then the optional button action, as one command.
+    fn glide_command(
+        &mut self,
+        p: [f64; 2],
+        then: Option<Value>,
+        cancelled: &AtomicBool,
+    ) -> Result<Value, Value> {
+        let mut at = self.presumed();
+        let mut actions = routines::glide_to(&mut at, p);
+        actions.extend(then);
+        self.submit_tracked(actions, true, at, None, 5000, cancelled)
+    }
     fn point(&self, f: &Frame, x: f64, y: f64, uncalibrated: bool) -> Result<[f64; 2], Value> {
         // Bounds check first, even with calibration; crop coordinates cannot escape a screenshot.
         geometry::linear(f, x, y).map_err(failure)?;
@@ -1034,36 +1137,22 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             return Err(failure("pointer.screenshot_required"));
         }
         let uncalibrated = args["uncalibrated"].as_bool().unwrap_or(false);
-        let button = match args["button"].as_str().unwrap_or("left") {
-            "left" => "button_1",
-            "right" => "button_2",
-            _ => "button_3",
-        };
-        let coordinate = |x: &str, y: &str| {
-            self.point(
-                &frame,
-                args[x].as_f64().unwrap_or(-1.0),
-                args[y].as_f64().unwrap_or(-1.0),
-                uncalibrated,
-            )
-        };
-        let p = if name == "drag" {
-            coordinate("from_x", "from_y")?
-        } else {
-            coordinate("x", "y")?
-        };
-        let mut actions = vec![json!({"type":"move_absolute","x":p[0],"y":p[1]})];
-        match name {
-            "move"=>{},
-            "click"=>actions.push(json!({"type":if args["double"].as_bool().unwrap_or(false){"double_click"}else{"click"},"button":button})),
-            "drag"=>{let to=coordinate("to_x","to_y")?;actions.push(json!({"type":"drag","button":button,"x":to[0],"y":to[1],"hold_ms":40}));},
-            "scroll"=>actions.push(json!({"type":"scroll","vertical":args["dy"],"horizontal":args["dx"]})),
-            _=>return Err(failure("rpc.unknown_tool")),
+        // The tool arguments are the routine step vocabulary; one compiler serves both.
+        let mut step = args.clone();
+        let object = step
+            .as_object_mut()
+            .ok_or_else(|| failure("input.tool_arguments"))?;
+        for key in ["uncalibrated", "return_screenshot", "format"] {
+            object.remove(key);
         }
+        object.insert("type".into(), json!(name));
+        let step: Step = serde_json::from_value(step).map_err(|_| failure("rpc.unknown_tool"))?;
         let (before, mask) = self.stationary(cancelled)?;
         // A reconnect during animation sampling invalidates the already compiled mapping.
         mask.changed(&frame, &before).map_err(failure)?;
-        let command = self.submission(actions, true, cancelled)?;
+        // One step never splits; the glide starts from the position presumed just before sending.
+        let mut parts = self.stretch(&frame, std::slice::from_ref(&step), None, uncalibrated)?;
+        let command = self.submit_stretch(parts.remove(0), None, cancelled)?;
         let mut result = json!({"command":command,"uncalibrated":uncalibrated,"mapping":if uncalibrated{"linear-full-frame"}else{"calibrated"}});
         let target = (name == "move").then(|| {
             [
@@ -1421,7 +1510,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                     i += 1;
                 }
                 let stretch = &steps[begin..i];
-                let result = (|| {
+                let compiled = (|| {
                     self.frames.request_ocr(false);
                     let frame = self.frame(cancelled)?;
                     baseline = frame.clone();
@@ -1433,71 +1522,66 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                             return Err(failure("pointer.screenshot_required"));
                         }
                     }
-                    let mut mapping_error = None;
-                    let (actions, pointer, _) = routines::compile_stretch(
-                        stretch,
-                        routines::timing(recipe),
-                        routines::start_within(recipe),
-                        &mut |x, y| {
-                            self.point(&frame, f64::from(x), f64::from(y), uncalibrated)
-                                .map_err(|e| {
-                                    mapping_error = Some(e);
-                                    routines::mapping_error()
-                                })
-                        },
-                    )
-                    .map_err(|e| mapping_error.unwrap_or_else(|| failure(e.code())))?;
-                    // Compile and submit the entire stretch once, including all repeats/delays.
-                    commands += 1;
-                    let command = self.submission_config(
-                        actions,
-                        pointer,
-                        routines::timing(recipe),
-                        routines::start_within(recipe),
-                        cancelled,
-                    )?;
-                    Ok::<_, Value>(command)
+                    self.stretch(&frame, stretch, Some(recipe), uncalibrated)
                 })();
-                match result {
-                    Ok(command) => {
-                        for (offset, step) in stretch.iter().enumerate() {
-                            receipts.push(
-                                json!({"step":begin+offset,"type":step.kind(),"command":command}),
-                            );
-                            completed += 1;
+                // Compile the entire stretch, including all repeats/delays, before sending any of
+                // it; glides may split it into consecutive commands that stop at the first failure.
+                let mut outcomes = Vec::new();
+                match compiled {
+                    Ok(parts) => {
+                        for part in parts {
+                            commands += 1;
+                            let range = part.steps.clone();
+                            let result = self.submit_stretch(part, Some(recipe), cancelled);
+                            let failed = result.is_err();
+                            outcomes.push((range, result));
+                            if failed {
+                                break;
+                            }
                         }
-                        self.animation = None;
-                        if settle && i == steps.len() {
-                            let mask = frames::MotionMask::new(&baseline);
-                            let observed =
-                                self.observe_target(&baseline, &mask, None, None, cancelled);
-                            let receipt = receipts.last_mut().expect("stretch receipt");
-                            match observed {
-                                Ok((frame, observation)) => {
-                                    self.last_observed = Some(frame);
-                                    receipt["observation"] = observation.clone();
-                                    if observation["settled"] != true {
-                                        stopped = Some(begin);
-                                        completed -= stretch.len();
-                                    }
-                                }
-                                Err(error) => {
-                                    receipt["observation_error"] = error;
+                    }
+                    Err(error) => outcomes.push((0..stretch.len(), Err(error))),
+                }
+                for (range, result) in outcomes {
+                    match result {
+                        Ok(command) => {
+                            for offset in range {
+                                receipts.push(json!({"step":begin+offset,"type":stretch[offset].kind(),"command":command}));
+                                completed += 1;
+                            }
+                        }
+                        Err(error) => {
+                            // Every step in this one command is uncertain together. No per-step
+                            // emission claim can be made after a partial or possibly-started
+                            // command.
+                            for offset in range.clone() {
+                                receipts.push(json!({"step":begin+offset,"type":stretch[offset].kind(),"error":error}));
+                            }
+                            stopped = Some(begin + range.start);
+                        }
+                    }
+                }
+                if stopped.is_none() {
+                    self.animation = None;
+                    if settle && i == steps.len() {
+                        let mask = frames::MotionMask::new(&baseline);
+                        let observed = self.observe_target(&baseline, &mask, None, None, cancelled);
+                        let receipt = receipts.last_mut().expect("stretch receipt");
+                        match observed {
+                            Ok((frame, observation)) => {
+                                self.last_observed = Some(frame);
+                                receipt["observation"] = observation.clone();
+                                if observation["settled"] != true {
                                     stopped = Some(begin);
                                     completed -= stretch.len();
                                 }
                             }
+                            Err(error) => {
+                                receipt["observation_error"] = error;
+                                stopped = Some(begin);
+                                completed -= stretch.len();
+                            }
                         }
-                    }
-                    Err(error) => {
-                        // Every step in this one command is uncertain together. No per-step
-                        // emission claim can be made after a partial or possibly-started command.
-                        for (offset, step) in stretch.iter().enumerate() {
-                            receipts.push(
-                                json!({"step":begin+offset,"type":step.kind(),"error":error}),
-                            );
-                        }
-                        stopped = Some(begin);
                     }
                 }
             } else {
@@ -1554,10 +1638,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                         let p = self.point(&frame, x, y, false)?;
                         baseline = frame;
                         commands += 1;
-                        let command = self.submission(vec![
-                            json!({"type":"move_absolute","x":p[0],"y":p[1]}),
-                            json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()}),
-                        ], true, cancelled)?;
+                        let command = self.glide_command(p, Some(json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()})), cancelled)?;
                         Ok(json!({"check":check,"command":command}))
                     }
                     Step::SecureText { .. } => {
@@ -1762,11 +1843,9 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         cancelled: &AtomicBool,
     ) -> Result<(Arc<Frame>, Value), Value> {
         let before = self.frame(cancelled)?;
-        let mut receipt = self.submission(
-            vec![json!({"type":"move_absolute","x":p[0],"y":p[1]})],
-            true,
-            cancelled,
-        )?;
+        // The probe glides like every agent motion; EMITTED arrives after the final report, and
+        // observation then requires the moved cursor to hold still on fresh frames.
+        let mut receipt = self.glide_command(p, None, cancelled)?;
         let (frame, observation) = self.observe_action(&before, mask, cancelled)?;
         if observation["settled"] != true {
             return Err(failure("calibration.cursor_not_seen"));
@@ -1782,6 +1861,28 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.animation = None;
         self.loaded = true;
         self.require_pointer()?;
+        // Cursor evidence and the fit use native pixels; the binding is then expressed in
+        // the bounded agent view shared by screenshots, OCR boxes and pointer tools.
+        self.frames.request_native(true);
+        let fitted = self.calibrate_native(cancelled);
+        self.frames.request_native(false);
+        let (fitted, mask, mut result) = fitted?;
+        let view = self.frame(cancelled)?;
+        // Also rejects a capture restart between the native probes and this view.
+        let mask = mask.scaled(&view).map_err(failure)?;
+        let fitted = fitted.scaled(view.width, view.height);
+        geometry::save(&self.root, &fitted).map_err(failure)?;
+        self.bound_generation = Some(view.generation);
+        self.geometry = Some(fitted.clone());
+        self.animation = Some((view, mask, Instant::now()));
+        result["geometry"] = json!(fitted);
+        result["active_video_rectangle"] = json!(fitted.active_rectangle());
+        Ok(result)
+    }
+    fn calibrate_native(
+        &mut self,
+        cancelled: &AtomicBool,
+    ) -> Result<(Geometry, frames::MotionMask, Value), Value> {
         let (_, mask) = self.stationary(cancelled)?;
         if !mask.small() {
             return Err(failure("calibration.animated_or_ambiguous"));
@@ -1848,17 +1949,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         {
             return Err(failure("calibration.verification_failed"));
         }
-        geometry::save(&self.root, &fitted).map_err(failure)?;
-        self.bound_generation = Some(after.generation);
-        self.geometry = Some(fitted.clone());
-        self.animation = Some((after.clone(), mask, Instant::now()));
         let latency_ms = receipts
             .iter()
             .filter_map(|r| r["command"]["latency_ms"].as_u64())
             .max();
-        Ok(
-            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"latency_ms":latency_ms,"residual_rms_px":rms,"inlier_samples":inliers,"rejected_samples":positions.len()-2-inliers,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
-        )
+        let result = json!({"bound":true,"probes":receipts,"latency_ms":latency_ms,"calibration_frame":[after.width,after.height],"residual_rms_px":rms,"inlier_samples":inliers,"rejected_samples":positions.len()-2-inliers,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true});
+        Ok((fitted, mask, result))
     }
 }
 

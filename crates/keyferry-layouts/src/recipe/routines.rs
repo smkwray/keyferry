@@ -1,9 +1,67 @@
 //! Host-side routines in the existing recipe format. No I/O, history or input retries.
 use super::*;
+use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use serde_json::json;
 
 pub const MAX_STEPS: usize = 256;
 const MAX_ROUTINE_MS: u64 = 180_000;
+const HID_MAX: f64 = 32767.0;
+
+/// The single glide configuration (D-20261010-10: agent pointer motion always glides, never
+/// jumps). The stick paces one absolute report per 10 ms HID poll, so `min_steps..=max_steps`
+/// reports take 120-240 ms; 24 steps keep a held drag span inside one bounded chunk.
+pub struct Glide {
+    pub min_steps: u32,
+    pub max_steps: u32,
+    /// Below this per-axis HID distance (~4 px on a 1920-wide target) one report is not a jump.
+    pub still_counts: f64,
+    /// Where a glide starts when no session has commanded a position for the device: the one
+    /// report a session may jump, to the screen centre, before gliding to the target.
+    pub origin: [f64; 2],
+}
+pub const GLIDE: Glide = Glide {
+    min_steps: 12,
+    max_steps: 24,
+    still_counts: 64.0,
+    origin: [0.5, 0.5],
+};
+
+fn report(p: [f64; 2]) -> Value {
+    json!({"type":"move_absolute","x":p[0],"y":p[1]})
+}
+
+/// Absolute reports gliding from the presumed position `at` to exactly `to` on an ease-in-out
+/// minimum-jerk (10t^3-15t^4+6t^5) path; step count scales with distance. Updates `at`.
+pub fn glide_to(at: &mut Option<[f64; 2]>, to: [f64; 2]) -> Vec<Value> {
+    let mut moves = Vec::new();
+    let from = at.unwrap_or_else(|| {
+        moves.push(report(GLIDE.origin));
+        GLIDE.origin
+    });
+    let a = from.map(|v| (v * HID_MAX).round());
+    let b = to.map(|v| (v * HID_MAX).round());
+    let d = [b[0] - a[0], b[1] - a[1]];
+    if d[0].abs().max(d[1].abs()) > GLIDE.still_counts {
+        let span = (d[0].hypot(d[1]) / HID_MAX).min(1.0);
+        let steps =
+            GLIDE.min_steps + (f64::from(GLIDE.max_steps - GLIDE.min_steps) * span).round() as u32;
+        let mut last = a;
+        for i in 1..steps {
+            let t = f64::from(i) / f64::from(steps);
+            let s = t * t * t * (10.0 + t * (6.0 * t - 15.0));
+            let p = [(a[0] + d[0] * s).round(), (a[1] + d[1] * s).round()];
+            if p != last && p != b {
+                moves.push(report(p.map(|v| v / HID_MAX)));
+                last = p;
+            }
+        }
+    } else if at.is_none() {
+        moves.clear();
+    }
+    moves.push(report(to));
+    *at = Some(to);
+    moves
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -190,12 +248,14 @@ impl Step {
 }
 
 /// Convert one input step to the production sequence vocabulary. The supplied mapper is the
-/// session's calibrated screenshot mapping; validation uses a neutral placeholder mapping.
+/// session's calibrated screenshot mapping; validation uses a placeholder mapping. Every pointer
+/// target is reached by [`glide_to`] from the presumed position `cursor`; buttons and scrolls
+/// follow the arrival report, and a drag glides inside its balanced held span.
 pub fn input_actions(
     step: &Step,
     point: &mut impl FnMut(u32, u32) -> Result<[f64; 2], RecipeError>,
+    cursor: &mut Option<[f64; 2]>,
 ) -> Result<Vec<Value>, RecipeError> {
-    let move_to = |p: [f64; 2]| json!({"type":"move_absolute","x":p[0],"y":p[1]});
     Ok(match step {
         Step::Key { keys } => vec![if keys.len() == 1 {
             json!({"type":"tap","key":keys[0]})
@@ -204,20 +264,24 @@ pub fn input_actions(
         }],
         Step::TypeText { text } => vec![json!({"type":"text","value":text})],
         Step::Wait { ms } => vec![json!({"type":"wait","ms":ms})],
-        Step::Move { x, y } => vec![move_to(point(*x, *y)?)],
+        Step::Move { x, y } => glide_to(cursor, point(*x, *y)?),
         Step::Click {
             x,
             y,
             button,
             double,
-        } => vec![
-            move_to(point(*x, *y)?),
-            json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()}),
-        ],
-        Step::Scroll { x, y, dx, dy } => vec![
-            move_to(point(*x, *y)?),
-            json!({"type":"scroll","horizontal":dx,"vertical":dy}),
-        ],
+        } => {
+            let mut actions = glide_to(cursor, point(*x, *y)?);
+            actions.push(
+                json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()}),
+            );
+            actions
+        }
+        Step::Scroll { x, y, dx, dy } => {
+            let mut actions = glide_to(cursor, point(*x, *y)?);
+            actions.push(json!({"type":"scroll","horizontal":dx,"vertical":dy}));
+            actions
+        }
         Step::Drag {
             from_x,
             from_y,
@@ -227,19 +291,22 @@ pub fn input_actions(
         } => {
             let from = point(*from_x, *from_y)?;
             let to = point(*to_x, *to_y)?;
-            vec![
-                move_to(from),
-                json!({"type":"drag","x":to[0],"y":to[1],"button":button.wire(),"hold_ms":40}),
-            ]
+            let mut actions = glide_to(cursor, from);
+            actions.push(json!({"type":"button_down","button":button.wire()}));
+            actions.extend(glide_to(cursor, to));
+            actions.push(json!({"type":"wait","ms":40}));
+            actions.push(json!({"type":"button_up","button":button.wire()}));
+            actions
         }
         Step::Repeat {
             count,
             delay_ms,
             steps,
         } => {
+            // Input sequences reject pointer actions inside a repeat, so a body never glides.
             let mut body = Vec::new();
             for step in steps {
-                body.extend(input_actions(step, point)?);
+                body.extend(input_actions(step, point, cursor)?);
             }
             let mut result = Vec::new();
             if *count > 1 {
@@ -256,32 +323,76 @@ pub fn input_actions(
     })
 }
 
-/// Compile an entire contiguous stretch before any of it can be sent.
+/// One input command. `steps` indexes the compiled slice; `cursor` is the presumed pointer
+/// position once the command is EMITTED.
+pub struct Stretch {
+    pub steps: std::ops::Range<usize>,
+    pub actions: Vec<Value>,
+    pub pointer: bool,
+    pub planned_ms: u64,
+    pub cursor: Option<[f64; 2]>,
+}
+
+/// Compile an entire contiguous stretch before any of it can be sent. Glides lengthen pointer
+/// stretches, so one over the input limits splits at step boundaries into consecutive commands;
+/// a single step over the limits is an explicit `input.limit` error.
 pub fn compile_stretch(
     steps: &[Step],
     timing: Option<InputKeyboardTiming>,
     start_within_ms: u64,
     point: &mut impl FnMut(u32, u32) -> Result<[f64; 2], RecipeError>,
-) -> Result<(Vec<Value>, bool, u64), RecipeError> {
-    let pointer = steps.iter().any(Step::pointer);
-    let mut actions = Vec::new();
-    for step in steps {
-        actions.extend(input_actions(step, point)?);
+    cursor: Option<[f64; 2]>,
+) -> Result<Vec<Stretch>, RecipeError> {
+    let mut compile = |range: std::ops::Range<usize>, mut cursor: Option<[f64; 2]>| {
+        let part = &steps[range.clone()];
+        let pointer = part.iter().any(Step::pointer);
+        let mut actions = Vec::new();
+        for step in part {
+            actions.extend(input_actions(step, point, &mut cursor)?);
+        }
+        let keyboard = actions.iter().any(has_keyboard);
+        let mut value = json!({"schema":if pointer {"keyferry.input-sequence.v2"} else {"keyferry.input-sequence.v1"},
+            "command_id":VALIDATION_COMMAND_ID,"arm":"command-scoped","start_within_ms":start_within_ms,"actions":actions});
+        if keyboard {
+            value["keyboard_profile"] = json!(LEGACY_WIRE_MAPPING);
+        }
+        if let Some(timing) = timing.filter(|_| keyboard) {
+            value["keyboard_timing"] = json!(timing);
+        }
+        let bytes =
+            serde_json::to_vec(&value).map_err(|_| RecipeError::new("recipe.body_limit"))?;
+        let request =
+            crate::parse_input_sequence_json(&bytes).map_err(|e| RecipeError::new(e.code()))?;
+        let compiled = compile_input_sequence(&request).map_err(|e| RecipeError::new(e.code()))?;
+        Ok::<_, RecipeError>(Stretch {
+            steps: range,
+            actions,
+            pointer,
+            planned_ms: compiled.planned_ms,
+            cursor,
+        })
+    };
+    let limit = |e: &RecipeError| e.code() == crate::InputError::Limit.code();
+    match compile(0..steps.len(), cursor) {
+        Err(e) if limit(&e) && steps.len() > 1 && steps.iter().any(Step::pointer) => {}
+        whole => return whole.map(|stretch| vec![stretch]),
     }
-    let keyboard = actions.iter().any(has_keyboard);
-    let mut value = json!({"schema":if pointer {"keyferry.input-sequence.v2"} else {"keyferry.input-sequence.v1"},
-        "command_id":VALIDATION_COMMAND_ID,"arm":"command-scoped","start_within_ms":start_within_ms,"actions":actions});
-    if keyboard {
-        value["keyboard_profile"] = json!(LEGACY_WIRE_MAPPING);
+    // Greedy longest prefixes; limits only grow with more steps.
+    let (mut parts, mut begin, mut cursor) = (Vec::new(), 0, cursor);
+    while begin < steps.len() {
+        let mut part = compile(begin..begin + 1, cursor)?;
+        for end in begin + 2..=steps.len() {
+            match compile(begin..end, cursor) {
+                Ok(longer) => part = longer,
+                Err(e) if limit(&e) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        begin = part.steps.end;
+        cursor = part.cursor;
+        parts.push(part);
     }
-    if let Some(timing) = timing.filter(|_| keyboard) {
-        value["keyboard_timing"] = json!(timing);
-    }
-    let bytes = serde_json::to_vec(&value).map_err(|_| RecipeError::new("recipe.body_limit"))?;
-    let request =
-        crate::parse_input_sequence_json(&bytes).map_err(|e| RecipeError::new(e.code()))?;
-    let compiled = compile_input_sequence(&request).map_err(|e| RecipeError::new(e.code()))?;
-    Ok((actions, pointer, compiled.planned_ms))
+    Ok(parts)
 }
 
 pub fn has_keyboard(v: &Value) -> bool {
@@ -402,14 +513,20 @@ pub fn validate_definition(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
             while i < steps.len() && steps[i].input_only() {
                 i += 1;
             }
-            let (_, _, ms) = compile_stretch(
+            // Screenshot-proportional placeholder mapping, so glides are budgeted.
+            for part in compile_stretch(
                 &steps[begin..i],
                 recipe.timing,
                 recipe.start_within_ms.unwrap_or(5000),
-                &mut |_, _| Ok([0.5, 0.5]),
-            )?;
-            planned_ms += ms;
-            stretches += 1;
+                &mut |x, y| {
+                    let last = f64::from(MAX_SCREENSHOT_SIDE - 1);
+                    Ok([f64::from(x) / last, f64::from(y) / last])
+                },
+                None,
+            )? {
+                planned_ms += part.planned_ms;
+                stretches += 1;
+            }
         } else {
             planned_ms += match &steps[i] {
                 Step::ExpectText { timeout_ms, .. }
@@ -586,7 +703,7 @@ fn substitute_step(
 }
 
 fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
-    let pixel = |n: u32| n < 1280;
+    let pixel = |n: u32| n < MAX_SCREENSHOT_SIDE;
     let (timeout, region) = match step {
         Step::Repeat {
             count,
@@ -617,10 +734,10 @@ fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
         {
             return Err(RecipeError::new("text.unsupported_character"))
         }
-        Step::Move { x, y } | Step::Click { x, y, .. } if !pixel(*x) || !pixel(*y) => {
+        Step::Move { x, y, .. } | Step::Click { x, y, .. } if !pixel(*x) || !pixel(*y) => {
             return Err(RecipeError::new("pointer.range"))
         }
-        Step::Scroll { x, y, dx, dy }
+        Step::Scroll { x, y, dx, dy, .. }
             if !pixel(*x)
                 || !pixel(*y)
                 || !(-127..=127).contains(dx)
@@ -670,8 +787,8 @@ fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
         || region.is_some_and(|r| {
             r.width == 0
                 || r.height == 0
-                || r.x.saturating_add(r.width) > 1280
-                || r.y.saturating_add(r.height) > 1280
+                || r.x.saturating_add(r.width) > MAX_SCREENSHOT_SIDE
+                || r.y.saturating_add(r.height) > MAX_SCREENSHOT_SIDE
         })
     {
         return Err(RecipeError::new("recipe.checkpoint"));
@@ -693,6 +810,7 @@ pub fn mapping_error() -> RecipeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyferry_protocol::action;
     fn definition(steps: Value) -> Value {
         json!({"schema":"keyferry.recipe.v1","name":"test-routine","target_os":"any","verified":false,"steps":steps})
     }
@@ -740,8 +858,15 @@ mod tests {
             false,
         )
         .unwrap();
-        let (actions, pointer, planned_ms) =
-            compile_stretch(&steps, None, 5000, &mut |_, _| Ok([0.5, 0.5])).unwrap();
+        let mut parts =
+            compile_stretch(&steps, None, 5000, &mut |_, _| Ok([0.5, 0.5]), None).unwrap();
+        assert_eq!(parts.len(), 1);
+        let Stretch {
+            actions,
+            pointer,
+            planned_ms,
+            ..
+        } = parts.remove(0);
         assert!(!pointer);
         assert!(planned_ms > 7200);
         assert_eq!(actions[1]["value"], "prefix-settings");
@@ -834,7 +959,7 @@ mod tests {
             json!([{"type":"expect_text","query":"ok","timeout_ms":100,"on_fail":"retry"}]),
             json!([{"type":"secure_text","text":"never-echo-this"}]),
             json!([{"type":"wait","ms":0}]),
-            json!([{"type":"move","x":1280,"y":0}]),
+            json!([{"type":"move","x":MAX_SCREENSHOT_SIDE,"y":0}]),
         ] {
             assert!(parsed(&definition(steps)).is_err());
         }
@@ -849,6 +974,243 @@ mod tests {
         both["actions"] = json!([]);
         assert_eq!(parsed(&both).unwrap_err().code(), "recipe.schema");
         assert_eq!(parse(br#"{"schema":"keyferry.recipe.v1","name":"a","name":"b","target_os":"any","steps":[{"type":"wait","ms":1}]}"#).unwrap_err().code(),"recipe.duplicate_field");
+    }
+
+    fn xy(action: &Value) -> [f64; 2] {
+        assert_eq!(action["type"], "move_absolute");
+        [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()]
+    }
+
+    fn compiled(actions: &[Value]) -> crate::CompiledInputSequence {
+        let value = json!({"schema":"keyferry.input-sequence.v2","command_id":VALIDATION_COMMAND_ID,
+            "arm":"command-scoped","start_within_ms":5000,"actions":actions});
+        let request = crate::parse_input_sequence_json(value.to_string().as_bytes()).unwrap();
+        compile_input_sequence(&request).unwrap()
+    }
+
+    /// Record tags of one chunk body, after the index/count header.
+    fn tags(chunk: &crate::InputChunk) -> Vec<u8> {
+        let (mut tags, mut offset) = (Vec::new(), 4);
+        while offset < chunk.body.len() {
+            tags.push(chunk.body[offset]);
+            offset += 2 + usize::from(chunk.body[offset + 1]);
+        }
+        tags
+    }
+
+    /// Pointer positions in execution order, expanding repeats.
+    fn path(actions: &[Value]) -> Vec<[f64; 2]> {
+        let mut points = Vec::new();
+        for action in actions {
+            match action["type"].as_str() {
+                Some("move_absolute") => points.push(xy(action)),
+                Some("repeat") => {
+                    let body = path(action["actions"].as_array().unwrap());
+                    for _ in 0..action["count"].as_u64().unwrap() {
+                        points.extend(&body);
+                    }
+                }
+                _ => {}
+            }
+        }
+        points
+    }
+
+    fn largest_step(from: [f64; 2], points: &[[f64; 2]]) -> f64 {
+        let mut previous = from;
+        let mut largest = 0.0_f64;
+        for p in points {
+            largest = largest.max((p[0] - previous[0]).hypot(p[1] - previous[1]));
+            previous = *p;
+        }
+        largest
+    }
+
+    fn screen(x: u32, y: u32) -> Result<[f64; 2], RecipeError> {
+        Ok([f64::from(x) / 1279.0, f64::from(y) / 1279.0])
+    }
+
+    // A full-screen glide peaks near 1.875x its mean step: ~0.11 of the screen per 10 ms report.
+    const NO_JUMP: f64 = 0.12;
+
+    #[test]
+    fn glide_is_eased_monotonic_bounded_timed_and_ends_exactly_on_target() {
+        let (from, target) = ([0.1, 0.1], [0.9, 0.8]);
+        let mut cursor = Some(from);
+        let moves = glide_to(&mut cursor, target);
+        assert_eq!(cursor, Some(target));
+        assert_eq!(moves.len(), GLIDE.max_steps as usize, "longest glide");
+        assert_eq!(xy(moves.last().unwrap()), target, "exact endpoint");
+        let points: Vec<_> = moves.iter().map(xy).collect();
+        let mut steps = Vec::new();
+        let mut previous = from;
+        for p in &points {
+            assert!(p.iter().all(|v| (0.0..=1.0).contains(v)));
+            assert!(
+                p[0] > previous[0] && p[1] > previous[1],
+                "strictly monotonic"
+            );
+            steps.push(p[0] - previous[0]);
+            previous = *p;
+        }
+        // Ease-in-out: slow at both ends, fastest in the middle.
+        let peak = steps.iter().copied().fold(0.0, f64::max);
+        assert!(steps[0] < peak / 4.0 && steps[steps.len() - 1] < peak / 4.0);
+        let distance = (target[0] - from[0]).hypot(target[1] - from[1]);
+        let largest = largest_step(from, &points);
+        assert!(largest <= 1.9 * distance / moves.len() as f64 && largest < NO_JUMP);
+        // One report per 10 ms HID poll: 120-240 ms plus the 30 ms neutral release.
+        let timed = compiled(&moves);
+        assert_eq!(timed.planned_ms, 10 * moves.len() as u64 + 30);
+        let longest = compiled(&glide_to(&mut Some([0.0, 0.0]), [1.0, 1.0])).planned_ms - 30;
+        assert_eq!(longest, 10 * u64::from(GLIDE.max_steps));
+        assert!(longest <= 240);
+
+        // Duration scales with distance, never below the minimum glide.
+        let short = glide_to(&mut Some([0.4, 0.5]), [0.6, 0.5]);
+        assert!(short.len() < moves.len() && short.len() + 1 >= GLIDE.min_steps as usize);
+        assert!(compiled(&short).planned_ms - 30 >= 120 - 10);
+        // A move under the still threshold is one report: it is not a visible jump.
+        let still = glide_to(&mut Some([0.5, 0.5]), [0.501, 0.5]);
+        assert_eq!(still, vec![report([0.501, 0.5])]);
+
+        // Unknown position: one report at the documented origin, then the same glide.
+        let mut unknown = None;
+        let first = glide_to(&mut unknown, [0.9, 0.9]);
+        assert_eq!(xy(&first[0]), GLIDE.origin);
+        assert!(first.len() > GLIDE.min_steps as usize);
+        assert!(largest_step(GLIDE.origin, &path(&first)) < NO_JUMP);
+        assert_eq!(
+            glide_to(&mut None, [0.5, 0.501]),
+            vec![report([0.5, 0.501])]
+        );
+    }
+
+    #[test]
+    fn click_and_drag_glide_then_press_in_bounded_chunks() {
+        let compile = |steps: Value, at| {
+            let steps: Vec<Step> = serde_json::from_value(steps).unwrap();
+            let mut parts = compile_stretch(&steps, None, 5000, &mut screen, at).unwrap();
+            assert_eq!(parts.len(), 1);
+            parts.remove(0)
+        };
+        for (kind, double) in [("click", false), ("click", true), ("scroll", false)] {
+            let mut step = json!({"type":kind,"x":1270,"y":1270});
+            if kind == "click" {
+                step["double"] = json!(double);
+                step["button"] = json!("right");
+            } else {
+                step["dy"] = json!(-3);
+                step["dx"] = json!(0);
+            }
+            let stretch = compile(json!([step]), Some([0.0, 0.0]));
+            assert_eq!(stretch.actions.len(), GLIDE.max_steps as usize + 1);
+            assert_eq!(stretch.cursor, Some([1270.0 / 1279.0, 1270.0 / 1279.0]));
+            let chunks = compiled(&stretch.actions).chunks;
+            assert_eq!(chunks.len(), 1, "glide and press share one chunk");
+            let tags = tags(&chunks[0]);
+            let press = tags
+                .iter()
+                .position(|t| *t != action::POINTER_MOVE_ABSOLUTE)
+                .unwrap();
+            assert_eq!(press, GLIDE.max_steps as usize, "press only after arrival");
+            assert!(u64::from(chunks[0].planned_ms) <= crate::input_sequence::MAX_INPUT_CHUNK_MS);
+            // The arrival report is byte-identical to a single report at the target.
+            let single = compiled(&[report([1270.0 / 1279.0, 1270.0 / 1279.0])]);
+            assert_eq!(
+                &chunks[0].body[4 + 6 * (press - 1)..4 + 6 * press],
+                &single.chunks[0].body[4..10]
+            );
+        }
+
+        let drag = compile(
+            json!([{"type":"drag","from_x":5,"from_y":5,"to_x":1270,"to_y":1270}]),
+            Some([0.99, 0.0]),
+        );
+        assert_eq!(drag.cursor, Some([1270.0 / 1279.0, 1270.0 / 1279.0]));
+        assert!(largest_step([0.99, 0.0], &path(&drag.actions)) < NO_JUMP);
+        let chunks = compiled(&drag.actions).chunks;
+        // The whole held span, release and neutral share one chunk.
+        let held: Vec<_> = chunks
+            .iter()
+            .map(tags)
+            .filter(|t| t.contains(&action::POINTER_BUTTON_DOWN))
+            .collect();
+        assert_eq!(held.len(), 1, "one held span");
+        assert!(held[0].ends_with(&[
+            action::WAIT_MS,
+            action::POINTER_BUTTON_UP,
+            action::NEUTRAL_ALL
+        ]));
+        // Glide to the start, press, glide while held, then release.
+        let all: Vec<u8> = chunks
+            .iter()
+            .flat_map(tags)
+            .filter(|t| *t != action::NEUTRAL_ALL)
+            .collect();
+        let down = all
+            .iter()
+            .position(|t| *t == action::POINTER_BUTTON_DOWN)
+            .unwrap();
+        let up = all
+            .iter()
+            .position(|t| *t == action::POINTER_BUTTON_UP)
+            .unwrap();
+        let moves = |t: &[u8]| t.iter().all(|t| *t == action::POINTER_MOVE_ABSOLUTE);
+        assert!(down >= GLIDE.min_steps as usize - 1 && moves(&all[..down]));
+        assert!(up - down >= GLIDE.min_steps as usize && moves(&all[down + 1..up - 1]));
+        assert_eq!(all[up - 1], action::WAIT_MS);
+        assert!(
+            drag.actions.iter().all(|a| a["type"] != "drag"),
+            "no jump drag"
+        );
+    }
+
+    #[test]
+    fn oversized_pointer_stretch_splits_into_gliding_commands() {
+        let steps: Vec<Step> = (0..32)
+            .map(|i| {
+                serde_json::from_value(
+                    json!({"type":"click","x":if i % 2 == 0 {5} else {1270},"y":600}),
+                )
+                .unwrap()
+            })
+            .collect();
+        let origin = [0.5, 0.5];
+        let start = Some(origin);
+        let parts = compile_stretch(&steps, None, 5000, &mut screen, start).unwrap();
+        assert!(parts.len() > 1);
+        let (mut next, mut cursor, mut points) = (0, start, Vec::new());
+        for part in &parts {
+            assert_eq!(part.steps.start, next, "contiguous step ranges");
+            next = part.steps.end;
+            // Each part glides from where the previous one ended.
+            let first = xy(&part.actions[0]);
+            let at = cursor.unwrap();
+            assert!((first[0] - at[0]).hypot(first[1] - at[1]) < NO_JUMP);
+            cursor = part.cursor;
+            points.extend(path(&part.actions));
+            let compiled = compiled(&part.actions);
+            assert_eq!(compiled.planned_ms, part.planned_ms);
+        }
+        assert_eq!(next, 32);
+        assert_eq!(cursor, Some([1270.0 / 1279.0, 600.0 / 1279.0]));
+        assert!(largest_step(origin, &points) < NO_JUMP);
+        let clicks = parts
+            .iter()
+            .flat_map(|p| &p.actions)
+            .filter(|a| a["type"] == "click")
+            .count();
+        assert_eq!(clicks, 32);
+        // Pointer actions inside a repeat stay rejected, never compiled as jumps.
+        let repeated: Vec<Step> =
+            serde_json::from_value(json!([{"type":"repeat","count":3,"steps":[
+            {"type":"click","x":5,"y":5}]}]))
+            .unwrap();
+        let error = compile_stretch(&repeated, None, 5000, &mut screen, start)
+            .err()
+            .unwrap();
+        assert_eq!(error.code(), "pointer.out_of_scope");
     }
 
     #[test]

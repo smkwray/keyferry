@@ -7,15 +7,16 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use keyferry_capture::{
     capture,
-    frames::{Capture, Frame, FrameSource, Region, Retry, FRAME_WAIT, MAX_SIDE},
+    frames::{fit, Capture, Frame, FrameSource, Region, Retry, FRAME_WAIT, MAX_PNG, MAX_SIDE},
     ocr::{NativeOcr, Ocr},
 };
+use keyferry_protocol::MAX_SCREENSHOT_SIDE;
 use std::{
     collections::HashSet,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub(crate) const MAX_WIRE: usize = 7 * 1024 * 1024;
+pub(crate) use keyferry_capture::frames::MAX_WIRE;
 const MAX_STREAMS: usize = 4;
 /// Local streams plus forwarded peer sources; bounds retained frames and blocking workers.
 const MAX_IN_FLIGHT: usize = 8;
@@ -302,42 +303,39 @@ fn encode(
     if !region.valid(frame) {
         return Err("capture.region");
     }
-    let max_width = request.max_width.unwrap_or(MAX_SIDE);
-    if !(2..=MAX_SIDE).contains(&max_width) {
-        return Err("capture.scale");
-    }
-    let ratio = (f64::from(max_width) / f64::from(region.width)).min(1.0);
-    let width = (f64::from(region.width) * ratio).round().max(1.0) as u32;
-    let height = (f64::from(region.height) * ratio).round().max(1.0) as u32;
-    let scaled = if region.x == 0 && region.y == 0 && (width, height) == (frame.width, frame.height)
-    {
-        std::borrow::Cow::Borrowed(frame)
-    } else {
-        let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                let sx = region.x + x * region.width / width;
-                let sy = region.y + y * region.height / height;
-                let i = ((sy * frame.width + sx) * 3) as usize;
-                rgb.extend_from_slice(&frame.rgb[i..i + 3]);
-            }
+    // Default is the bounded agent view; an explicit max_width may return native pixels.
+    let (width, height) = match request.max_width {
+        None => fit((region.width, region.height), MAX_SCREENSHOT_SIDE),
+        Some(max_width) if (2..=MAX_SIDE).contains(&max_width) => {
+            let ratio = (f64::from(max_width) / f64::from(region.width)).min(1.0);
+            (
+                (f64::from(region.width) * ratio).round().max(1.0) as u32,
+                (f64::from(region.height) * ratio).round().max(1.0) as u32,
+            )
         }
-        std::borrow::Cow::Owned(Frame {
-            width,
-            height,
-            rgb,
-            native: frame.native,
-            serial: frame.serial,
-            generation: frame.generation,
-            at: frame.at,
-        })
+        Some(_) => return Err("capture.scale"),
+    };
+    let native = frame.crop(region);
+    let scaled = if (width, height) == (region.width, region.height) {
+        std::borrow::Cow::Borrowed(&*native)
+    } else {
+        std::borrow::Cow::Owned(native.resized(width, height))
     };
     let png = scaled.png()?;
-    if png.len() > 5 * 1024 * 1024 {
+    if png.len() > MAX_PNG {
         return Err("capture.size_limit");
     }
+    // OCR reads native pixels; boxes are reported in the returned image's pixels.
     let boxes = if request.ocr {
-        Some(NativeOcr.recognize(&scaled)?)
+        let (sx, sy) = (
+            f64::from(width) / f64::from(region.width),
+            f64::from(height) / f64::from(region.height),
+        );
+        let mut boxes = NativeOcr.recognize(&native)?;
+        for b in &mut boxes {
+            (b.x, b.width, b.y, b.height) = (b.x * sx, b.width * sx, b.y * sy, b.height * sy);
+        }
+        Some(boxes)
     } else {
         None
     };
@@ -584,10 +582,62 @@ mod tests {
             "capture.region"
         );
         request.region = None;
-        request.max_width = Some(1281);
+        request.max_width = Some(MAX_SIDE + 1);
         assert_eq!(
             encode(&frame, &request, serde_json::json!({})).unwrap_err(),
             "capture.scale"
+        );
+        // Native 1080p is served unscaled and incompressible content still fits the wire.
+        let mut state = 7_u32;
+        let native = Frame {
+            width: 1920,
+            height: 1080,
+            native: (1920, 1080),
+            rgb: (0..1920 * 1080 * 3)
+                .map(|_| {
+                    state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    (state >> 16) as u8
+                })
+                .collect(),
+            ..frame
+        };
+        request.max_width = Some(MAX_SIDE);
+        let v = encode(&native, &request, serde_json::json!({})).unwrap();
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(1920), Some(1080))
+        );
+        assert!(serde_json::to_vec(&v).unwrap().len() <= MAX_WIRE);
+        // By default, older and agent clients get the bounded view; native geometry stays visible.
+        request.max_width = None;
+        let v = encode(&native, &request, serde_json::json!({})).unwrap();
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(1280), Some(720))
+        );
+        assert_eq!(v["native"], serde_json::json!([1920, 1080]));
+        // A portrait frame is bounded on both axes; a one-row region is not stretched.
+        let portrait = Frame {
+            width: 1080,
+            height: 1920,
+            native: (1080, 1920),
+            ..native.clone()
+        };
+        let v = encode(&portrait, &request, serde_json::json!({})).unwrap();
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(720), Some(1280))
+        );
+        request.region = Some(Region {
+            x: 0,
+            y: 5,
+            width: 40,
+            height: 1,
+        });
+        let v = encode(&native, &request, serde_json::json!({})).unwrap();
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(40), Some(1))
         );
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -730,13 +780,13 @@ mod tests {
             );
             time::sleep(Duration::from_millis(150)).await;
         };
-        assert!(result["width"].as_u64().unwrap() <= 1280);
+        assert!(result["width"].as_u64().unwrap() <= u64::from(MAX_SIDE));
         assert!(
             STANDARD
                 .decode(result["png"].as_str().unwrap())
                 .unwrap()
                 .len()
-                < 5 * 1024 * 1024
+                <= MAX_PNG
         );
         assert!(daemon.metadata().is_empty());
         println!("read-only real capture: {}x{}, native={}, frame_age_ms={}, memory-only; no stick commands",

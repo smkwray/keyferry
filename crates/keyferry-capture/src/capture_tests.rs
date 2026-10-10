@@ -148,6 +148,7 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
         source: None,
         size: Some((1920, 1080)),
         scale: Some((960, 540)),
+        mode: None,
     };
     let device = Device {
         name: "capture".into(),
@@ -165,11 +166,55 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
             .windows(2)
             .any(|pair| pair == ["-vf", "fps=15,scale=960:540:flags=fast_bilinear"]));
         assert_eq!(values.last().unwrap(), "pipe:1");
+        assert!(values.windows(2).any(|pair| pair == ["-pred", "none"]));
         assert!(!values.iter().any(|value| value.contains("private.png")));
         if backend == Backend::Dshow {
             assert!(values.windows(2).any(|pair| pair == ["-rtbufsize", "4M"]));
         }
     }
+}
+
+#[test]
+fn ms2130_streams_its_native_lossless_1080p_mode_and_others_negotiate() {
+    let card = Device {
+        name: "Hagibis".into(),
+        id: r"@device_pnp_\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global".into(),
+    };
+    let mode = input_mode(Backend::Dshow, &card).expect("pinned mode");
+    assert_eq!(mode.size, (super::super::frames::MAX_SIDE, 1080));
+    let options = FrameOptions {
+        out: PathBuf::new(),
+        source: None,
+        size: None,
+        scale: None,
+        mode: Some(mode),
+    };
+    let values = frame_args(Backend::Dshow, &card, &options);
+    let input = values.iter().position(|v| v == "-i").unwrap();
+    for pair in [
+        ["-video_size", "1920x1080"],
+        ["-pixel_format", "yuyv422"],
+        ["-framerate", "30"],
+    ] {
+        let at = values.windows(2).position(|w| w == pair).expect("mode");
+        assert!(at < input, "input options precede -i");
+    }
+    // No output scaling: frames stay native for OCR, calibration and pointer mapping.
+    assert!(values.windows(2).any(|pair| pair == ["-vf", "fps=15"]));
+    assert!(input_mode(Backend::Avfoundation, &card).is_none());
+    let other = Device {
+        name: "Cam Link 4K".into(),
+        id: r"@device_pnp_\\?\usb#vid_0fd9&pid_0066&mi_00#synthetic-other-instance#{x}\global".into(),
+    };
+    assert!(input_mode(Backend::Dshow, &other).is_none());
+    let options = FrameOptions {
+        mode: None,
+        ..options
+    };
+    let values = frame_args(Backend::Dshow, &other, &options);
+    assert!(!values
+        .iter()
+        .any(|v| v == "-video_size" || v == "-pixel_format"));
 }
 
 #[test]

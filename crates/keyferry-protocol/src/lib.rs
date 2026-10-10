@@ -10,6 +10,9 @@ pub const CRC_LEN: usize = 2;
 pub const MIN_DECODED_FRAME: usize = HEADER_LEN + CRC_LEN;
 pub const MAX_DECODED_FRAME: usize = 256;
 pub const MAX_PAYLOAD: usize = MAX_DECODED_FRAME - HEADER_LEN - CRC_LEN;
+/// Agent screenshot bound: MCP images, OCR boxes, pointer tools and saved routines share
+/// these pixels, downscaled from the native capture frame.
+pub const MAX_SCREENSHOT_SIDE: u32 = 1280;
 
 pub mod file;
 pub mod file_set;

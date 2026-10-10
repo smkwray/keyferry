@@ -92,6 +92,7 @@ struct FrameOptions {
     source: Option<String>,
     size: Option<(u32, u32)>,
     scale: Option<(u32, u32)>,
+    mode: Option<&'static InputMode>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -151,6 +152,7 @@ fn parse(args: &[String]) -> Result<Request, Error> {
         source,
         size,
         scale,
+        mode: None,
     }))
 }
 
@@ -543,7 +545,9 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
     if backend == Backend::Avfoundation {
         args.extend(["-framerate".into(), "30".into()]);
     }
-    if let Some((w, h)) = options.size {
+    if let Some(mode) = options.mode {
+        args.extend(mode.args());
+    } else if let Some((w, h)) = options.size {
         args.extend(["-video_size".into(), format!("{w}x{h}")]);
     }
     let input = match backend {
@@ -568,6 +572,9 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
             "1",
             "-c:v",
             "png",
+            // Unfiltered fast deflate: least encode and decode CPU per lossless pipe frame.
+            "-pred",
+            "none",
             "-compression_level",
             "1",
             "-pix_fmt",
@@ -653,14 +660,55 @@ pub fn stream_setup(source: Option<&str>) -> Result<(String, Vec<String>), &'sta
     let options = FrameOptions {
         out: PathBuf::new(),
         source: None,
-        // This exact MS2130 mode was enumerated on the live adapter. Other cards retain
-        // their negotiated input mode; no reopen/probe or unsupported-mode fallback.
-        size: (backend == Backend::Dshow && device.id.contains("vid_345f&pid_2130"))
-            .then_some((1280, 720)),
+        size: None,
         scale: None,
+        mode: input_mode(backend, device),
     };
     Ok((device.id.clone(), frame_args(backend, device, &options)))
 }
+
+fn input_mode(backend: Backend, device: &Device) -> Option<&'static InputMode> {
+    INPUT_MODES
+        .iter()
+        .find(|(b, mode)| *b == backend && device.id.contains(mode.id))
+        .map(|(_, mode)| mode)
+}
+
+/// Native input mode enumerated on a live adapter (`ffmpeg -list_options true`).
+#[derive(Debug, PartialEq)]
+struct InputMode {
+    id: &'static str,
+    size: (u32, u32),
+    pixel_format: &'static str,
+    fps: u32,
+}
+
+impl InputMode {
+    fn args(&self) -> [String; 6] {
+        let (w, h) = self.size;
+        [
+            "-video_size".into(),
+            format!("{w}x{h}"),
+            "-pixel_format".into(),
+            self.pixel_format.into(),
+            "-framerate".into(),
+            self.fps.to_string(),
+        ]
+    }
+}
+
+/// Recognized cards with a pinned mode; others keep their negotiated mode, with no
+/// reopen/probe or unsupported-mode fallback. MS2130: uncompressed 4:2:2 keeps small text
+/// lossless at the same CPU as MJPEG; 30 fps halves USB/CPU load under the 15 fps output.
+const INPUT_MODES: &[(Backend, InputMode)] = &[(
+    Backend::Dshow,
+    InputMode {
+        id: "vid_345f&pid_2130",
+        size: (1920, 1080),
+        pixel_format: "yuyv422",
+        fps: 30,
+    },
+)];
 
 #[cfg(test)]
 #[path = "capture_tests.rs"]
