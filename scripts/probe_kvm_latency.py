@@ -59,8 +59,10 @@ def main():
         status = call("status", {})["structuredContent"]["device"]
         if status["link"] != "authenticated" or status["armed"] or status["firmware"]["board_compatibility_id"] != 1:
             raise RuntimeError("requires authenticated, disarmed Waveshare")
-        print(json.dumps(dict(route=status.get("via"), endpoint=status["firmware"]["endpoint"])), flush=True)
-        previous = picture(call("screenshot", {}))
+        print(json.dumps(dict(route=status.get("via"), link_path=status.get("link_path"), endpoint=status["firmware"]["endpoint"])), flush=True)
+        shot = call("screenshot", {})
+        print(json.dumps(dict(capture={key: shot["structuredContent"].get(key) for key in ("width", "height", "native_width", "native_height", "frame_age_ms")})), flush=True)
+        previous = picture(shot)
         if args.calibrate:
             result = call("calibrate", {})["structuredContent"]
             print(json.dumps(dict(calibration=result)), flush=True)
@@ -108,6 +110,7 @@ def main():
             row = dict(sample=index + 1, action_ms=round(action_ms, 1),
                        latency_ms=metadata.get("latency_ms"), settled=metadata.get("settled"),
                        cursor_px=metadata.get("cursor_px"),
+                       settle_method=metadata.get("settle_method"),
                        submission_ms=metadata.get("command", metadata).get("submission_ms"),
                        target_changed_pixels=changed,
                        screenshot_decode_ms=round((time.perf_counter() - shot_start) * 1000, 1))
@@ -118,6 +121,8 @@ def main():
                                     minimum=min(r[key] for r in timings),
                                     maximum=max(r[key] for r in timings))
                           for key in ("action_ms", "latency_ms", "screenshot_decode_ms")}), flush=True)
+        status = call("status", {})["structuredContent"]["device"]
+        print(json.dumps(dict(final_route=status.get("via"), link_path=status.get("link_path"))), flush=True)
     finally:
         process.stdin.close()
         try:
