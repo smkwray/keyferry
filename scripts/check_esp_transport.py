@@ -407,8 +407,10 @@ def source_checks() -> None:
         PROJECT / "main" / "CMakeLists.txt",
         (
             "${KEYFERRY_BOARD_INCLUDE_DIR}",
-            "if(KEYFERRY_PRIVATE_HEADER)",
-            "add_custom_target(keyferry_private_config_refresh ALL)",
+            "if(NOT KEYFERRY_PRIVATE_HEADER)",
+            'OUTPUT "${KEYFERRY_PRIVATE_CONFIG_DIR}/materialize.stamp"',
+            'BYPRODUCTS "${KEYFERRY_PRIVATE_CONFIG_DIR}/keyferry_hil_private.h"',
+            "DEPENDS ${KEYFERRY_PAIRING_INPUTS}",
         ),
     )
     require_tokens(
