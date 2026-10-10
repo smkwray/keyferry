@@ -1589,12 +1589,13 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
         let mut after = None;
-        self.frames.request_ocr(true);
         loop {
             let remaining = timeout.saturating_sub(start.elapsed());
             if remaining.is_zero() {
                 return Err(failure("recipe.checkpoint_failed"));
             }
+            // Every polled frame uses capture-controller OCR; a request flag lasts one frame.
+            self.frames.request_ocr(true);
             let frame = self
                 .frames
                 .latest(after, remaining, cancelled)

@@ -40,6 +40,8 @@ struct FakeFrames {
     busy: bool,
     never_change: bool,
     started: Instant,
+    ocr: bool,
+    ocr_polls: u32,
 }
 #[derive(Clone)]
 struct Visual {
@@ -64,16 +66,25 @@ impl FakeFrames {
             busy: false,
             never_change: false,
             started: Instant::now(),
+            ocr: false,
+            ocr_polls: 0,
         }
     }
 }
 impl FrameSource for FakeFrames {
+    fn request_ocr(&mut self, ocr: bool) {
+        self.ocr = ocr;
+    }
     fn latest(
         &mut self,
         after: Option<u64>,
         timeout: Duration,
         cancelled: &AtomicBool,
     ) -> Result<Arc<Frame>, &'static str> {
+        // Like the daemon client, an OCR request covers exactly one frame.
+        if std::mem::take(&mut self.ocr) {
+            self.ocr_polls += 1;
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err("request.cancelled");
         }
@@ -1097,6 +1108,29 @@ async fn routine_change_uses_pre_input_baseline_and_stable_requires_fresh_frames
         assert_eq!(content["actions"][1]["receipt"]["matched"], true);
         assert_eq!(content["actions"][2]["receipt"]["matched"], true);
         assert_eq!(content["command_count"], 2);
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_checkpoint_requests_capture_ocr_on_every_poll() {
+    let (mut s, _, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        let cancelled = AtomicBool::new(false);
+        bind_fake(&mut s);
+        let definition = routine_definition(json!([
+            {"type":"expect_text","query":"appears later","timeout_ms":300}
+        ]));
+        let recipe = recipes::parse(definition.to_string().as_bytes()).unwrap();
+        let result = s
+            .run_routine(&recipe, &json!({}), false, false, &cancelled)
+            .unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(s.frames.ocr_polls >= 2, "polls {}", s.frames.ocr_polls);
     })
     .await
     .unwrap();
