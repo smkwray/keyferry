@@ -15,7 +15,8 @@ std::size_t SerializePointerReport(const PointerReport& r,
         (*out)[4] = static_cast<std::uint8_t>(r.absolute_y);
         (*out)[5] = static_cast<std::uint8_t>(r.absolute_y >> 8U);
         (*out)[6] = static_cast<std::uint8_t>(r.wheel);
-        return 7;
+        (*out)[7] = static_cast<std::uint8_t>(r.pan);
+        return 8;
     }
     (*out)[0] = 1; (*out)[1] = r.buttons;
     (*out)[2] = static_cast<std::uint8_t>(r.x); (*out)[3] = static_cast<std::uint8_t>(r.y);
@@ -215,6 +216,14 @@ SubmitResult ExecutorState::submit_mouse_movement(const std::uint64_t epoch,
         return SubmitResult::movement_replayed;
     }
     desired_mouse_ = report;
+    // Wheel/pan must accompany the collection that last positioned the pointer,
+    // just like buttons. Retain its coordinates without creating a position event.
+    if (extended_pointer_ && absolute_button_target_ && !report.absolute &&
+        report.x == 0 && report.y == 0 && (report.wheel != 0 || report.pan != 0)) {
+        desired_mouse_.absolute = true;
+        desired_mouse_.absolute_x = absolute_x_;
+        desired_mouse_.absolute_y = absolute_y_;
+    }
     desired_interface_ = InputInterface::mouse;
     pending_mouse_movement_ = true;
     pending_movement_token_ = logical_token;

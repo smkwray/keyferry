@@ -19,8 +19,8 @@ class AtomPointerDescriptorTests(unittest.TestCase):
             "09025b000301008032"
             "0904000001030101040921110100012241000705810308000a"
             "0904010002030000050921110100012222000705020340000a0705820340000a"
-            "0904020001030000060921110100012280000705830308000a")
-        self.device = bytes.fromhex("12010002000000403a300440020101020301")
+            "0904020001030000060921110100012287000705830308000a")
+        self.device = bytes.fromhex("12010002000000403a300440030101020301")
 
     def test_three_interface_extended_personality(self):
         pointer.no_msc_usb_descriptors(self.config + self.device, self.report)
@@ -71,10 +71,31 @@ class AtomPointerDescriptorTests(unittest.TestCase):
             pointer.no_msc_usb_descriptors(self.config + self.device.replace(bytes.fromhex("0440"), bytes.fromhex("0840")), self.report)
 
     def test_old_revision_is_rejected(self):
-        bad = bytearray(self.device)
-        bad[12] = 1
-        with self.assertRaises(SystemExit):
-            pointer.no_msc_usb_descriptors(self.config + bytes(bad), self.report)
+        for revision in (1, 2):
+            bad = bytearray(self.device)
+            bad[12] = revision
+            with self.subTest(revision=revision), self.assertRaises(SystemExit):
+                pointer.no_msc_usb_descriptors(self.config + bytes(bad), self.report)
+
+    def test_wheel_and_pan_must_be_relative_signed_bytes_on_both_reports(self):
+        pan = bytes.fromhex("050c0a3802")
+        for occurrence in (0, 1):
+            start = self.report.find(pan)
+            if occurrence:
+                start = self.report.find(pan, start + len(pan))
+            self.assertGreaterEqual(start, 0)
+            for offset in (1, 3, 4):
+                bad = bytearray(self.report)
+                bad[start + offset] ^= 1
+                with self.subTest(report=occurrence, offset=offset), self.assertRaises(SystemExit):
+                    pointer.descriptor(bytes(bad))
+        wheel = bytes.fromhex("09381581257f750895018106")
+        start = self.report.index(wheel)
+        for offset in (1, 3, 5, 7, 9, 11):
+            bad = bytearray(self.report)
+            bad[start + offset] ^= 1
+            with self.subTest(wheel_offset=offset), self.assertRaises(SystemExit):
+                pointer.descriptor(bytes(bad))
 
 
 class UsbIdentityTests(unittest.TestCase):
