@@ -24,6 +24,8 @@ fn start(root: &Path) -> Process {
             .arg("--installation")
             .arg(root.join("not-authorized"))
             .env("KEYFERRY_TOKEN_FILE", root.join("token"))
+            // The Windows service log goes under LOCALAPPDATA; keep test daemons out of the real one.
+            .env("LOCALAPPDATA", root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -74,5 +76,11 @@ fn unauthorized_daemon_excludes_a_second_process_and_recovers_after_crash() {
     let mut recovered = start(&root);
     wait_for_lock(&root, &mut recovered);
     drop(recovered);
+    if cfg!(windows) {
+        let log =
+            fs::read_to_string(root.join("keyferry").join("logs").join("keyferryd.log")).unwrap();
+        assert_eq!(log.matches("keyferryd starting").count(), 2, "{log}");
+        assert!(log.contains("already running"), "{log}");
+    }
     fs::remove_dir_all(root).unwrap();
 }
