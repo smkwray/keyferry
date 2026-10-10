@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * 0.60))
+$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
 $ssid = Read-Host 'Wi-Fi SSID'
 $securePassword = Read-Host 'Wi-Fi password' -AsSecureString
 $passwordPointer = [IntPtr]::Zero

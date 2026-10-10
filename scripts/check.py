@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,8 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_JOB_CEILING = max(1, int((os.cpu_count() or 1) * 0.60))
+CPU_PERCENT = int(re.search(r"(?m)^cpu_percent\s*=\s*(\d+)", (ROOT / "project.toml").read_text(encoding="utf-8")).group(1))
+BUILD_JOB_CEILING = max(1, (os.cpu_count() or 1) * CPU_PERCENT // 100)
 BUILD_JOBS = min(BUILD_JOB_CEILING,
                  max(1, int(os.environ.get("CARGO_BUILD_JOBS", str(BUILD_JOB_CEILING)))))
 
@@ -491,7 +493,7 @@ def main() -> None:
     elif cargo:
         cargo_env = os.environ.copy()
         cargo_env["CARGO_INCREMENTAL"] = "0"
-        print(f"build concurrency: {BUILD_JOBS} jobs (60% CPU ceiling; CARGO_BUILD_JOBS honored)", flush=True)
+        print(f"build concurrency: {BUILD_JOBS} jobs ({CPU_PERCENT}% CPU ceiling from project.toml; CARGO_BUILD_JOBS honored)", flush=True)
         run([cargo, "fmt", "--all", "--", "--check"], env=cargo_env)
         run(
             [

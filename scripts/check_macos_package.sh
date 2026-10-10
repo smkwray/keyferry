@@ -10,7 +10,8 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 
 logical_cpus=$(sysctl -n hw.logicalcpu)
-max_build_jobs=$((logical_cpus * 60 / 100))
+cpu_percent=$(sed -n 's/^cpu_percent[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' project.toml)
+max_build_jobs=$((logical_cpus * cpu_percent / 100))
 [ "$max_build_jobs" -ge 1 ] || max_build_jobs=1
 build_jobs=${CARGO_BUILD_JOBS:-$max_build_jobs}
 case "$build_jobs" in
@@ -22,8 +23,8 @@ esac
 }
 [ "$build_jobs" -le "$max_build_jobs" ] || build_jobs=$max_build_jobs
 export CARGO_BUILD_JOBS=$build_jobs
-printf 'build concurrency: %s jobs (cap: 60%% of %s logical CPUs)\n' \
-    "$build_jobs" "$logical_cpus"
+printf 'build concurrency: %s jobs (cap: %s%% of %s logical CPUs)\n' \
+    "$build_jobs" "$cpu_percent" "$logical_cpus"
 # Panic locations embed source paths. Map the home, Cargo, and project prefixes (last match wins)
 # so no builder's account reaches a release binary; check_public_tree.py rejects any that remain.
 cargo_home=${CARGO_HOME:-$HOME/.cargo}

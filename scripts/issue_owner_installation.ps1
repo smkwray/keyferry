@@ -24,7 +24,7 @@ if ([string]::IsNullOrWhiteSpace($OwnerKit)) {
 $installationRoot = Join-Path $projectRoot 'secrets\installations'
 $installation = Join-Path $installationRoot $InstallationName
 $pairing = Join-Path $projectRoot 'target\debug\keyferry-pairing.exe'
-$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * 0.60))
+$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
 
 function Convert-SecretToText {
     param([Security.SecureString]$Secret)

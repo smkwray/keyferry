@@ -44,9 +44,9 @@ if (-not (Test-Path -LiteralPath $idfTools -PathType Container)) {
 
 Push-Location $projectRoot
 try {
-    $buildJobCeiling = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * 0.60))
+    $buildJobCeiling = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
     if ($Jobs -gt $buildJobCeiling) {
-        throw "Requested build concurrency $Jobs exceeds the 60% ceiling of $buildJobCeiling jobs."
+        throw "Requested build concurrency $Jobs exceeds the project.toml cpu_percent ceiling of $buildJobCeiling jobs."
     }
     $buildJobs = if ($Jobs -eq 0) { $buildJobCeiling } else { $Jobs }
     if ($MscMemoryProbe -and
@@ -54,7 +54,7 @@ try {
          -not (Test-Path -LiteralPath (Join-Path $projectRoot $BaselineDir) -PathType Container))) {
         throw 'MscMemoryProbe requires -BaselineDir build/<name> from a completed matching baseline build.'
     }
-    Write-Output "Build concurrency: $buildJobs jobs (60% ceiling: $buildJobCeiling)"
+    Write-Output "Build concurrency: $buildJobs jobs (cpu_percent ceiling: $buildJobCeiling)"
     $sourceEpoch = (git log -1 --format=%ct).Trim()
     if ($sourceEpoch -notmatch '^[0-9]+$') {
         throw 'Could not derive deterministic SOURCE_DATE_EPOCH from Git.'

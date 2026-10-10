@@ -5,6 +5,10 @@ owner = "smkwray"
 status = "development-seed"
 created = "2026-09-01"
 
+[build]
+# Single cap for every local build: share of logical CPUs (owner, 2026-10-10).
+cpu_percent = 50
+
 [name_policy]
 minimum_length = 3
 maximum_length = 9
