@@ -28,6 +28,8 @@ const FRAME_WAIT: Duration = Duration::from_secs(20);
 const ACTION_WAIT: Duration = Duration::from_secs(3);
 const SETTLE: Duration = Duration::from_millis(350);
 const ANIMATION_SAMPLE: Duration = Duration::from_millis(1100);
+// Live MCP comparison: JPEG was 32x smaller and returned 27% faster than fast PNG.
+const DEFAULT_IMAGE_FORMAT: &str = "jpeg";
 const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
 
 fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
@@ -266,7 +268,8 @@ fn tools() -> Vec<Value> {
         let mut properties = properties;
         if action {
             properties["return_screenshot"] = json!({"type":"boolean","default":true});
-            properties["format"] = json!({"type":"string","enum":["png","jpeg"],"default":"png"});
+            properties["format"] =
+                json!({"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT});
         }
         let description = if action {
             format!("{description} Returns the observed post-action image by default (return_screenshot:false opts out), settled, latency_ms from EMITTED to visible change, and frame_id. Moves return when a compact cursor change is seen near the target; other actions require adaptive quiet on fresh frames within 3 s. settled:false never authorizes replay.")
@@ -276,7 +279,7 @@ fn tools() -> Vec<Value> {
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
     };
-    add("screenshot","Latest HDMI frame as a bounded PNG or JPEG image plus pixel/native geometry. Memory only; save_path explicitly saves a new file.",json!({"format":{"type":"string","enum":["png","jpeg"],"default":"png"},"save_path":{"type":"string","minLength":1,"maxLength":4096}}),&[],true);
+    add("screenshot","Latest HDMI frame as a bounded image (JPEG by default; format:png is lossless) plus pixel/native geometry. Memory only; save_path explicitly saves a new file.",json!({"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT},"save_path":{"type":"string","minLength":1,"maxLength":4096}}),&[],true);
     add("move","Move absolute pointer to screenshot pixels; requires calibrated binding or explicit uncalibrated:true.",json!({"x":pixel,"y":pixel,"uncalibrated":boolean}),&["x","y"],false);
     add(
         "click",
@@ -326,7 +329,7 @@ fn tools() -> Vec<Value> {
     let actions: Vec<Value> = result.iter().filter(|t| ["move", "click", "drag", "scroll", "key", "type_text"].contains(&t["name"].as_str().unwrap_or("")))
         .map(|t| json!({"type":"object","additionalProperties":false,"required":["tool","arguments"],"properties":{"tool":{"type":"string","enum":[t["name"]]},"arguments":t["inputSchema"]}})).collect();
     result.push(json!({"name":"batch","description":"Execute up to 32 ordered actions, observing each before the next. Stops at the first failed/non-EMITTED command or unsettled observation; never retries. Returns receipts and one final observed image by default.",
-        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":"png"}}},
+        "inputSchema":{"type":"object","additionalProperties":false,"required":["actions"],"properties":{"actions":{"type":"array","minItems":1,"maxItems":32,"items":{"anyOf":actions}},"return_screenshot":{"type":"boolean","default":true},"format":{"type":"string","enum":["png","jpeg"],"default":DEFAULT_IMAGE_FORMAT}}},
         "annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}));
     result
 }
@@ -775,7 +778,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         if name == "screenshot" {
             if let Some(path) = args["save_path"].as_str() {
                 let (image, _) = frame
-                    .image(args["format"].as_str().unwrap_or("png"))
+                    .image(args["format"].as_str().unwrap_or(DEFAULT_IMAGE_FORMAT))
                     .map_err(failure)?;
                 let mut file = OpenOptions::new()
                     .write(true)
@@ -1074,7 +1077,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     ) -> Result<Value, Value> {
         let started = Instant::now();
         let (bytes, mime) = frame
-            .image(args["format"].as_str().unwrap_or("png"))
+            .image(args["format"].as_str().unwrap_or(DEFAULT_IMAGE_FORMAT))
             .map_err(failure)?;
         metadata["image_bytes"] = json!(bytes.len());
         metadata["mime_type"] = json!(mime);
@@ -1112,7 +1115,6 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             let mut arguments = action["arguments"].clone();
             // Keep raw observations; encode only once after the last attempted action.
             arguments["return_screenshot"] = json!(false);
-            arguments["format"] = args.get("format").cloned().unwrap_or(json!("png"));
             self.last_observed = None;
             match self.call(action["tool"].as_str().unwrap_or(""), &arguments, cancelled) {
                 Ok(value) => {

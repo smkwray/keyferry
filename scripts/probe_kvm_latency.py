@@ -15,8 +15,9 @@ def main():
     parser.add_argument("--keyctl", required=True)
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--calibrate", action="store_true")
-    parser.add_argument("--format", choices=["png", "jpeg"], default="png")
+    parser.add_argument("--format", choices=["png", "jpeg"])
     parser.add_argument("--image-benchmark", action="store_true")
+    parser.add_argument("--images-only", action="store_true")
     parser.add_argument("--batch", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.samples <= 100:
@@ -57,17 +58,17 @@ def main():
         process.stdin.write(json.dumps(dict(jsonrpc="2.0", method="notifications/initialized")) + "\n")
         process.stdin.flush()
         status = call("status", {})["structuredContent"]["device"]
-        if status["link"] != "authenticated" or status["armed"] or status["firmware"]["board_compatibility_id"] != 1:
+        if not args.images_only and (status["link"] != "authenticated" or status["armed"] or status.get("firmware", {}).get("board_compatibility_id") != 1):
             raise RuntimeError("requires authenticated, disarmed Waveshare")
-        print(json.dumps(dict(route=status.get("via"), link_path=status.get("link_path"), endpoint=status["firmware"]["endpoint"])), flush=True)
+        print(json.dumps(dict(route=status.get("via"), link_path=status.get("link_path"), endpoint=status.get("firmware", {}).get("endpoint"))), flush=True)
         shot = call("screenshot", {})
         print(json.dumps(dict(capture={key: shot["structuredContent"].get(key) for key in ("width", "height", "native_width", "native_height", "frame_age_ms")})), flush=True)
         previous = picture(shot)
-        if args.calibrate:
+        if args.calibrate and not args.images_only:
             result = call("calibrate", {})["structuredContent"]
             print(json.dumps(dict(calibration=result)), flush=True)
             previous = picture(call("screenshot", {}))
-        if args.image_benchmark:
+        if args.image_benchmark or args.images_only:
             for format_name in ("png", "jpeg"):
                 rows = []
                 for _ in range(10):
@@ -77,6 +78,8 @@ def main():
                     metadata = result["structuredContent"]
                     rows.append(dict(roundtrip_ms=elapsed, encode_ms=metadata["image_encode_ms"], bytes=metadata["image_bytes"]))
                 print(json.dumps(dict(format=format_name, image_benchmark={key: statistics.median(r[key] for r in rows) for key in rows[0]})), flush=True)
+        if args.images_only:
+            return
         if args.batch:
             if args.samples > 32:
                 raise RuntimeError("batch is bounded to 32 actions")
@@ -84,7 +87,10 @@ def main():
                                                        y=int(previous.height*(0.45 if index%2==0 else 0.65)),
                                                        uncalibrated=True)) for index in range(args.samples)]
             start = time.perf_counter()
-            result = call("batch", dict(actions=actions, format=args.format))
+            arguments = dict(actions=actions)
+            if args.format:
+                arguments["format"] = args.format
+            result = call("batch", arguments)
             print(json.dumps(dict(batch_ms=round((time.perf_counter()-start)*1000,1),
                                   completed=result["structuredContent"]["completed"],
                                   actions=[{key: r.get(key) for key in ("latency_ms", "settled", "cursor_px")} for r in result["structuredContent"]["actions"]])), flush=True)
@@ -95,7 +101,7 @@ def main():
             y = int(previous.height * (0.45 if index % 2 == 0 else 0.65))
             start = time.perf_counter()
             arguments = dict(x=x, y=y, uncalibrated=True)
-            if args.format != "png":
+            if args.format:
                 arguments["format"] = args.format
             result = call("move", arguments)
             action_ms = (time.perf_counter() - start) * 1000

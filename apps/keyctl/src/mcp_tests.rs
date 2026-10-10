@@ -392,7 +392,7 @@ async fn busy_desktop_calibration_and_moves_use_the_production_path() {
         }
         // A newly appearing panel outside the action ROI cannot prolong a settled click.
         s.animation.as_mut().unwrap().1 = frames::MotionMask::new(s.last_observed.as_ref().unwrap());
-        let clicked = s.call("click", &json!({"x":100,"y":150}), &c).unwrap();
+        let clicked = s.call("click", &json!({"x":100,"y":150,"format":"png"}), &c).unwrap();
         assert_eq!(clicked["structuredContent"]["settled"],true);
         assert_eq!(clicked["structuredContent"]["settle_region"]["width"],256);
         assert_eq!(clicked["content"][0]["mimeType"],"image/png");
@@ -475,6 +475,13 @@ fn stability_change_region_ocr_and_no_persistence() {
     let before = s.call("screenshot", &json!({}), &c).unwrap();
     let data = before["content"][0]["data"].as_str().unwrap();
     let bytes = STANDARD.decode(data).unwrap();
+    assert_eq!(before["content"][0]["mimeType"], "image/jpeg");
+    assert_eq!(&bytes[..2], b"\xff\xd8");
+    let png = s.call("screenshot", &json!({"format":"png"}), &c).unwrap();
+    assert_eq!(png["content"][0]["mimeType"], "image/png");
+    let bytes = STANDARD
+        .decode(png["content"][0]["data"].as_str().unwrap())
+        .unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     assert!(!s.root.exists());
     let mut changed = frame(320, 240, 1);
