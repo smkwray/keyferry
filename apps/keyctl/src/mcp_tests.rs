@@ -153,6 +153,64 @@ fn cursor_differencing_synthetic_and_ambiguity() {
     assert!(geometry::cursor(&a, &b, &c2, &mask).is_err());
 }
 
+/// A small Windows arrow on a white (Notepad) background after 2:1 nearest-neighbour
+/// downscaling: only every other pixel of its one-pixel black outline survives.
+fn outline_frame(tip: (u32, u32), serial: u64) -> Frame {
+    let mut f = frame(320, 240, serial);
+    f.rgb.fill(255);
+    let (x, y) = tip;
+    for (dx, dy) in (0..=14)
+        .step_by(2)
+        .map(|k| (0, k))
+        .chain((0..=10).step_by(2).map(|k| (k, k)))
+    {
+        let i = ((y + dy) * f.width + x + dx) as usize * 3;
+        f.rgb[i..i + 3].fill(0);
+    }
+    f
+}
+
+#[test]
+fn decimated_thin_arrow_outline_is_one_cursor() {
+    let a = outline_frame((40, 40), 1);
+    let b = outline_frame((200, 100), 2);
+    let c = outline_frame((100, 180), 3);
+    let mask = frames::MotionMask::new(&a);
+    assert_eq!(geometry::cursor(&a, &b, &c, &mask).unwrap(), [200.0, 100.0]);
+    assert_eq!(
+        geometry::cursor_near(&a, &b, &c, &mask, Some([202.0, 98.0])).unwrap(),
+        [200.0, 100.0]
+    );
+}
+
+#[test]
+fn probe_prediction_excludes_pillar_bars_and_prefers_agreeing_probes() {
+    let mut f = frame(320, 240, 1);
+    for y in 0..240 {
+        for x in (0..40).chain(280..320) {
+            let i = (y * f.width + x) as usize * 3;
+            f.rgb[i..i + 3].fill(0);
+        }
+    }
+    assert_eq!(geometry::active_video(&f), [40.0, 0.0, 240.0, 240.0]);
+    assert_eq!(geometry::expected(&f, &[], [0.5, 0.25]), [159.5, 59.75]);
+    let mut dark = f.clone();
+    dark.rgb.fill(0);
+    assert_eq!(geometry::active_video(&dark), [80.0, 60.0, 160.0, 120.0]);
+    let mut samples = vec![
+        ([0.1, 0.1], [50.0, 40.0]),
+        ([0.9, 0.2], [250.0, 60.0]),
+        ([0.5, 0.9], [150.0, 200.0]),
+    ];
+    let p = geometry::expected(&f, &samples, [0.5, 0.5]);
+    assert!((p[0] - 150.0).abs() < 1e-9 && (p[1] - 120.0).abs() < 1e-9);
+    samples[2].1 = [10.0, 10.0];
+    assert_eq!(
+        geometry::expected(&f, &samples, [0.5, 0.25]),
+        [159.5, 59.75]
+    );
+}
+
 #[test]
 fn robust_fit_rejects_two_outliers_and_reports_pixel_residuals() {
     let f = frame(320, 240, 1);
