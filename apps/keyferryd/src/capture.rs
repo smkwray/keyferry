@@ -3,7 +3,7 @@ use super::*;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use keyferry_capture::{
     capture,
-    frames::{Capture, Frame, FrameSource, Region, MAX_SIDE},
+    frames::{Capture, Frame, FrameSource, Region, Retry, MAX_SIDE},
     ocr::{NativeOcr, Ocr},
 };
 use std::sync::atomic::AtomicBool;
@@ -14,6 +14,8 @@ pub(crate) const MAX_WIRE: usize = 7 * 1024 * 1024;
 pub(crate) struct Service {
     inventory: Option<(Instant, Result<Vec<capture::Device>, &'static str>)>,
     streams: HashMap<String, Capture>,
+    inventory_retry: Retry,
+    source_retry: Retry,
     last_request: Option<Instant>,
     #[cfg(test)]
     pub fake: Option<Frame>,
@@ -37,14 +39,27 @@ impl Service {
         self.streams.clear();
     }
     fn devices(&mut self) -> Result<Vec<capture::Device>, &'static str> {
-        if self
-            .inventory
-            .as_ref()
-            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(10))
-        {
-            self.inventory = Some((Instant::now(), capture::devices()));
+        self.devices_at(Instant::now(), capture::devices)
+    }
+    fn devices_at(
+        &mut self,
+        now: Instant,
+        discover: impl FnOnce() -> Result<Vec<capture::Device>, &'static str>,
+    ) -> Result<Vec<capture::Device>, &'static str> {
+        if let Some((at, Ok(devices))) = &self.inventory {
+            if now.saturating_duration_since(*at) < Duration::from_secs(10) {
+                return Ok(devices.clone());
+            }
         }
-        self.inventory.as_ref().expect("inventory").1.clone()
+        let result = self.inventory_retry.attempt(now, || {
+            let devices = discover()?;
+            if devices.is_empty() {
+                return Err("capture.source_unavailable");
+            }
+            Ok(devices)
+        });
+        self.inventory = Some((now, result.clone()));
+        result
     }
 
     fn sources(&mut self) -> serde_json::Value {
@@ -87,12 +102,19 @@ impl Service {
                 serde_json::json!({"generation":frame.generation,"source":"local:fake-hdmi"}),
             );
         }
+        let mut retry = std::mem::take(&mut self.source_retry);
+        let result = retry.attempt(Instant::now(), || self.frame_inner(request));
+        self.source_retry = retry;
+        result
+    }
+
+    fn frame_inner(&mut self, request: &FrameRequest) -> Result<serde_json::Value, &'static str> {
         let id = request
             .source
             .strip_prefix("local:")
             .ok_or("capture.source_not_found")?;
         let devices = self.devices()?;
-        capture::select_source(&devices, Some(id)).map_err(|e| e.code)?;
+        capture::select_source(&devices, Some(id)).map_err(|_| "capture.source_unavailable")?;
         if !self.streams.contains_key(id) {
             if self.streams.len() >= 4 {
                 return Err("capture.stream_limit");
@@ -333,6 +355,25 @@ pub(crate) fn peer_routes() -> Router<Daemon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_inventory_is_inert_without_clients_and_backoff_is_on_demand() {
+        let mut service = Service::default();
+        let mut discoveries = Vec::new();
+        let start = Instant::now();
+        assert!(service.inventory.is_none());
+        assert!(service.streams.is_empty());
+        for second in 0..=240 {
+            let result = service.devices_at(start + Duration::from_secs(second), || {
+                discoveries.push(second);
+                Ok(Vec::new())
+            });
+            assert_eq!(result.unwrap_err(), "capture.source_unavailable");
+        }
+        assert_eq!(discoveries, [0, 2, 6, 14, 30, 62, 122, 182]);
+        assert!(service.streams.is_empty());
+        assert_eq!(service.sources()["error"], "capture.source_unavailable");
+    }
     #[test]
     fn region_scale_and_frame_bounds_are_checked_on_the_served_frame() {
         let frame = Frame {

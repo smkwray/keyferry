@@ -229,6 +229,7 @@ fn failure(code: &str) -> Value {
     json!({"code":code,"message": match code {
         "device.select_required" => "Select a device using list_devices and select_device; no unambiguous authenticated device is available.",
         "capture.no_source_anywhere" => "No capture source is available on this controller or an authenticated owner peer. Connect a capture card and check list_capture_sources for discovery errors.",
+        "capture.source_unavailable" => "The capture source is absent or unavailable. Connect the capture card and request sources again; retries are backed off and no input was sent.",
         "capture.peer_offline" => "The selected capture peer is offline or its fresh device proof failed. Check controller connectivity; no input was sent.",
         "capture.select_required" => "Select a capture source using list_capture_sources and select_capture_source; no unambiguous source is available.",
         "calibration.cursor_not_seen" => "Cursor not seen: capture may show a different machine. Check HDMI main-display mirroring and a static harmless target.",

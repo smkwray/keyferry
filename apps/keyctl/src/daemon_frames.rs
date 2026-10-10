@@ -108,6 +108,7 @@ impl DaemonFrames {
                     | "capture.peer_offline_or_fresh_proof_failed",
                 ) => "capture.peer_offline",
                 Some("capture.source_not_found") => "capture.source_not_found",
+                Some("capture.source_unavailable") => "capture.source_unavailable",
                 Some("ocr.unsupported_platform") => "ocr.unsupported_platform",
                 Some("ocr.engine_unavailable") => "ocr.engine_unavailable",
                 _ => "capture.frame_unavailable",
@@ -146,10 +147,19 @@ impl FrameSource for DaemonFrames {
                 .as_ref()
                 .is_none_or(|(id, _)| Some(id) != self.source.as_ref())
         {
-            return Err("capture.select_required");
+            return Err(
+                if entries
+                    .iter()
+                    .any(|e| e["id"].as_str() == self.source.as_deref())
+                {
+                    "capture.select_required"
+                } else {
+                    "capture.source_unavailable"
+                },
+            );
         }
         if entries.is_empty() {
-            return Err("capture.no_source_anywhere");
+            return Err("capture.source_unavailable");
         }
         if let Some(source) = &self.source {
             let matches = entries
@@ -162,6 +172,9 @@ impl FrameSource for DaemonFrames {
                             .is_some_and(|id| id.strip_prefix("local:") == Some(source))
                 })
                 .collect::<Vec<_>>();
+            if matches.is_empty() {
+                return Err("capture.source_unavailable");
+            }
             if matches.len() != 1 {
                 return Err("capture.select_required");
             }
@@ -170,6 +183,9 @@ impl FrameSource for DaemonFrames {
             self.source = Some(source);
             self.choice = choice;
         } else {
+            if !entries.iter().any(|entry| entry["recognized"] == true) {
+                return Err("capture.source_unavailable");
+            }
             return Err("capture.select_required");
         }
         Ok(())
@@ -321,6 +337,25 @@ impl FrameSource for DaemonFrames {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_source_returns_unavailable_without_requesting_a_frame() {
+        for source in [None, Some("local:absent".into())] {
+            let mut frames =
+                DaemonFrames::new(source, "http://127.0.0.1:9", Path::new("missing-token"));
+            frames.inventory = Some((
+                Instant::now(),
+                json!({"sources":[{"id":"local:webcam","name":"Webcam","recognized":false,"controller":"local"}]}),
+            ));
+            assert_eq!(frames.resolve(), Err("capture.source_unavailable"));
+            assert_eq!(
+                frames
+                    .latest(None, Duration::from_secs(1), &AtomicBool::new(false))
+                    .unwrap_err(),
+                "capture.source_unavailable"
+            );
+        }
+    }
+
     #[test]
     fn production_selection_never_uses_position_and_prefers_unique_pointer() {
         let d = |id, link, pointer| json!({"id":id,"link":link,"firmware":{"device_capability_mask":if pointer{0x08000000}else{0}}});

@@ -227,7 +227,7 @@ fn fake_ffmpeg_wait() {
 
 #[test]
 fn process_deadline_kills_a_fake_ffmpeg() {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = keyferry_core::process::command(std::env::current_exe().unwrap());
     command
         .args(["--exact", "capture::tests::fake_ffmpeg_wait", "--nocapture"])
         .env("KEYCTL_UNIT_FFMPEG_SLEEP", "1");
