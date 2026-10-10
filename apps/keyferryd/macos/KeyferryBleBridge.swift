@@ -75,7 +75,7 @@ private enum BridgeStreamIO {
 // END TESTABLE STREAM IO
 
 private func diagnostic(_ message: String) {
-    FileHandle.standardError.write(Data("Keyferry Bluetooth: \(message)\n".utf8))
+    FileHandle.standardError.write(Data("\(ISO8601DateFormatter().string(from: Date())) Keyferry Bluetooth: \(message)\n".utf8))
 }
 
 final class Bridge: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {

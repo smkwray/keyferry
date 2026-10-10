@@ -22,7 +22,18 @@ const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// manager stops it with SIGTERM on macOS. A stop request ends device work through
 /// [`keyferryd::Daemon::shutdown`], then dropping every task closes the remaining sockets and
 /// kills the macOS Bluetooth helper, whose handle is `kill_on_drop`.
-fn main() -> Result<(), keyferryd::DaemonError> {
+fn main() -> std::process::ExitCode {
+    keyferryd::daemon_log!("keyferryd starting");
+    match run_main() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            keyferryd::daemon_log!("keyferryd stopped with error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_main() -> Result<(), keyferryd::DaemonError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -31,7 +42,7 @@ fn main() -> Result<(), keyferryd::DaemonError> {
         let result = tokio::select! {
             result = run(Arc::clone(&started)) => result,
             () = shutdown_signal() => {
-                println!("keyferryd stopping");
+                keyferryd::daemon_log!("keyferryd stopping");
                 Ok(())
             }
         };
@@ -124,12 +135,14 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
             "Paired keyboard".to_owned(),
             transport,
         )?;
-        println!("keyferryd TLS listener ready for the paired dongle");
+        keyferryd::daemon_log!("keyferryd TLS listener ready for the paired dongle");
         tokio::spawn(async move {
             loop {
                 match listener.accept_one().await {
-                    Ok(peer) => println!("TLS dongle session authenticated from {peer}"),
-                    Err(error) => eprintln!("TLS dongle connection rejected: {error}"),
+                    Ok(peer) => {
+                        keyferryd::daemon_log!("TLS dongle session authenticated from {peer}")
+                    }
+                    Err(error) => keyferryd::daemon_log!("TLS dongle connection rejected: {error}"),
                 }
             }
         });
@@ -161,12 +174,12 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
         let daemon =
             keyferryd::Daemon::with_tls_transports(keyferryd::FileTokenStore::default(), devices)?;
         daemon.enable_tailnet_forwarding(&secret_stores)?;
-        println!(
+        keyferryd::daemon_log!(
             "keyferryd ready for {} owner-authorized Keyferry device(s)",
             secret_stores.len()
         );
         if !options.lan_interfaces.is_empty() {
-            println!(
+            keyferryd::daemon_log!(
                 "keyferryd enabling owner-authorized Wi-Fi on selected interface(s): {}",
                 options
                     .lan_interfaces
@@ -184,7 +197,7 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
             ));
         }
         let ble_multi = if options.bluetooth_off {
-            println!("keyferryd Bluetooth gateway off");
+            keyferryd::daemon_log!("keyferryd Bluetooth gateway off");
             None
         } else {
             Some((secret_stores, transports))
@@ -200,7 +213,7 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
     };
     let _ = started.set(daemon.clone());
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    println!("keyferryd local API listening on http://{address}");
+    keyferryd::daemon_log!("keyferryd local API listening on http://{address}");
     let mut services = tokio::task::JoinSet::new();
     let local_daemon = daemon.clone();
     services.spawn(async move { keyferryd::serve(local_daemon, address).await });
@@ -213,7 +226,7 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
             let probe_address = SocketAddr::new(tailnet_ip, tailnet_port);
             let control_address = SocketAddr::new(tailnet_ip, control_port);
             let installation_id = installation.installation_id();
-            println!(
+            keyferryd::daemon_log!(
                 "keyferryd owner gateway probe on http://{probe_address}; authenticated control on {control_address}"
             );
             services.spawn(async move {
@@ -224,7 +237,9 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
             });
         }
         (Some(installation), None) => {
-            println!("keyferryd will follow the local Tailscale IPv4 address when available");
+            keyferryd::daemon_log!(
+                "keyferryd will follow the local Tailscale IPv4 address when available"
+            );
             services.spawn(supervise_owner_tailnet(
                 daemon.clone(),
                 installation,
@@ -235,7 +250,9 @@ async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd:
             let remote_address = SocketAddr::new(tailnet_ip, tailnet_port);
             let policy =
                 keyferryd::RemoteApiPolicy::new(keyferryd::FileTokenStore::remote_default())?;
-            println!("keyferryd legacy tailnet API listening on http://{remote_address}");
+            keyferryd::daemon_log!(
+                "keyferryd legacy tailnet API listening on http://{remote_address}"
+            );
             services.spawn(async move {
                 keyferryd::serve_tailnet(daemon, remote_address, policy).await
             });
@@ -278,7 +295,9 @@ async fn wait_for_authorization(path: &std::path::Path) {
     if path.exists() {
         return;
     }
-    println!("keyferryd waiting for this computer to be authorized in the Keyferry app");
+    keyferryd::daemon_log!(
+        "keyferryd waiting for this computer to be authorized in the Keyferry app"
+    );
     while !path.exists() {
         time::sleep(AUTHORIZATION_POLL).await;
     }
@@ -299,7 +318,7 @@ async fn supervise_owner_tailnet(
         };
         let probe_address = SocketAddr::new(ip, probe_port);
         let control_address = SocketAddr::new(ip, control_port);
-        println!(
+        keyferryd::daemon_log!(
             "keyferryd owner gateway probe on http://{probe_address}; authenticated control on {control_address}"
         );
         let probe =
@@ -312,19 +331,19 @@ async fn supervise_owner_tailnet(
             tokio::select! {
                 result = &mut probe => {
                     if let Err(error) = result {
-                        eprintln!("owner gateway probe stopped: {error}");
+                        keyferryd::daemon_log!("owner gateway probe stopped: {error}");
                     }
                     break;
                 }
                 result = &mut control => {
                     if let Err(error) = result {
-                        eprintln!("owner gateway control stopped: {error}");
+                        keyferryd::daemon_log!("owner gateway control stopped: {error}");
                     }
                     break;
                 }
                 () = time::sleep(TAILSCALE_REFRESH) => {
                     if discover_local_tailscale_ipv4().await != Some(ip) {
-                        println!("keyferryd tailnet address changed; rebinding owner gateway listeners");
+                        keyferryd::daemon_log!("keyferryd tailnet address changed; rebinding owner gateway listeners");
                         break;
                     }
                 }

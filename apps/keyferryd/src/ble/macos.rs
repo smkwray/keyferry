@@ -68,7 +68,7 @@ pub(super) async fn run(admission: Admission, single_shot: bool) -> Result<(), B
         let (stream, closed) = match spawn_helper().await {
             Ok(stream) => stream,
             Err(error) if !single_shot => {
-                eprintln!("Bluetooth helper unavailable: {error}");
+                crate::daemon_log!("Bluetooth helper unavailable: {error}");
                 time::sleep(RETRY_DELAY).await;
                 continue;
             }
@@ -80,14 +80,14 @@ pub(super) async fn run(admission: Admission, single_shot: bool) -> Result<(), B
             .await
             .map_err(|error| BleGatewayError::runtime(error.to_string()));
         if result.is_ok() && diagnostics_enabled() {
-            eprintln!("BLE pipe admitted; waiting_for_stream_close=1");
+            crate::daemon_log!("BLE pipe admitted; waiting_for_stream_close=1");
         }
         let result = finish_candidate(result, closed).await;
         if single_shot {
             return result;
         }
         if let Err(ref error) = result {
-            eprintln!("Bluetooth candidate closed: {error}");
+            crate::daemon_log!("Bluetooth candidate closed: {error}");
         }
         time::sleep(RETRY_DELAY).await;
     }
@@ -210,7 +210,7 @@ impl Drop for HelperStream {
         // Request child termination before waking the next-candidate loop.
         let _ = self._child.start_kill();
         if self.trace {
-            eprintln!(
+            crate::daemon_log!(
                 "BLE pipe close written_bytes={} read_bytes={} written_sha256={:x} read_sha256={:x}",
                 self.written_bytes,
                 self.read_bytes,

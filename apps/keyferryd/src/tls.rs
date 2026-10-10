@@ -816,6 +816,11 @@ impl TlsTransport {
     }
 
     #[must_use]
+    #[cfg(test)]
+    pub(crate) fn test_credentials(&self) -> TlsCredentials {
+        self.inner.credentials.clone()
+    }
+
     pub fn device_id(&self) -> [u8; 16] {
         self.inner.credentials.device_id()
     }
@@ -1040,6 +1045,10 @@ impl TlsTransport {
         });
         drop(session);
         self.set_ready();
+        crate::daemon_log!(
+            "device session ready: device={}; path={link_path:?}",
+            uuid::Uuid::from_bytes(self.device_id())
+        );
         tokio::spawn(connection_actor(
             self.clone(),
             stream,
@@ -1581,7 +1590,8 @@ impl DeviceTransport for TlsTransport {
         Box::pin(async move {
             let sender = self.inner.session.lock().await.clone();
             let Some(sender) = sender else {
-                return TransportOutcome::Unknown;
+                // No command reached the session actor, so no input could start.
+                return TransportOutcome::Rejected;
             };
             let (reply, response) = oneshot::channel();
             if sender
@@ -1594,7 +1604,7 @@ impl DeviceTransport for TlsTransport {
                 .await
                 .is_err()
             {
-                return TransportOutcome::Unknown;
+                return TransportOutcome::Rejected;
             }
             response.await.unwrap_or(TransportOutcome::Unknown)
         })
@@ -1830,6 +1840,7 @@ async fn accept_with_keepalive(
     listener: &TcpListener,
 ) -> Result<(TcpStream, SocketAddr), TlsTransportError> {
     let (stream, peer) = listener.accept().await?;
+    stream.set_nodelay(true)?;
     let keepalive = TcpKeepalive::new()
         .with_time(TCP_KEEPALIVE_IDLE)
         .with_interval(TCP_KEEPALIVE_INTERVAL)
@@ -1851,7 +1862,11 @@ async fn connection_actor<IO>(
     loop {
         let request = tokio::select! {
             frame = read_frame(&mut stream) => {
-                let _ = frame;
+                match frame {
+                    Ok(frame) => crate::daemon_log!("device session unsolicited frame: device={}; message_type={}; sequence={}",
+                        uuid::Uuid::from_bytes(transport.device_id()), frame.message_type, frame.sequence),
+                    Err(error) => crate::daemon_log!("device session read failed: device={}; {error}", uuid::Uuid::from_bytes(transport.device_id())),
+                }
                 fail_connection(
                     &transport,
                     &mut stream,
@@ -2008,6 +2023,11 @@ async fn connection_actor<IO>(
                     let _ = reply.send(outcome);
                 }
                 Err(error) => {
+                    crate::daemon_log!(
+                        "device command transport failed: device={}; command={}; {error}",
+                        uuid::Uuid::from_bytes(transport.device_id()),
+                        command.command_id
+                    );
                     transport.record_command_diagnostic(&error);
                     let _ = reply.send(TransportOutcome::Unknown);
                     fail_connection(&transport, &mut stream, next_sequence, actor_session_id).await;
@@ -2145,6 +2165,10 @@ async fn clear_connection(transport: &TlsTransport, actor_session_id: [u8; 16]) 
     }
     session.take();
     drop(session);
+    crate::daemon_log!(
+        "device session closed: device={}",
+        uuid::Uuid::from_bytes(transport.device_id())
+    );
     transport.notify_fault();
 }
 
@@ -2629,7 +2653,7 @@ fn verify_auth_response(
     Ok(())
 }
 
-async fn send_frame<IO>(stream: &mut IO, frame: Frame) -> Result<(), TlsTransportError>
+pub(crate) async fn send_frame<IO>(stream: &mut IO, frame: Frame) -> Result<(), TlsTransportError>
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -2645,7 +2669,7 @@ where
     Ok(())
 }
 
-async fn read_frame<IO>(stream: &mut IO) -> Result<Frame, TlsTransportError>
+pub(crate) async fn read_frame<IO>(stream: &mut IO) -> Result<Frame, TlsTransportError>
 where
     IO: AsyncRead + Unpin,
 {
@@ -4109,7 +4133,7 @@ pub(crate) mod test_support {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rustls::{
         client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -4254,9 +4278,32 @@ mod tests {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        respond_on_name(
+            stream,
+            credentials,
+            link_secret,
+            send_identity,
+            "keyferry.local",
+        )
+        .await
+    }
+
+    pub(crate) async fn respond_on_name<IO>(
+        stream: IO,
+        credentials: &TlsCredentials,
+        link_secret: &[u8; 32],
+        send_identity: bool,
+        server_name: &str,
+    ) -> (tokio_rustls::client::TlsStream<IO>, Frame)
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
         let connector = pinned_connector(credentials, credentials.identity().certificate_der());
         let mut stream = connector
-            .connect(ServerName::try_from("keyferry.local").unwrap(), stream)
+            .connect(
+                ServerName::try_from(server_name.to_owned()).unwrap(),
+                stream,
+            )
             .await
             .expect("complete TLS handshake");
         let challenge = read_frame(&mut stream).await.expect("read challenge");
@@ -4338,12 +4385,33 @@ mod tests {
         payload
     }
 
-    async fn connect_authenticated(
+    pub(crate) async fn connect_authenticated(
         address: SocketAddr,
         credentials: &TlsCredentials,
     ) -> tokio_rustls::client::TlsStream<TcpStream> {
         let (stream, _) = connect_and_respond(address, credentials, &credentials.link_secret).await;
         stream
+    }
+
+    #[tokio::test]
+    async fn command_without_an_actor_or_with_a_closed_queue_is_rejected_before_start() {
+        let transport = TlsTransport::new(credentials()).unwrap();
+        let command = mixed_input_command(uuid::Uuid::now_v7());
+        assert_eq!(
+            transport
+                .execute(&command, Cancellation::new(), Arc::new(|_| {}))
+                .await,
+            TransportOutcome::Rejected
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        *transport.inner.session.lock().await = Some(sender);
+        assert_eq!(
+            transport
+                .execute(&command, Cancellation::new(), Arc::new(|_| {}))
+                .await,
+            TransportOutcome::Rejected
+        );
     }
 
     #[tokio::test]

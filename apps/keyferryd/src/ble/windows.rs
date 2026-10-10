@@ -81,7 +81,7 @@ pub(super) async fn run(
             Err(error) => {
                 // Adapter disable/enable and watcher aborts are recoverable.
                 // Retry without terminating the daemon or exposing a device ID.
-                eprintln!("Bluetooth scan unavailable: {error}");
+                crate::daemon_log!("Bluetooth scan unavailable: {error}");
                 if !retry_allowed(single_shot) {
                     return Err(error);
                 }
@@ -104,7 +104,7 @@ pub(super) async fn run(
         if let Err(ref error) = result {
             // Errors contain only fixed stage names and numeric GATT status;
             // neither characteristic values nor device identifiers are logged.
-            eprintln!("Bluetooth candidate closed: {error}");
+            crate::daemon_log!("Bluetooth candidate closed: {error}");
         }
         if !retry_allowed(single_shot) {
             return result;
@@ -125,7 +125,7 @@ pub(super) async fn run_multi(
     loop {
         let result = run_multi_scan_session(router.clone(), &transports, single_shot).await;
         if let Err(ref error) = result {
-            eprintln!("Bluetooth scan unavailable: {error}");
+            crate::daemon_log!("Bluetooth scan unavailable: {error}");
         }
         if !retry_allowed(single_shot) {
             return result;
@@ -179,7 +179,7 @@ async fn run_multi_scan_session(
                 let (address, result) = completed;
                 active_addresses.remove(&address);
                 if let Err(ref error) = result {
-                    eprintln!("Bluetooth candidate closed: {error}");
+                    crate::daemon_log!("Bluetooth candidate closed: {error}");
                 }
                 if single_shot {
                     return result;
@@ -416,7 +416,7 @@ impl Drop for DeviceLease {
         if let Some(device) = self.device.take() {
             let _ = device.Close();
             if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-                eprintln!("BLE diagnostic close_reason=device_lease_released");
+                crate::daemon_log!("BLE diagnostic close_reason=device_lease_released");
             }
         }
     }
@@ -442,7 +442,7 @@ async fn establish_gatt(
     setup_deadline: Instant,
 ) -> Result<GattConnection, BleGatewayError> {
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!(
+        crate::daemon_log!(
             "BLE diagnostic candidate_address_type={}",
             candidate.address_type.0
         );
@@ -459,7 +459,7 @@ async fn establish_gatt(
         .and_then(|access| access.CurrentStatus())
         .map_err(|_| runtime("could not read Bluetooth device access status"))?;
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!("BLE diagnostic device_access_status={}", device_access.0);
+        crate::daemon_log!("BLE diagnostic device_access_status={}", device_access.0);
     }
     if device_access != DeviceAccessStatus::Allowed {
         let _ = device.Close();
@@ -495,7 +495,7 @@ async fn establish_gatt(
                 .and_then(|device| device.ConnectionStatus().ok())
                 .unwrap_or(BluetoothConnectionStatus::Disconnected);
             if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-                eprintln!(
+                crate::daemon_log!(
                     "BLE diagnostic t_ms={} connection_status={}",
                     observed_at.elapsed().as_millis(),
                     status.0
@@ -558,7 +558,7 @@ async fn establish_gatt(
         }
     }
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!(
+        crate::daemon_log!(
             "BLE diagnostic gatt_communication_status={} gatt_protocol_error={} service_count={} keyferry_service_count={}",
             service_status.0,
             protocol_error.map_or_else(|| "none".to_owned(), |value| value.to_string()),
@@ -577,7 +577,7 @@ async fn establish_gatt(
         .and_then(|session| session.MaxPduSize())
         .map_err(|_| runtime("could not read negotiated ATT MTU"))?;
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!("BLE diagnostic negotiated_att_mtu={att_mtu}");
+        crate::daemon_log!("BLE diagnostic negotiated_att_mtu={att_mtu}");
     }
 
     let connection_changed_token = lease
@@ -620,7 +620,10 @@ impl GattConnection {
                     .and_then(|args| read_buffer(args.CharacteristicValue()).map_err(|_| ()))
                     .and_then(|bytes| {
                         if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-                            eprintln!("BLE diagnostic inbound_fragment_bytes={}", bytes.len());
+                            crate::daemon_log!(
+                                "BLE diagnostic inbound_fragment_bytes={}",
+                                bytes.len()
+                            );
                         }
                         inbound.try_send(bytes).map_err(|_| ())
                     });
@@ -747,7 +750,7 @@ async fn write_fragment(
     progress: &watch::Sender<Instant>,
 ) -> Result<(), BleGatewayError> {
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!(
+        crate::daemon_log!(
             "BLE diagnostic outbound_fragment_bytes={}",
             fragment.bytes().len()
         );
@@ -799,7 +802,7 @@ where
     } else {
         let status = operation.Status().unwrap_or(AsyncStatus::Error);
         if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-            eprintln!(
+            crate::daemon_log!(
                 "BLE diagnostic t_ms={} stage={stage} operation_async_status={} marker=operation_timeout",
                 started_at.elapsed().as_millis(),
                 status.0
@@ -828,7 +831,7 @@ where
         HRESULT(0)
     };
     if DIAGNOSTICS_ENABLED.load(Ordering::Acquire) {
-        eprintln!(
+        crate::daemon_log!(
             "BLE diagnostic t_ms={} stage={stage} operation_async_status={} operation_hresult=0x{:08X}",
             started_at.elapsed().as_millis(),
             status.0,
