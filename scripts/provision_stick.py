@@ -324,10 +324,22 @@ class Tools:
         return self.command([cli, "devices"], timeout=10, json_output=True)
 
 
+_ROM_BACKEND = None
+
+
+def rom_backend():
+    """Load the esptool backend once; esptool's global logger can be replaced only once."""
+    global _ROM_BACKEND
+    if _ROM_BACKEND is None:
+        backend = module(ROOT / "tools/keyferry-firmware/esptool_backend.py", "provision_rom")
+        backend.log.set_logger(backend._SilentLogger())
+        _ROM_BACKEND = backend
+    return _ROM_BACKEND
+
+
 class Rom:
     def __init__(self, main, port, mode):
-        self.backend = module(ROOT / "tools/keyferry-firmware/esptool_backend.py", "provision_rom")
-        self.backend.log.set_logger(self.backend._SilentLogger())
+        self.backend = rom_backend()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.esp = self.backend._open_rom(port, mode)
 
