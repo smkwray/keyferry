@@ -1861,6 +1861,17 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         mask: &frames::MotionMask,
         cancelled: &AtomicBool,
     ) -> Result<(Arc<Frame>, Value), Value> {
+        // A probe onto the presumed cursor changes no pixels, and calibration ends on its first
+        // probe point: step aside first so a repeated calibration still sees the cursor move.
+        if self
+            .presumed()
+            .is_some_and(|at| (at[0] - p[0]).abs().max((at[1] - p[1]).abs()) < 0.05)
+        {
+            let aside = p.map(|v| v + (0.5 - v).signum() * 0.1);
+            let before = self.frame(cancelled)?;
+            self.glide_command(aside, None, cancelled)?;
+            self.observe_action(&before, mask, cancelled)?;
+        }
         let before = self.frame(cancelled)?;
         // The probe glides like every agent motion; EMITTED arrives after the final report, and
         // observation then requires the moved cursor to hold still on fresh frames.

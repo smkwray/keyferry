@@ -669,6 +669,29 @@ async fn every_agent_pointer_motion_glides_including_calibration_and_split_batch
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Calibration ends on its first probe point; the next calibration must still see the cursor move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn back_to_back_calibrations_bind_and_still_glide() {
+    let (mut s, _, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        for round in 0..2 {
+            let calibration = s.call("calibrate", &json!({}), &c);
+            assert!(calibration.is_ok(), "round {round}: {calibration:?}");
+            assert_eq!(calibration.unwrap()["structuredContent"]["bound"], true);
+        }
+        let visual = s.frames.pointer.as_ref().unwrap().lock().unwrap();
+        let jump = largest_jump(&visual.path);
+        assert!(jump < 0.12, "largest step {jump}");
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn faulted_glides_never_replay_and_track_only_possible_starts() {
     for fault in [
