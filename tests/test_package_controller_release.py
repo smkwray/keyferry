@@ -109,9 +109,9 @@ class ControllerReleaseTests(unittest.TestCase):
             self.assertIn("new computer cannot type until the owner approves it", normalized_readme)
             self.assertIn("do not substitute a distant computer", normalized_readme)
             self.assertIn("Do not retry an interrupted or uncertain stream", readme)
-            self.assertIn("service runs only while Keyferry is open", readme)
-            self.assertIn("closing the app stops it", readme)
-            self.assertIn("keyctl opens Keyferry automatically", readme)
+            self.assertIn("service starts at user login", readme)
+            self.assertIn("closing the app leaves the controller running", readme)
+            self.assertIn("keyctl starts the installed service", readme)
             self.assertEqual(version, "1.2.3\n")
 
     def test_macos_release_contains_programs_only(self):
@@ -147,7 +147,7 @@ class ControllerReleaseTests(unittest.TestCase):
             self.assertIn("keyctl --help", readme)
             self.assertIn("keyctl status DEVICE-UUID", readme)
             self.assertIn("keyctl screen-power DEVICE-UUID off", readme)
-            self.assertIn("service runs only while Keyferry is open", readme)
+            self.assertIn("service starts at user login", readme)
 
     def test_platform_installers_supervise_the_same_installation_daemon(self):
         project = Path(__file__).resolve().parents[1]
@@ -199,30 +199,40 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertIn("$_.LocalPort -eq 18043 -or $_.LocalPort -eq 18044", windows)
         self.assertIn("Start-ScheduledTask -TaskName $legacyTaskName", windows)
 
-    def test_installers_define_a_service_that_runs_only_while_the_app_is_open(self):
+    def test_installers_define_independent_supervised_login_services(self):
         project = Path(__file__).resolve().parents[1]
         windows = (project / "scripts" / "install_windows_controller.ps1").read_text()
         macos = (project / "scripts" / "install_unix_controller.sh").read_text()
-        self.assertNotIn("New-ScheduledTaskTrigger", windows)
-        self.assertNotIn("-Trigger", windows)
-        self.assertNotIn("-RestartCount", windows)
-        self.assertIn("-MultipleInstances IgnoreNew", windows)
-        self.assertIn("$task.Settings.RestartCount -ne 0", windows)
-        self.assertIn("Get-InstalledDaemonCommandProcessId", windows)
-        self.assertIn("$verificationStartedDaemon = $true", windows)
-        self.assertIn("Stop-ScheduledTask -TaskName $taskName\n", windows)
-        self.assertIn("plutil -insert RunAtLoad -bool false", macos)
-        self.assertIn("plutil -insert KeepAlive -bool false", macos)
-        self.assertNotIn("-bool true", macos)
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn -User $currentAccount", windows)
+        self.assertIn("-Trigger $trigger", windows)
+        self.assertIn("-RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)", windows)
+        self.assertIn("-MultipleInstances IgnoreNew -Hidden", windows)
+        self.assertNotIn("verificationStartedDaemon", windows)
+        self.assertIn("Start-ScheduledTask -TaskName $taskName", windows)
+        self.assertIn("plutil -insert RunAtLoad -bool true", macos)
+        self.assertIn("plutil -insert KeepAlive -bool true", macos)
+        self.assertIn("plutil -insert ThrottleInterval -integer 5", macos)
+        self.assertNotIn("verification_started", macos)
+        self.assertNotIn("stop_verification_daemon", macos)
         self.assertNotIn("kickstart -k", macos)
-        self.assertIn('launchctl kickstart "$launch_domain/$launch_label"', macos)
-        self.assertIn('launchctl kill TERM "$launch_domain/$launch_label"', macos)
-        self.assertIn('[ "$verification_started" != true ] || stop_verification_daemon', macos)
+
+    def test_desktop_close_and_cmd_q_have_no_service_stop_hook(self):
+        project = Path(__file__).resolve().parents[1]
+        app = (project / "apps/keyferry/src/main.rs").read_text()
+        self.assertNotIn("stop_local_service", app)
+        self.assertNotIn("manager.stop", app)
+        self.assertNotIn("StopServiceOnExit", app)
+        self.assertIn("manager.start(run)", app)
+        daemon = (project / "apps/keyferryd/src/main.rs").read_text()
+        self.assertLess(daemon.index(".lock_instance("), daemon.index("PairedRuntimeConfig::load"))
+        helper = (project / "apps/keyferryd/src/ble/macos.rs").read_text()
+        self.assertIn(".kill_on_drop(true)", helper)
 
     def test_macos_package_gate_is_bounded_and_checks_the_native_bundle(self):
         project = Path(__file__).resolve().parents[1]
         gate = (project / "scripts" / "check_macos_package.sh").read_text()
         self.assertIn("logical_cpus * cpu_percent / 100", gate)
+        self.assertIn("project.toml", gate)
         self.assertIn('rustup show active-toolchain', gate)
         self.assertNotIn('rust_toolchain=1.92.0', gate)
         self.assertIn('rustup which --toolchain "$rust_toolchain" rustc', gate)
@@ -247,6 +257,7 @@ class ControllerReleaseTests(unittest.TestCase):
     def test_windows_package_gate_is_bounded_private_and_non_installing(self):
         project = Path(__file__).resolve().parents[1]
         gate = (project / "scripts" / "check_windows_package.ps1").read_text()
+        self.assertIn("project.toml", gate)
         self.assertIn("cpu_percent", gate)
         self.assertIn("RandomNumberGenerator]::Create()", gate)
         self.assertNotIn("RandomNumberGenerator]::Fill", gate)
@@ -270,6 +281,7 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertIn("$inputText | & $pairing @Arguments", helper)
         self.assertIn('$inputText = $SecretLines -join "`n"', helper)
         self.assertNotIn('($SecretLines -join "`n") + "`n"', helper)
+        self.assertIn("project.toml", helper)
         self.assertIn("cpu_percent", helper)
         self.assertNotIn("if (-not (Test-Path -LiteralPath $pairing", helper)
         self.assertNotIn("--passphrase", helper)
@@ -280,6 +292,7 @@ class ControllerReleaseTests(unittest.TestCase):
         helper = (project / "scripts" / "build_first_hil.ps1").read_text()
         self.assertIn("[ValidateRange(0, 256)]", helper)
         self.assertIn("[int]$Jobs = 0", helper)
+        self.assertIn("project.toml", helper)
         self.assertIn("cpu_percent", helper)
         self.assertIn("if ($Jobs -gt $buildJobCeiling)", helper)
         self.assertIn("if ($Jobs -eq 0) { $buildJobCeiling } else { $Jobs }", helper)

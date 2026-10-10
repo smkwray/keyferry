@@ -56,5 +56,4 @@ $install = @{
 }
 & (Join-Path $PSScriptRoot 'install_windows_controller.ps1') @install
 if (-not $?) { throw 'Install failed; inspect rollback state.' }
-Start-Process -FilePath (Join-Path $installed 'keyferry.exe')
 Write-Output "Deployed: $($Program -join ', ')"

@@ -249,6 +249,31 @@ pub struct FileTokenStore {
 }
 
 impl FileTokenStore {
+    /// One daemon in this user's state directory, including while unauthorized.
+    /// No payload or credentials are written; the OS releases ownership on exit or crash.
+    pub fn lock_instance(&self) -> io::Result<fs::File> {
+        let path = self.path.with_file_name("keyferryd.lock");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        file.try_lock().map_err(|error| match error {
+            fs::TryLockError::WouldBlock => io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "keyferryd is already running in this state directory",
+            ),
+            fs::TryLockError::Error(error) => error,
+        })?;
+        Ok(file)
+    }
+
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -8629,6 +8654,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("keyferry-state-test-{}", Uuid::now_v7()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn daemon_instance_lock_excludes_duplicates_and_recovers_after_drop() {
+        let dir = private_state_dir();
+        let store = FileTokenStore::new(dir.join("token"));
+        let first = store.lock_instance().unwrap();
+        let duplicate = store.lock_instance().unwrap_err();
+        assert_eq!(duplicate.kind(), io::ErrorKind::AlreadyExists);
+        let other_state = FileTokenStore::new(dir.join("other").join("token"))
+            .lock_instance()
+            .unwrap();
+        assert!(!dir.join("token").exists());
+        drop(first);
+        let recovered = store.lock_instance().unwrap();
+        drop(recovered);
+        drop(other_state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn state_dir_entries(dir: &FsPath) -> Vec<String> {

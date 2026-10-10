@@ -108,9 +108,9 @@ def _readme(platform: str) -> str:
             "~/Applications/Keyferry.app/Contents/MacOS/keyctl screen-power DEVICE-UUID off\n"
         )
     return text + (
-        "\nKeyferry's background service runs only while Keyferry is open: opening the app\n"
-        "starts it and closing the app stops it. Installing never leaves it running, and\n"
-        "keyctl opens Keyferry automatically when its local service is unavailable.\n"
+        "\nKeyferry's background service starts at user login and runs independently of the UI.\n"
+        "Apply starts it immediately; closing the app leaves the controller running.\n"
+        "keyctl starts the installed service if needed without opening the desktop app.\n"
         "\nAGENT FIRST USE:\n"
         "1. The USB target needs no app. Install this generic package on the intended\n"
         "   sending computer. A new computer cannot type until the owner approves it\n"

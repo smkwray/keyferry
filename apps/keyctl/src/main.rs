@@ -96,11 +96,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args[0] == "mcp" {
-        SERVICE_OPEN_SETTLED.store(true, Ordering::Release);
+        SERVICE_START_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::run(&args[1..], &url, &token_file));
     }
     if args[0] == "capture" && args.get(1).is_some_and(|s| s == "calibrate") {
-        SERVICE_OPEN_SETTLED.store(true, Ordering::Release);
+        SERVICE_START_SETTLED.store(true, Ordering::Release);
         return ExitCode::from(mcp::calibrate_cli(&args[2..], &url, &token_file));
     }
     if args[0] == "capture" {
@@ -217,7 +217,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// How long keyctl waits for the local service after opening Keyferry.
+/// How long keyctl waits after asking the installed service manager to start.
 const SERVICE_START_WAIT: Duration = Duration::from_secs(20);
 const SERVICE_POLL: Duration = Duration::from_millis(250);
 const SERVICE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
@@ -274,33 +274,34 @@ fn needs_service(command: Option<&str>) -> bool {
     )
 }
 
-/// The program and arguments that open the Keyferry app, which starts the service
-/// (D-20260926-04). keyctl never starts keyferryd itself: that daemon would outlive the app.
-fn app_launch(
+/// Service manager invocation only: a CLI command never opens the optional desktop UI.
+fn service_launch(
     platform: Platform,
-    keyctl: &Path,
-    home: Option<&Path>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<(PathBuf, Vec<String>)> {
-    match platform {
+    system_root: Option<&Path>,
+    uid: Option<u32>,
+) -> Option<Command> {
+    let mut command = match platform {
         Platform::Windows => {
-            let app = keyctl.parent()?.join("keyferry.exe");
-            exists(&app).then_some((app, Vec::new()))
+            let mut command =
+                keyferry_core::process::command(system_root?.join("System32").join("schtasks.exe"));
+            command.args(["/Run", "/TN", "Keyferry Desktop"]);
+            command
         }
         Platform::MacOs => {
-            let bundle = keyctl
-                .ancestors()
-                .find(|path| path.extension().is_some_and(|extension| extension == "app"))
-                .map(Path::to_path_buf)
-                .or_else(|| home.map(|home| home.join("Applications").join("Keyferry.app")))
-                .filter(|bundle| exists(bundle))?;
-            Some((
-                PathBuf::from("/usr/bin/open"),
-                vec!["-a".to_owned(), bundle.to_string_lossy().into_owned()],
-            ))
+            let mut command = keyferry_core::process::command("/bin/launchctl");
+            command.args([
+                "kickstart",
+                &format!("gui/{}/io.github.smkwray.keyferryd", uid?),
+            ]);
+            command
         }
-        Platform::Other => None,
-    }
+        Platform::Other => return None,
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Some(command)
 }
 
 /// Open a separate, expiring human prompt. No text is accepted on stdin or arguments.
@@ -333,7 +334,7 @@ fn request_secure_text(args: &[String], url: &str, token_file: &Path) -> u8 {
             return 23;
         }
     };
-    // Reuse the ordinary CLI connection path, including opening the owning app once if needed.
+    // Reuse the ordinary CLI connection path, including starting the installed service once if needed.
     if (Client { endpoint, token })
         .request("GET", &format!("/v1/devices/{device}"), None)
         .is_err()
@@ -381,36 +382,6 @@ fn request_secure_text(args: &[String], url: &str, token_file: &Path) -> u8 {
     }
 }
 
-/// On Windows, Explorer launches the GUI as a shell broker. Starting it directly from keyctl
-/// leaves a PowerShell caller waiting for the GUI descendant even after keyctl exits.
-fn app_start_command(
-    platform: Platform,
-    program: &Path,
-    args: &[String],
-    system_root: Option<&Path>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<Command> {
-    match platform {
-        Platform::Windows => {
-            if !args.is_empty() {
-                return None;
-            }
-            let explorer = system_root?.join("explorer.exe");
-            if !exists(&explorer) {
-                return None;
-            }
-            let mut command = keyferry_core::process::command(explorer);
-            command.arg(program);
-            Some(command)
-        }
-        Platform::MacOs | Platform::Other => {
-            let mut command = keyferry_core::process::command(program);
-            command.args(args);
-            Some(command)
-        }
-    }
-}
-
 fn loopback_address(endpoint: &Endpoint) -> Option<std::net::SocketAddr> {
     let address = endpoint.host.parse::<std::net::IpAddr>().ok()?;
     address
@@ -431,67 +402,67 @@ fn wait_until(limit: Duration, poll: Duration, mut ready: impl FnMut() -> bool) 
     }
 }
 
-/// Set once this process has reached the service or tried to open Keyferry; later failures,
-/// such as the app closing mid-command, are reported and never reopen it.
-static SERVICE_OPEN_SETTLED: AtomicBool = AtomicBool::new(false);
+/// Set once this process reaches the service or tries to start it; subsequent failures
+/// are reported without a restart or command replay.
+static SERVICE_START_SETTLED: AtomicBool = AtomicBool::new(false);
 
-/// Opens Keyferry because the local service is not running, then waits a bounded time for it
+/// Starts the installed service without opening a UI, then waits a bounded time for it
 /// to accept connections. Returns whether it did. A failure leaves the ordinary daemon error to
 /// the caller's command.
-fn open_service(endpoint: &Endpoint) -> bool {
+fn start_service(endpoint: &Endpoint) -> bool {
     let Some(address) = loopback_address(endpoint) else {
         return false;
     };
-    // Unit tests connect to closed loopback ports on purpose; they must never open a real app.
-    if cfg!(test) || SERVICE_OPEN_SETTLED.swap(true, Ordering::AcqRel) {
+    // Unit tests connect to closed loopback ports on purpose; they must never start a real service.
+    if cfg!(test) || SERVICE_START_SETTLED.swap(true, Ordering::AcqRel) {
         return false;
     }
-    let Some((program, args)) = env::current_exe().ok().and_then(|keyctl| {
-        app_launch(
-            Platform::current(),
-            &keyctl,
-            env::var_os("HOME").map(PathBuf::from).as_deref(),
-            Path::exists,
-        )
-    }) else {
-        return false;
-    };
     let system_root = env::var_os("SystemRoot").map(PathBuf::from);
-    let Some(mut command) = app_start_command(
-        Platform::current(),
-        &program,
-        &args,
-        system_root.as_deref(),
-        Path::is_file,
-    ) else {
-        eprintln!("keyctl: could not find the Windows shell; open Keyferry and try again");
+    let uid = if cfg!(target_os = "macos") {
+        keyferry_core::process::command("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|text| text.trim().parse().ok())
+    } else {
+        None
+    };
+    let Some(mut command) = service_launch(Platform::current(), system_root.as_deref(), uid) else {
         return false;
     };
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if command.spawn().is_err() {
-        eprintln!("keyctl: could not open Keyferry; open it and try again");
+    // These fixed service-manager commands are bounded; no command payload is submitted here.
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let finished = wait_until(Duration::from_secs(5), SERVICE_POLL, || {
+        child.try_wait().ok().flatten().is_some()
+    });
+    if !finished {
+        let _ = child.kill();
+        let _ = child.wait();
         return false;
     }
-    eprintln!("keyctl: opened Keyferry");
+    if !child.wait().is_ok_and(|status| status.success()) {
+        return false;
+    }
     let started = wait_until(SERVICE_START_WAIT, SERVICE_POLL, || {
         TcpStream::connect_timeout(&address, SERVICE_CONNECT_TIMEOUT).is_ok()
     });
     if !started {
         eprintln!(
-            "keyctl: Keyferry did not start its service within {} seconds",
+            "keyctl: the installed service did not start within {} seconds",
             SERVICE_START_WAIT.as_secs()
         );
     }
     started
 }
 
-/// Loads the local bearer, opening Keyferry first when the service has never created it.
+/// Loads the local bearer, starting the installed service if it has never created one.
 fn service_token(endpoint: &Endpoint, token_file: &Path) -> Result<String, ClientError> {
     load_token(token_file).or_else(|error| {
-        if open_service(endpoint) {
+        if start_service(endpoint) {
             load_token(token_file)
         } else {
             Err(error)
@@ -921,14 +892,14 @@ impl Client {
         // A refused first connection sent nothing, so after opening Keyferry it is tried once more.
         let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
             .or_else(|error| {
-                if open_service(&self.endpoint) {
+                if start_service(&self.endpoint) {
                     TcpStream::connect_timeout(&address, Duration::from_secs(5))
                 } else {
                     Err(error)
                 }
             })
             .map_err(|error| ClientError(format!("cannot connect to daemon: {error}")))?;
-        SERVICE_OPEN_SETTLED.store(true, Ordering::Release);
+        SERVICE_START_SETTLED.store(true, Ordering::Release);
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .map_err(|error| ClientError(error.to_string()))?;
@@ -3274,7 +3245,7 @@ mod tests {
     }
 
     #[test]
-    fn only_local_service_commands_open_keyferry() {
+    fn only_local_service_commands_need_the_controller() {
         for command in [
             "devices",
             "status",
@@ -3322,82 +3293,26 @@ mod tests {
     }
 
     #[test]
-    fn keyferry_is_opened_from_its_installed_location_never_as_the_daemon() {
-        let windows_keyctl = PathBuf::from("Programs")
-            .join("Keyferry")
-            .join("keyctl.exe");
-        let windows_app = PathBuf::from("Programs")
-            .join("Keyferry")
-            .join("keyferry.exe");
+    fn cli_starts_only_the_service_manager_without_a_ui_or_daemon_spawn() {
+        let root = PathBuf::from(r"C:\Windows");
+        let windows = service_launch(Platform::Windows, Some(&root), None).unwrap();
         assert_eq!(
-            app_launch(Platform::Windows, &windows_keyctl, None, |_| true),
-            Some((windows_app, Vec::new()))
+            windows.get_program(),
+            root.join("System32").join("schtasks.exe")
         );
         assert_eq!(
-            app_launch(Platform::Windows, &windows_keyctl, None, |_| false),
-            None
+            windows.get_args().collect::<Vec<_>>(),
+            ["/Run", "/TN", "Keyferry Desktop"]
         );
-
-        let bundle = PathBuf::from("example-location/Applications/Keyferry.app");
-        let bundled_keyctl = bundle.join("Contents").join("MacOS").join("keyctl");
-        let open = |bundle: &Path| {
-            Some((
-                PathBuf::from("/usr/bin/open"),
-                vec!["-a".to_owned(), bundle.to_string_lossy().into_owned()],
-            ))
-        };
+        let mac = service_launch(Platform::MacOs, None, Some(501)).unwrap();
+        assert_eq!(mac.get_program(), "/bin/launchctl");
         assert_eq!(
-            app_launch(Platform::MacOs, &bundled_keyctl, None, |_| true),
-            open(&bundle)
+            mac.get_args().collect::<Vec<_>>(),
+            ["kickstart", "gui/501/io.github.smkwray.keyferryd"]
         );
-        let home = PathBuf::from("example-location");
-        let loose_keyctl = PathBuf::from("/usr/local/bin/keyctl");
-        assert_eq!(
-            app_launch(Platform::MacOs, &loose_keyctl, Some(&home), |_| true),
-            open(&home.join("Applications").join("Keyferry.app"))
-        );
-        assert_eq!(
-            app_launch(Platform::MacOs, &loose_keyctl, Some(&home), |_| false),
-            None
-        );
-        assert_eq!(
-            app_launch(Platform::Other, &loose_keyctl, Some(&home), |_| true),
-            None
-        );
-        for (program, _) in [
-            app_launch(Platform::Windows, &windows_keyctl, None, |_| true),
-            app_launch(Platform::MacOs, &bundled_keyctl, None, |_| true),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            assert!(!program.to_string_lossy().contains("keyferryd"));
-        }
-    }
-
-    #[test]
-    fn windows_shell_broker_receives_one_exact_app_path_with_spaces() {
-        let system_root = PathBuf::from(r"C:\Windows");
-        let app = PathBuf::from(r"C:\Program Files\Keyferry App\keyferry.exe");
-        let explorer = system_root.join("explorer.exe");
-        let command = app_start_command(Platform::Windows, &app, &[], Some(&system_root), |path| {
-            path == explorer
-        })
-        .expect("shell broker");
-        assert_eq!(command.get_program(), explorer.as_os_str());
-        assert_eq!(
-            command.get_args().collect::<Vec<_>>(),
-            vec![app.as_os_str()]
-        );
-        assert!(app_start_command(Platform::Windows, &app, &[], None, |_| true).is_none());
-        assert!(app_start_command(
-            Platform::Windows,
-            &app,
-            &["unexpected".to_owned()],
-            Some(&system_root),
-            |_| true,
-        )
-        .is_none());
+        assert!(service_launch(Platform::Other, None, None).is_none());
+        assert!(service_launch(Platform::Windows, None, None).is_none());
+        assert!(service_launch(Platform::MacOs, None, None).is_none());
     }
 
     #[test]
