@@ -23,9 +23,9 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE) { throw 'Governed build failed; nothing deployed.' }
     if ($BuildOnly) { return }
 } else {
-    $toml = Get-Content -LiteralPath (Join-Path $root 'project.toml') -Raw
-    $cpuPercent = [int]([regex]::Match($toml, '(?m)^cpu_percent\s*=\s*([0-9]+)').Groups[1].Value)
-    $jobs = [Math]::Min([int]$env:CARGO_BUILD_JOBS, [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * $cpuPercent / 100)))
+    $null, $jobCeiling = [int[]]((python (Join-Path $PSScriptRoot 'build_governor.py') --budget) -split ' ')
+    if ($LASTEXITCODE -ne 0) { throw 'Build CPU budget is unavailable.' }
+    $jobs = [Math]::Min([int]$env:CARGO_BUILD_JOBS, $jobCeiling)
     $packages = @($Program | ForEach-Object { '-p'; $_ })
 
     Push-Location -LiteralPath $root

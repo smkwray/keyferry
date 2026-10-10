@@ -231,9 +231,7 @@ class ControllerReleaseTests(unittest.TestCase):
     def test_macos_package_gate_is_bounded_and_checks_the_native_bundle(self):
         project = Path(__file__).resolve().parents[1]
         gate = (project / "scripts" / "check_macos_package.sh").read_text()
-        self.assertIn("logical_cpus * cpu_percent / 100", gate)
-        self.assertIn("project.toml", gate)
-        self.assertIn("cpu_percent", gate)
+        self.assertIn("python3 scripts/build_governor.py --budget", gate)
         self.assertIn('rustup show active-toolchain', gate)
         self.assertNotIn('rust_toolchain=1.92.0', gate)
         self.assertIn('rustup which --toolchain "$rust_toolchain" rustc', gate)
@@ -258,9 +256,7 @@ class ControllerReleaseTests(unittest.TestCase):
     def test_windows_package_gate_is_bounded_private_and_non_installing(self):
         project = Path(__file__).resolve().parents[1]
         gate = (project / "scripts" / "check_windows_package.ps1").read_text()
-        self.assertIn("project.toml", gate)
-        self.assertIn("cpu_percent", gate)
-        self.assertIn("build_governor.py", gate)
+        self.assertIn("build_governor.py') --budget", gate)
         self.assertIn("RandomNumberGenerator]::Create()", gate)
         self.assertNotIn("RandomNumberGenerator]::Fill", gate)
         self.assertIn("cargo test --locked --release -p keyferryd", gate)
@@ -283,8 +279,7 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertIn("$inputText | & $pairing @Arguments", helper)
         self.assertIn('$inputText = $SecretLines -join "`n"', helper)
         self.assertNotIn('($SecretLines -join "`n") + "`n"', helper)
-        self.assertIn("project.toml", helper)
-        self.assertIn("cpu_percent", helper)
+        self.assertIn("build_governor.py') --budget", helper)
         self.assertNotIn("if (-not (Test-Path -LiteralPath $pairing", helper)
         self.assertNotIn("--passphrase", helper)
         self.assertNotIn("Write-Host $passphrase", helper)
@@ -294,9 +289,7 @@ class ControllerReleaseTests(unittest.TestCase):
         helper = (project / "scripts" / "build_first_hil.ps1").read_text()
         self.assertIn("[ValidateRange(0, 256)]", helper)
         self.assertIn("[int]$Jobs = 0", helper)
-        self.assertIn("project.toml", helper)
-        self.assertIn("cpu_percent", helper)
-        self.assertIn("build_governor.py", helper)
+        self.assertIn("build_governor.py') --budget", helper)
         self.assertIn("if ($Jobs -gt $buildJobCeiling)", helper)
         self.assertIn("if ($Jobs -eq 0) { $buildJobCeiling } else { $Jobs }", helper)
         self.assertIn("$env:IDF_PY_BUILD_JOBS = $buildJobs", helper)

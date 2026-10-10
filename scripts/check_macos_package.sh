@@ -10,9 +10,9 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 
 logical_cpus=$(sysctl -n hw.logicalcpu)
-cpu_percent=$(sed -n 's/^cpu_percent[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' project.toml)
-max_build_jobs=$((logical_cpus * cpu_percent / 100))
-[ "$max_build_jobs" -ge 1 ] || max_build_jobs=1
+budget=$(python3 scripts/build_governor.py --budget)
+cpu_percent=${budget% *}
+max_build_jobs=${budget#* }
 build_jobs=${CARGO_BUILD_JOBS:-$max_build_jobs}
 case "$build_jobs" in
     ''|*[!0-9]*) echo "CARGO_BUILD_JOBS must be a positive integer" >&2; exit 1 ;;
