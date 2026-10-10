@@ -13,6 +13,7 @@ from PIL import Image, ImageChops
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keyctl", required=True)
+    parser.add_argument("--device", required=True, help="Exact authorized Waveshare UUID")
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--calibrate", action="store_true")
     parser.add_argument("--format", choices=["png", "jpeg"])
@@ -24,7 +25,7 @@ def main():
         parser.error("samples must be 1..100")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     process = subprocess.Popen(
-        [args.keyctl, "mcp", "--device", "00000000-0000-4000-8000-000000000099"],
+        [args.keyctl, "mcp", "--device", args.device],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, creationflags=flags,
     )
