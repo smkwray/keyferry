@@ -715,3 +715,212 @@ async fn faulted_glides_never_replay_and_track_only_possible_starts() {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+/// Two agents on one controller: separate MCP servers, sticks and screens, one real daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
+    use std::collections::HashMap;
+    const DELAY: Duration = Duration::from_millis(400);
+    let ids = ["sim-agent-a", "sim-agent-b"];
+    // Agent B's first command is lost after it may have started; agent A must not notice.
+    let transports = [
+        Arc::new(
+            SimulatorTransport::new(vec![])
+                .with_extended_pointer()
+                .with_accept_delay(DELAY),
+        ),
+        Arc::new(
+            SimulatorTransport::new(vec![SimulationFault::LostAfterStart])
+                .with_extended_pointer()
+                .with_accept_delay(DELAY),
+        ),
+    ];
+    let daemon = Daemon::with_device_transports(
+        MemoryTokenStore::new("test-token-123456"),
+        ids.iter()
+            .zip(&transports)
+            .map(|(id, t)| {
+                (
+                    id.to_string(),
+                    id.to_string(),
+                    t.clone() as Arc<dyn keyferryd::DeviceTransport>,
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let visuals: HashMap<String, Arc<Mutex<Visual>>> = ids
+        .iter()
+        .map(|id| {
+            (
+                id.to_string(),
+                Arc::new(Mutex::new(Visual {
+                    pointer: [0.5, 0.5],
+                    revision: 0,
+                    at: Instant::now(),
+                    path: Vec::new(),
+                })),
+            )
+        })
+        .collect();
+    let posted: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let (observed, log) = (visuals.clone(), posted.clone());
+    let app = daemon.router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let (observed, log) = (observed.clone(), log.clone());
+            async move {
+                let path = request.uri().path().to_owned();
+                let device = path.strip_prefix("/v1/devices/").and_then(|p| p.split('/').next()).unwrap_or("").to_owned();
+                let status = request.method() == axum::http::Method::GET && observed.contains_key(&device) && path.ends_with(&device);
+                let request = if request.method() == axum::http::Method::POST && path.ends_with("/input-sequences") {
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, MAX_MESSAGE).await.unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap();
+                    log.lock().unwrap().push((device.clone(), value["command_id"].as_str().unwrap().to_owned()));
+                    let mut visual = observed[&device].lock().unwrap();
+                    for action in value["actions"].as_array().unwrap() {
+                        if action["type"] == "move_absolute" || action["type"] == "drag" {
+                            visual.pointer = [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()];
+                        } else {
+                            visual.revision += 1;
+                        }
+                    }
+                    visual.at = Instant::now();
+                    drop(visual);
+                    axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+                } else {
+                    request
+                };
+                let response = next.run(request).await;
+                if !status {
+                    return response;
+                }
+                let (parts, body) = response.into_parts();
+                let mut v: Value = serde_json::from_slice(&axum::body::to_bytes(body, 8192).await.unwrap()).unwrap();
+                v["firmware"] = json!({"device_capability_mask":keyferry_protocol::capability::POINTER_EXTENDED_V1});
+                axum::response::Response::from_parts(parts, axum::body::Body::from(v.to_string()))
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // Production state root is shared per user; leases and geometry are keyed per stick.
+    let root = server().root;
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("token"), "test-token-123456").unwrap();
+    let agents = ids.map(|id| {
+        let mut s = server();
+        s.device = id.into();
+        s.root = root.clone();
+        s.url = url.clone();
+        s.token = root.join("token");
+        s.frames.pointer = Some(visuals[id].clone());
+        s
+    });
+    fn script(s: &mut Server<FakeFrames, FakeOcr>, lost_first: bool) -> Vec<String> {
+        let c = AtomicBool::new(false);
+        let mut commands = Vec::new();
+        if lost_first {
+            let lost = s.call("key", &json!({"keys":["SHIFT"]}), &c).unwrap_err();
+            assert_eq!(lost["command"]["outcome"], "UNKNOWN", "{lost}");
+            commands.push(lost["command"]["command_id"].as_str().unwrap().to_owned());
+        }
+        let calibration = s.call("calibrate", &json!({}), &c).unwrap();
+        assert_eq!(
+            calibration["structuredContent"]["bound"], true,
+            "{calibration}"
+        );
+        for probe in calibration["structuredContent"]["probes"]
+            .as_array()
+            .unwrap()
+        {
+            commands.push(probe["command"]["command_id"].as_str().unwrap().to_owned());
+        }
+        s.call("screenshot", &json!({}), &c).unwrap();
+        let found = s
+            .call("find_text", &json!({"query":"safe test"}), &c)
+            .unwrap();
+        assert_eq!(
+            found["structuredContent"]["boxes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for (name, args) in [
+            ("click", json!({"x":160,"y":120})),
+            ("type_text", json!({"text":"agent text"})),
+            ("key", json!({"keys":["SHIFT"]})),
+        ] {
+            let result = s.call(name, &args, &c).unwrap();
+            assert_eq!(result["isError"], false, "{name}: {result}");
+            let receipt = &result["structuredContent"];
+            let command = if receipt.get("command").is_some() {
+                &receipt["command"]
+            } else {
+                receipt
+            };
+            assert_eq!(command["outcome"], "EMITTED");
+            commands.push(command["command_id"].as_str().unwrap().to_owned());
+        }
+        commands
+    }
+    let run = |mut s: Server<FakeFrames, FakeOcr>, lost_first: bool| {
+        tokio::task::spawn_blocking(move || {
+            if !s.initialized {
+                init(&mut s);
+            }
+            let started = Instant::now();
+            let commands = script(&mut s, lost_first);
+            (s, commands, started.elapsed())
+        })
+    };
+    let [a, b] = agents;
+    // Agent A alone sets the baseline; then both agents run at once.
+    let (a, mut a_commands, solo) = run(a, false).await.unwrap();
+    let started = Instant::now();
+    let (concurrent_a, concurrent_b) = tokio::join!(run(a, false), run(b, true));
+    let wall = started.elapsed();
+    let (a, more, a_elapsed) = concurrent_a.unwrap();
+    let (b, b_commands, _) = concurrent_b.unwrap();
+    a_commands.extend(more);
+    let posted = posted.lock().unwrap().clone();
+    let results = [
+        (a.device.clone(), a_commands),
+        (b.device.clone(), b_commands),
+    ];
+    for (i, (device, commands)) in results.iter().enumerate() {
+        let other = 1 - i;
+        for id in commands {
+            let id_uuid = uuid::Uuid::parse_str(id).unwrap();
+            // Every command ran exactly once, on its own stick only; UNKNOWN was never replayed.
+            assert_eq!(transports[i].execution_count(id_uuid), 1, "{device} {id}");
+            assert_eq!(
+                transports[other].execution_count(id_uuid),
+                0,
+                "{device} {id}"
+            );
+            assert!(posted.contains(&(device.clone(), id.clone())));
+        }
+        assert_eq!(
+            posted.iter().filter(|(d, _)| d == device).count(),
+            commands.len()
+        );
+        assert!(!transports[i].is_remotely_armed());
+        assert!(geometry::load(&root, device, "fake-hdmi")
+            .unwrap()
+            .is_some());
+    }
+    // Serializing the sticks would add agent B's device time to agent A's own run.
+    let b_device_time = DELAY * results[1].1.len() as u32;
+    let bound = solo + b_device_time.mul_f64(0.6);
+    assert!(
+        a_elapsed < bound && wall < bound,
+        "solo {solo:?}, A {a_elapsed:?}, wall {wall:?}, B device {b_device_time:?}"
+    );
+    println!("two agents: solo {solo:?}, A concurrent {a_elapsed:?}, wall {wall:?}, B device {b_device_time:?}");
+    drop((a, b));
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
