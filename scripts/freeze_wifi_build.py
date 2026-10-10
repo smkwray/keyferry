@@ -22,10 +22,21 @@ def main():
     args = parser.parse_args()
     subprocess.run(["git", "diff", "--exit-code", "HEAD", "--"], check=True)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    inspector.inspect_file_handoff(args.build)
     cache = (args.build / "CMakeCache.txt").read_text(encoding="utf-8")
-    if "KEYFERRY_BOARD:STRING=waveshare_geek_v1_1_reference\n" not in cache:
-        raise SystemExit("not the requested Waveshare profile")
+    import re
+    match = re.search(r"^KEYFERRY_BOARD:STRING=(.+)$", cache, re.M)
+    board = match[1] if match else ""
+    if board == "waveshare_geek_v1_1_reference":
+        inspector.inspect_file_handoff(args.build)
+        slot = 0x200000
+    elif board == "lilygo_t_dongle_s3":
+        from check_esp_transport import build_checks
+        build_checks(args.build)
+        slot = 0x100000
+        if (args.build / "keyferry_hil_endpoint.bin").stat().st_size > slot - 32768:
+            raise SystemExit("less than 32 KiB app headroom")
+    else:
+        raise SystemExit("unsupported freeze profile")
     pointer = "KEYFERRY_POINTER_EXTENDED:BOOL=ON\n" in cache
     descriptor_check = None
     if pointer:
@@ -66,10 +77,10 @@ def main():
     receipt = {
         "schema": "keyferry.wifi-build.v1", "source_head": head,
         "producer": "scripts/freeze_wifi_build.py",
-        "board": "waveshare_geek_v1_1_reference",
+        "board": board,
         "version": inspector.app_version(args.build / members[0]).decode("ascii"),
         "artifacts": artifacts,
-        "app_headroom_bytes": 0x200000 - artifacts[members[0]]["bytes"],
+        "app_headroom_bytes": slot - artifacts[members[0]]["bytes"],
         "hardware_writes": False, "physical_gate": "OPEN",
         "update_plan": "requires exact installed build and installed plan",
     }

@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
 use keyferry_firmware::{
-    apply_clone_split, apply_exact_update, build_clone_split_plan, build_exact_update_plan,
-    exact_observation_from_probe, generate_update_manifest, prepare_update_package,
-    ApplicationWrite, ApplyOutcome, BackendFailure, CloneSplitBackend, CloneSplitBindingV1,
-    CloneSplitLiveObservation, CloneSplitMigrationPlanV1, CloneSplitOutcome, CloneSplitRegion,
-    ExactUnitObservation, FirmwareUpdateBackend, ManifestMetadata, PlanError,
+    apply_clone_split, apply_exact_update_at_port, build_clone_split_plan, build_exact_update_plan,
+    build_offline_exact_update_plan, exact_observation_from_probe, generate_update_manifest,
+    prepare_update_package, ApplicationWrite, ApplyOutcome, BackendFailure, CloneSplitBackend,
+    CloneSplitBindingV1, CloneSplitLiveObservation, CloneSplitMigrationPlanV1, CloneSplitOutcome,
+    CloneSplitRegion, ExactUnitObservation, FirmwareUpdateBackend, ManifestMetadata, PlanError,
     PreparedUpdatePackage, RomProbeRequirements, WriteSafety, APPLICATION_OFFSET,
     APPLICATION_PARTITION_SIZE, CLONE_SPLIT_PROTECTED_SUFFIX_BYTES,
     CLONE_SPLIT_PROTECTED_SUFFIX_OFFSET, MAX_METADATA_BYTES,
@@ -62,7 +62,9 @@ fn main() -> ExitCode {
     match run_with_backends(
         env::args().skip(1).collect(),
         &ProductionRomProbe,
-        &ProductionApplyRunner,
+        &ProductionApplyRunner {
+            selected_port: None,
+        },
         &ProductionCloneSplitRunner,
         &ProductionBackupRunner,
     ) {
@@ -150,7 +152,9 @@ trait ApplyRunner {
     ) -> ApplyOutcome;
 }
 
-struct ProductionApplyRunner;
+struct ProductionApplyRunner {
+    selected_port: Option<String>,
+}
 
 trait CloneSplitRunner {
     fn observe(
@@ -295,18 +299,17 @@ fn backend_paths() -> Result<(std::path::PathBuf, std::path::PathBuf), &'static 
         .join("tools")
         .join("keyferry-firmware")
         .join("esptool_backend.py");
+    let tools_root = env::var_os("IDF_TOOLS_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| project_root.join(".tools").join("idf-tools-v6.0.3"));
     #[cfg(windows)]
-    let python = project_root
-        .join(".tools")
-        .join("idf-tools-v6.0.3")
+    let python = tools_root
         .join("python_env")
         .join("idf6.0_py3.14_env")
         .join("Scripts")
         .join("python.exe");
     #[cfg(not(windows))]
-    let python = project_root
-        .join(".tools")
-        .join("idf-tools-v6.0.3")
+    let python = tools_root
         .join("python_env")
         .join("idf6.0_py3.14_env")
         .join("bin")
@@ -757,7 +760,13 @@ impl ApplyRunner for ProductionApplyRunner {
             session: None,
             verified: false,
         };
-        apply_exact_update(plan, authorize, package, &mut backend)
+        apply_exact_update_at_port(
+            plan,
+            authorize,
+            package,
+            &mut backend,
+            self.selected_port.as_deref(),
+        )
     }
 }
 
@@ -1159,14 +1168,15 @@ fn run_with_backends<R: RomProbeRunner, A: ApplyRunner, C: CloneSplitRunner, B: 
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
         return Ok(json!({
             "schema": "keyferry.firmware-update-help.v1",
-            "commands": ["manifest", "plan", "apply", "clone-split-plan", "clone-split-apply", "backup"],
+            "commands": ["manifest", "plan", "offline-plan", "apply", "clone-split-plan", "clone-split-apply", "backup"],
             "usage": {
                 "manifest": "keyferry-fw manifest --source-revision HEX40 --esptool-version SEMVER --board-manifest PATH --partitions PATH --image PATH --elf PATH --bootloader PATH --partition-table PATH",
                 "plan": [
                     "keyferry-fw plan --manifest PATH --board-manifest PATH --partitions PATH --image PATH --elf PATH --bootloader PATH --partition-table PATH",
                     "keyferry-fw plan --package DIR --port EXACT_PORT --unit-record PATH"
                 ],
-                "apply": "keyferry-fw apply --plan PATH --authorize SHA256 --package DIR --unit-record PATH",
+                "offline-plan": "keyferry-fw offline-plan --package DIR --unit-record PATH",
+                "apply": "keyferry-fw apply --plan PATH --authorize SHA256 --package DIR --unit-record PATH [--port DETECTED_PORT]",
                 "clone-split-plan": "keyferry-fw clone-split-plan --package DIR --port EXACT_PORT --binding PATH",
                 "clone-split-apply": "keyferry-fw clone-split-apply --plan PATH --authorize SHA256 --package DIR",
                 "backup": "keyferry-fw backup --package DIR --port EXACT_PORT --unit-record PATH --output NEW_DIR"
@@ -1270,6 +1280,16 @@ fn run_with_backends<R: RomProbeRunner, A: ApplyRunner, C: CloneSplitRunner, B: 
             .map_err(PlanError::code)?;
             serde_json::to_string(package.plan_only()).map_err(|_| "firmware.serialization")
         }
+        Some("offline-plan") if args.len() == 5 => {
+            let package = read_package(Path::new(argument(&args, "--package")?))?;
+            let record = read_bounded(
+                Path::new(argument(&args, "--unit-record")?),
+                MAX_METADATA_BYTES,
+            )?;
+            let plan =
+                build_offline_exact_update_plan(&package, &record).map_err(PlanError::code)?;
+            serde_json::to_string(&plan).map_err(|_| "firmware.serialization")
+        }
         Some("plan") if args.len() == 7 => {
             let package_root = Path::new(argument(&args, "--package")?);
             let package = read_package(package_root)?;
@@ -1288,7 +1308,7 @@ fn run_with_backends<R: RomProbeRunner, A: ApplyRunner, C: CloneSplitRunner, B: 
             let plan = build_exact_update_plan(&package, observation).map_err(PlanError::code)?;
             serde_json::to_string(&plan).map_err(|_| "firmware.serialization")
         }
-        Some("apply") if args.len() == 9 => {
+        Some("apply") if args.len() == 9 || args.len() == 11 => {
             let plan = read_bounded(Path::new(argument(&args, "--plan")?), MAX_METADATA_BYTES)?;
             let authorize = argument(&args, "--authorize")?;
             let package = read_package(Path::new(argument(&args, "--package")?))?;
@@ -1296,7 +1316,19 @@ fn run_with_backends<R: RomProbeRunner, A: ApplyRunner, C: CloneSplitRunner, B: 
                 Path::new(argument(&args, "--unit-record")?),
                 MAX_METADATA_BYTES,
             )?;
-            match apply_runner.apply(&plan, authorize, &package, &unit_record) {
+            let outcome = if args.len() == 11 {
+                let port = argument(&args, "--port")?;
+                if !valid_local_port(port) {
+                    return Err("input.port");
+                }
+                ProductionApplyRunner {
+                    selected_port: Some(port.to_owned()),
+                }
+                .apply(&plan, authorize, &package, &unit_record)
+            } else {
+                apply_runner.apply(&plan, authorize, &package, &unit_record)
+            };
+            match outcome {
                 ApplyOutcome::WriteVerified => serde_json::to_string(&json!({
                     "schema": "keyferry.firmware-update-result.v1",
                     "outcome": "WRITE_VERIFIED",
@@ -1488,6 +1520,7 @@ mod tests {
             json!([
                 "manifest",
                 "plan",
+                "offline-plan",
                 "apply",
                 "clone-split-plan",
                 "clone-split-apply",
@@ -1506,7 +1539,7 @@ mod tests {
                 .unwrap()
                 .matches("--")
                 .count(),
-            4
+            5
         );
     }
 
@@ -1738,6 +1771,16 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let offline = run(vec![
+            "offline-plan".to_owned(),
+            "--package".to_owned(),
+            package.display().to_string(),
+            "--unit-record".to_owned(),
+            unit_record.display().to_string(),
+        ]);
+        assert!(offline.is_ok());
+        let offline: serde_json::Value = serde_json::from_str(&offline.unwrap()).unwrap();
+        assert_eq!(offline["target"]["port"], "DETECT_AT_APPLY");
         struct FakeProbe(Vec<u8>);
         impl RomProbeRunner for FakeProbe {
             fn probe(

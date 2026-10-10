@@ -408,7 +408,7 @@ def source_checks() -> None:
         (
             "${KEYFERRY_BOARD_INCLUDE_DIR}",
             "if(KEYFERRY_PRIVATE_HEADER)",
-            '"${CMAKE_COMMAND}" -E copy_if_different',
+            "add_custom_target(keyferry_private_config_refresh ALL)",
         ),
     )
     require_tokens(
@@ -566,7 +566,7 @@ def build_checks(build: Path) -> None:
     private_header = build / "private-config" / "keyferry_hil_private.h"
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     explicit = re.search(r"^KEYFERRY_PRIVATE_HEADER:FILEPATH=(.+)$", cache, re.MULTILINE)
-    if explicit:
+    if explicit and "KEYFERRY_RESOURCE_ONLY:BOOL=ON" not in cache:
         private_header = Path(explicit[1])
     if not private_header.is_file():
         fail("private HIL configuration input is absent")

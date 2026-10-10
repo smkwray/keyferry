@@ -78,8 +78,14 @@ if(KEYFERRY_PRIVATE_HEADER)
        KEYFERRY_PRIVATE_HEADER_SIZE GREATER 16384)
         message(FATAL_ERROR "Explicit private device header has an invalid size")
     endif()
-    get_filename_component(KEYFERRY_PRIVATE_CONFIG_DIR
-        "${KEYFERRY_PRIVATE_HEADER}" DIRECTORY)
+    if(KEYFERRY_RESOURCE_ONLY)
+        file(MAKE_DIRECTORY "${KEYFERRY_PRIVATE_CONFIG_DIR}")
+        configure_file("${KEYFERRY_PRIVATE_HEADER}"
+            "${KEYFERRY_PRIVATE_CONFIG_DIR}/keyferry_hil_private.h" COPYONLY)
+    else()
+        get_filename_component(KEYFERRY_PRIVATE_CONFIG_DIR
+            "${KEYFERRY_PRIVATE_HEADER}" DIRECTORY)
+    endif()
 else()
     execute_process(
         COMMAND

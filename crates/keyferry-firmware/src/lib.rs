@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 pub const UPDATE_MANIFEST_SCHEMA: &str = "keyferry.firmware-update-manifest.v1";
 pub const UPDATE_PLAN_SCHEMA: &str = "keyferry.firmware-update-plan.v1";
+pub const OFFLINE_PORT: &str = "DETECT_AT_APPLY";
 pub const EXACT_UPDATE_PLAN_SCHEMA: &str = "keyferry.firmware-update-exact-plan.v1";
 pub const CLONE_SPLIT_BINDING_SCHEMA: &str = "keyferry.clone-split-binding.v1";
 pub const CLONE_SPLIT_PLAN_SCHEMA: &str = "keyferry.clone-split-plan.v1";
@@ -875,7 +876,9 @@ pub fn exact_observation_from_probe(
         && record.partition_map_sha256 == package.base_plan.partition_map_sha256
         && lower_hex(&record.efuse_sha256, 64)
         && record.efuse_sha256 == board.security.efuse_after_sha256.to_ascii_lowercase()
-        && record.qualified_recovery_cycles >= 2;
+        // The package validator already admits only two-cycle qualification or
+        // the exact LILYGO owner waiver. Keep the record consistent with it.
+        && record.qualified_recovery_cycles >= if board.recovery.cycle_b_passed { 2 } else { 1 };
     if !record_valid {
         return Err(PlanError::ExactUnitRecord);
     }
@@ -920,6 +923,45 @@ pub fn exact_observation_from_probe(
         partition_table_sha256: probe.partition_table_sha256,
         partition_map_sha256: manifest.target.partition_map_sha256,
     })
+}
+
+/// Bind an offline proposal to retained identity; apply still requires a fresh ROM probe.
+pub fn build_offline_exact_update_plan(
+    package: &PreparedUpdatePackage,
+    unit_record_bytes: &[u8],
+) -> Result<ExactFirmwareUpdatePlanV1, PlanError> {
+    if unit_record_bytes.len() > MAX_METADATA_BYTES {
+        return Err(PlanError::MetadataLimit);
+    }
+    let record: ExactUnitRecordV1 =
+        serde_json::from_slice(unit_record_bytes).map_err(|_| PlanError::ExactUnitRecord)?;
+    let manifest: FirmwareUpdateManifestV1 =
+        serde_json::from_slice(&package.manifest_bytes).map_err(|_| PlanError::ManifestSchema)?;
+    let expected = RomProbeResultV1 {
+        schema: ROM_PROBE_RESULT_SCHEMA.to_owned(),
+        mode: "READ_ONLY_PLAN".to_owned(),
+        port: OFFLINE_PORT.to_owned(),
+        rom_mac: record.rom_mac,
+        chip: record.chip,
+        soc_revision: record.soc_revision,
+        flash_manufacturer_id: record.flash_manufacturer_id,
+        flash_device_id: record.flash_device_id,
+        flash_size_bytes: record.flash_size_bytes,
+        secure_boot: record.secure_boot,
+        flash_encryption: record.flash_encryption,
+        secure_download_mode: record.secure_download_mode,
+        efuse_sha256: record.efuse_sha256,
+        bootloader_sha256: manifest.preserved.bootloader_sha256,
+        partition_table_sha256: manifest.preserved.partition_table_sha256,
+        esptool_version: manifest.tools.esptool_version,
+    };
+    let observation = exact_observation_from_probe(
+        package,
+        unit_record_bytes,
+        OFFLINE_PORT,
+        &serde_json::to_vec(&expected).map_err(|_| PlanError::Serialization)?,
+    )?;
+    build_exact_update_plan(package, observation)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1082,6 +1124,16 @@ pub fn apply_exact_update<B: FirmwareUpdateBackend>(
     package: &PreparedUpdatePackage,
     backend: &mut B,
 ) -> ApplyOutcome {
+    apply_exact_update_at_port(plan_bytes, authorize, package, backend, None)
+}
+
+pub fn apply_exact_update_at_port<B: FirmwareUpdateBackend>(
+    plan_bytes: &[u8],
+    authorize: &str,
+    package: &PreparedUpdatePackage,
+    backend: &mut B,
+    selected_port: Option<&str>,
+) -> ApplyOutcome {
     if plan_bytes.len() > MAX_METADATA_BYTES {
         return ApplyOutcome::Rejected(ApplyError::PlanInvalid);
     }
@@ -1106,13 +1158,24 @@ pub fn apply_exact_update<B: FirmwareUpdateBackend>(
     if rebuilt != plan {
         return ApplyOutcome::Rejected(ApplyError::PackageMismatch);
     }
-    let observed = match backend.observe(&plan.target.port) {
+    let port = match (plan.target.port.as_str(), selected_port) {
+        (OFFLINE_PORT, Some(port)) if port != OFFLINE_PORT && !port.is_empty() => port,
+        (OFFLINE_PORT, _) | (_, Some(_)) => return ApplyOutcome::Rejected(ApplyError::PlanInvalid),
+        (port, None) => port,
+    };
+    let mut observed = match backend.observe(port) {
         Ok(observed) => observed,
         Err(BackendFailure::Mismatch) => {
             return ApplyOutcome::Rejected(ApplyError::UnitMismatch);
         }
         Err(_) => return ApplyOutcome::Rejected(ApplyError::BackendUnavailable),
     };
+    if observed.port != port {
+        return ApplyOutcome::Rejected(ApplyError::UnitMismatch);
+    }
+    if plan.target.port == OFFLINE_PORT {
+        observed.port = OFFLINE_PORT.to_owned();
+    }
     if observed != plan.target || validate_exact_unit(package, &observed).is_err() {
         return ApplyOutcome::Rejected(ApplyError::UnitMismatch);
     }
@@ -2232,6 +2295,110 @@ nvs, data, nvs, 0x118000, 0x3000,
         ) -> Result<bool, BackendFailure> {
             self.verification.ok_or(BackendFailure::Timeout)
         }
+    }
+
+    #[test]
+    fn offline_plan_requires_live_identity_at_selected_port_and_never_retries() {
+        let package = prepared(&descriptor_image());
+        let record = serde_json::to_vec(&unit_record(&package)).unwrap();
+        let plan = build_offline_exact_update_plan(&package, &record).unwrap();
+        assert_eq!(plan.target.port, OFFLINE_PORT);
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        let mut observed = plan.target.clone();
+        observed.port = "COM19".to_owned();
+        let mut backend = FakeBackend {
+            observed: Some(observed.clone()),
+            verification: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_exact_update(&bytes, &plan.authorization_sha256, &package, &mut backend),
+            ApplyOutcome::Rejected(ApplyError::PlanInvalid)
+        );
+        assert!(backend.writes.is_empty());
+        assert_eq!(
+            apply_exact_update_at_port(
+                &bytes,
+                &plan.authorization_sha256,
+                &package,
+                &mut backend,
+                Some("COM19")
+            ),
+            ApplyOutcome::WriteVerified
+        );
+        assert_eq!(backend.writes.len(), 1);
+        for mismatch in ["port", "efuse", "unit", "boot", "table", "flash"] {
+            let mut changed = observed.clone();
+            match mismatch {
+                "port" => changed.port = "COM20".to_owned(),
+                "efuse" => changed.efuse_sha256 = "b".repeat(64),
+                "unit" => changed.unit_binding_sha256 = "b".repeat(64),
+                "boot" => changed.bootloader_sha256 = "b".repeat(64),
+                "table" => changed.partition_table_sha256 = "b".repeat(64),
+                _ => changed.flash_size_bytes /= 2,
+            }
+            let mut backend = FakeBackend {
+                observed: Some(changed),
+                verification: Some(true),
+                ..Default::default()
+            };
+            assert_eq!(
+                apply_exact_update_at_port(
+                    &bytes,
+                    &plan.authorization_sha256,
+                    &package,
+                    &mut backend,
+                    Some("COM19")
+                ),
+                ApplyOutcome::Rejected(ApplyError::UnitMismatch)
+            );
+            assert!(backend.writes.is_empty());
+        }
+        let mut backend = FakeBackend {
+            observed: Some(observed),
+            write_failure: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_exact_update_at_port(
+                &bytes,
+                &plan.authorization_sha256,
+                &package,
+                &mut backend,
+                Some("COM19")
+            ),
+            ApplyOutcome::UnknownWrite
+        );
+        assert_eq!(backend.writes.len(), 1);
+    }
+
+    #[test]
+    fn one_recovery_cycle_requires_existing_lilygo_owner_waiver() {
+        let image = descriptor_image();
+        let mut package = lilygo_prepared(&image);
+        let mut record = unit_record(&package);
+        record.device_label = package.base_plan.target.device_label.clone();
+        record.qualified_recovery_cycles = 1;
+        assert_eq!(
+            build_offline_exact_update_plan(&package, &serde_json::to_vec(&record).unwrap()),
+            Err(PlanError::ExactUnitRecord)
+        );
+        let board = String::from_utf8(package.board_manifest_bytes.clone())
+            .unwrap()
+            .replace("RECOVERY_QUALIFIED", "OWNER_WAIVED_REDUNDANT_RECOVERY")
+            .replace("cycle_b_passed = true", "cycle_b_passed = false");
+        package.board_manifest_bytes = board.into_bytes();
+        package.base_plan.board_manifest_sha256 = sha256_hex(&package.board_manifest_bytes);
+        record.board_manifest_sha256 = package.base_plan.board_manifest_sha256.clone();
+        assert!(
+            build_offline_exact_update_plan(&package, &serde_json::to_vec(&record).unwrap())
+                .is_ok()
+        );
+        record.qualified_recovery_cycles = 0;
+        assert_eq!(
+            build_offline_exact_update_plan(&package, &serde_json::to_vec(&record).unwrap()),
+            Err(PlanError::ExactUnitRecord)
+        );
     }
 
     #[test]

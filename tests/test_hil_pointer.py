@@ -23,27 +23,32 @@ class AtomPointerDescriptorTests(unittest.TestCase):
         self.device = bytes.fromhex("12010002000000403a300440020101020301")
 
     def test_three_interface_extended_personality(self):
-        pointer.atom_usb_descriptors(self.config + self.device, self.report)
+        pointer.no_msc_usb_descriptors(self.config + self.device, self.report)
 
     def test_legacy_pointer_or_msc_is_rejected(self):
         for offset, value in ((4, 4), (72, 1), (73, 2), (82, 50)):
             bad = bytearray(self.config)
             bad[offset] = value
             with self.subTest(offset=offset), self.assertRaises(SystemExit):
-                pointer.atom_usb_descriptors(bytes(bad) + self.device, self.report)
+                pointer.no_msc_usb_descriptors(bytes(bad) + self.device, self.report)
 
     def test_keyboard_provisioning_or_endpoint_drift_is_rejected(self):
         for offset in (16, 54, 61, 86):
             bad = bytearray(self.config)
             bad[offset] ^= 1
             with self.subTest(offset=offset), self.assertRaises(SystemExit):
-                pointer.atom_usb_descriptors(bytes(bad) + self.device, self.report)
+                pointer.no_msc_usb_descriptors(bytes(bad) + self.device, self.report)
+
+    def test_lilygo_uses_same_no_msc_personality(self):
+        pointer.no_msc_usb_descriptors(self.config + self.device, self.report)
+        with self.assertRaises(SystemExit):
+            pointer.no_msc_usb_descriptors(self.config + self.device.replace(bytes.fromhex("0440"), bytes.fromhex("0840")), self.report)
 
     def test_old_revision_is_rejected(self):
         bad = bytearray(self.device)
         bad[12] = 1
         with self.assertRaises(SystemExit):
-            pointer.atom_usb_descriptors(self.config + bytes(bad), self.report)
+            pointer.no_msc_usb_descriptors(self.config + bytes(bad), self.report)
 
 
 class UsbIdentityTests(unittest.TestCase):
