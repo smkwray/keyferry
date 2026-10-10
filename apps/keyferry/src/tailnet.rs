@@ -126,8 +126,7 @@ impl TailnetDiscovery {
     }
 
     pub fn refresh(&self) -> Result<TailStatus, DiscoveryError> {
-        let mut command = Command::new(&self.binary);
-        hide_console(&mut command);
+        let mut command = keyferry_core::process::command(&self.binary);
         command.args(["status", "--json"]);
         let output = output_with_timeout(command, STATUS_TIMEOUT, MAX_STATUS_BYTES)?;
         if !output.status.success() {
@@ -206,15 +205,6 @@ pub(crate) fn output_with_timeout(
         stderr,
     })
 }
-
-#[cfg(windows)]
-pub(crate) fn hide_console(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-pub(crate) fn hide_console(_command: &mut Command) {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]

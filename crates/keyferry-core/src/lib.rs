@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod process;
+
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

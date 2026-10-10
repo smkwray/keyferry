@@ -14,7 +14,7 @@ pub fn scaled_size(native: (u32, u32)) -> (u32, u32) {
 
 use std::{
     io::{BufRead, BufReader, Read},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -250,7 +250,7 @@ fn stream(
     state: &Arc<Mutex<State>>,
     stop: &Arc<AtomicBool>,
 ) -> Result<(), &'static str> {
-    let mut child = crate::hide_console(&mut Command::new("ffmpeg"))
+    let mut child = keyferry_core::process::command("ffmpeg")
         .args(args)
         .env_remove("FFREPORT")
         .stdin(Stdio::null())

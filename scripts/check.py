@@ -469,6 +469,8 @@ def main() -> None:
     parser.add_argument("--firmware-only", action="store_true", help="run source, Python and native firmware gates without Rust builds")
     args = parser.parse_args()
 
+    run([sys.executable, "scripts/check_process_spawns.py"])
+    run([sys.executable, "-m", "unittest", "tests.test_process_spawns"])
     run([sys.executable, "scripts/check_public_tree.py",
          *([] if args.firmware_only else ["--history"])])
     run([sys.executable, "scripts/check_seed.py"])

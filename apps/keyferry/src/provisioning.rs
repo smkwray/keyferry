@@ -4,12 +4,9 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
 };
 use zeroize::{Zeroize, Zeroizing};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 const PAIRING_EXE_ENV: &str = "KEYFERRY_PAIRING_EXE";
 const PAIRING_BUNDLE_ENV: &str = "KEYFERRY_PAIRING_BUNDLE";
@@ -17,8 +14,6 @@ const OWNER_KIT_ENV: &str = "KEYFERRY_OWNER_KIT";
 const MAX_STATUS_BYTES: usize = 4096;
 const MAX_POLICY_BYTES: u64 = 32 * 1024;
 pub const MAX_WIFI_PROFILES: usize = 8;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1111,12 +1106,10 @@ fn run_helper_capture(
     stdin: Option<&[u8]>,
 ) -> Result<Output, String> {
     let executable = helper_path()?;
-    let mut command = Command::new(&executable);
+    let mut command = keyferry_core::process::command(&executable);
     if let Some(bundle) = bundle {
         command.arg("--bundle").arg(bundle);
     }
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
         .args(args)
         .stdin(if stdin.is_some() {

@@ -111,7 +111,7 @@ fn diagnostics_enabled() -> bool {
 
 async fn spawn_helper() -> Result<(HelperStream, oneshot::Receiver<()>), BleGatewayError> {
     let helper = helper_path()?;
-    spawn_helper_command(Command::new(&helper)).await
+    spawn_helper_command(Command::from(keyferry_core::process::command(&helper))).await
 }
 
 async fn spawn_helper_command(

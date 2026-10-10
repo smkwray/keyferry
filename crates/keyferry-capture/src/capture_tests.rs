@@ -262,7 +262,7 @@ fn error_exit_codes_are_explicit() {
 #[cfg(windows)]
 #[test]
 fn background_capture_child_has_no_console() {
-    let mut command = Command::new("pwsh");
+    let mut command = keyferry_core::process::command("pwsh");
     command.args([
         "-NoProfile",
         "-NonInteractive",
