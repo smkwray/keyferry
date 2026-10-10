@@ -62,6 +62,11 @@ const STATUS_WAIT: Duration = Duration::from_secs(4);
 /// A command for an unlocated device waits at most this long for a search.
 const LOCATE_WAIT: Duration = Duration::from_secs(8);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Firmware builds at most one route proof per 100 ms for all controllers together and refuses a
+/// faster request (esp_transport.cpp kRouteProofMinimumIntervalMs). A refused proof is asked again
+/// after this delay; a proof types nothing on the target computer.
+const PROOF_RETRY_DELAY: Duration = Duration::from_millis(150);
+const PROOF_ATTEMPTS: usize = 4;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const FILE_TIMEOUT: Duration = Duration::from_secs(125);
@@ -233,7 +238,17 @@ impl ForwardState {
 enum RouteCheck {
     Verified,
     Busy,
-    Failed,
+    Failed(String),
+}
+
+impl RouteCheck {
+    fn failure(self) -> Option<String> {
+        match self {
+            Self::Verified => None,
+            Self::Busy => Some("route_proof.busy".to_owned()),
+            Self::Failed(reason) => Some(reason),
+        }
+    }
 }
 
 enum Proven {
@@ -390,7 +405,7 @@ impl Forwarder {
     }
 
     pub(crate) async fn capture_prove_device(self: &Arc<Self>, device: &str) -> bool {
-        matches!(self.prove_holder(device).await, Proven::Route(_))
+        matches!(self.prove_holder(device, None).await, Proven::Route(_))
     }
 
     pub(crate) async fn capture_frame(
@@ -446,7 +461,7 @@ impl Forwarder {
             OwnerExchange::Response { .. } => {
                 ApiError::unavailable("capture.size_limit").into_response()
             }
-            OwnerExchange::NotSent | OwnerExchange::Uncertain => {
+            OwnerExchange::NotSent(_) | OwnerExchange::Uncertain(_) => {
                 ApiError::unavailable("capture.peer_offline_or_invalid_frame").into_response()
             }
         }
@@ -487,8 +502,8 @@ impl Forwarder {
             )
             .await;
             if attempt == 2
-                || !(matches!(response, OwnerExchange::NotSent)
-                    || method == "GET" && matches!(response, OwnerExchange::Uncertain))
+                || !(matches!(response, OwnerExchange::NotSent(_))
+                    || method == "GET" && matches!(response, OwnerExchange::Uncertain(_)))
             {
                 return response;
             }
@@ -498,19 +513,39 @@ impl Forwarder {
     }
 
     /// Asks the peer's live endpoint for a proof addressed to this installation and verifies it
-    /// under this installation's own device-scoped secret.
+    /// under this installation's own device-scoped secret. A proof the holder reports refused or
+    /// busy is asked for again, a bounded number of times, after the endpoint's minimum interval.
     async fn verify_route(&self, route: &Route, device: &str) -> RouteCheck {
+        let mut attempt = 1;
+        loop {
+            match self.verify_route_once(route, device).await {
+                Err(_) if attempt < PROOF_ATTEMPTS => {
+                    attempt += 1;
+                    time::sleep(PROOF_RETRY_DELAY).await;
+                }
+                Ok(check) | Err(check) => return check,
+            }
+        }
+    }
+
+    /// One proof request; `Err` carries a refusal that may clear once the endpoint is free.
+    async fn verify_route_once(
+        &self,
+        route: &Route,
+        device: &str,
+    ) -> Result<RouteCheck, RouteCheck> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
             proof: String,
         }
+        let failed = |reason: &str| Ok(RouteCheck::Failed(reason.to_owned()));
         let Some(store) = self.credentials.get(device) else {
-            return RouteCheck::Failed;
+            return failed("route_proof.no_credential");
         };
         let mut nonce = [0_u8; 32];
         if getrandom::fill(&mut nonce).is_err() || nonce.iter().all(|byte| *byte == 0) {
-            return RouteCheck::Failed;
+            return failed("route_proof.nonce");
         }
         let path = format!(
             "/v2/devices/{device}/route-proof?nonce={}",
@@ -524,18 +559,34 @@ impl Forwarder {
             OwnerExchange::Response {
                 status: 200, body, ..
             } => body,
-            OwnerExchange::Response { status: 409, .. } => return RouteCheck::Busy,
-            _ => return RouteCheck::Failed,
+            // The holder has an active command, or the endpoint is busy.
+            OwnerExchange::Response { status: 409, .. } => return Err(RouteCheck::Busy),
+            // The endpoint refused the proof, as it does inside its minimum interval.
+            OwnerExchange::Response { status: 422, .. } => {
+                return Err(RouteCheck::Failed(
+                    "route_proof.endpoint_refused".to_owned(),
+                ))
+            }
+            OwnerExchange::Response { status, body, .. } => {
+                return Ok(RouteCheck::Failed(holder_reason(
+                    "route_proof",
+                    status,
+                    &body,
+                )))
+            }
+            OwnerExchange::NotSent(reason) | OwnerExchange::Uncertain(reason) => {
+                return failed(reason)
+            }
         };
         if started.elapsed() > Duration::from_millis(ROUTE_PROOF_TTL_MS as u64) {
-            return RouteCheck::Failed;
+            return failed("route_proof.expired");
         }
         let Ok(wire) = serde_json::from_slice::<Wire>(&body) else {
-            return RouteCheck::Failed;
+            return failed("route_proof.malformed");
         };
         let Ok(proof) = parse_fixed_lower_hex::<ROUTE_PROOF_RESPONSE_LEN>(&wire.proof, "proof")
         else {
-            return RouteCheck::Failed;
+            return failed("route_proof.malformed");
         };
         let binding = RouteProofBinding {
             owner_id: store.owner_id(),
@@ -549,8 +600,8 @@ impl Forwarder {
             &binding,
             &proof,
         ) {
-            Ok(_) => RouteCheck::Verified,
-            Err(_) => RouteCheck::Failed,
+            Ok(_) => Ok(RouteCheck::Verified),
+            Err(_) => failed("route_proof.invalid"),
         }
     }
 
@@ -596,14 +647,15 @@ impl Forwarder {
                 RouteCheck::Busy
             };
             let view = match check {
-                RouteCheck::Failed => None,
-                RouteCheck::Verified | RouteCheck::Busy => {
-                    self.fetch_view(&holder.route, &device).await
-                }
+                RouteCheck::Failed(reason) => Err(reason),
+                RouteCheck::Verified | RouteCheck::Busy => self
+                    .fetch_view(&holder.route, &device)
+                    .await
+                    .ok_or_else(|| "holder_view.unavailable".to_owned()),
             };
             let mut state = self.state();
             match view {
-                Some(view) => {
+                Ok(view) => {
                     if let Some(entry) = state.holders.get_mut(&device) {
                         entry.view = view;
                         entry.view_at = Instant::now();
@@ -612,9 +664,12 @@ impl Forwarder {
                         }
                     }
                 }
-                None => {
+                Err(reason) => {
                     state.holders.remove(&device);
-                    crate::daemon_log!("keyferryd lost the tailnet route to device {device}");
+                    crate::daemon_log!(
+                        "keyferryd lost the tailnet route to device {device} via {}: {reason}",
+                        holder_name(&holder.route)
+                    );
                     missing.push(device);
                 }
             }
@@ -683,10 +738,7 @@ impl Forwarder {
             }
             crate::daemon_log!(
                 "keyferryd reaches device {device} through owner controller {}",
-                route
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| encode_hex(&route.installation_id))
+                holder_name(&route)
             );
             let now = Instant::now();
             state.holders.insert(
@@ -724,7 +776,7 @@ impl Forwarder {
         self.fresh_route(device)
     }
 
-    fn forget_holder(&self, device: &str, route: &Route) {
+    fn forget_holder(&self, device: &str, route: &Route, reason: &str) {
         let mut state = self.state();
         if state
             .holders
@@ -734,35 +786,89 @@ impl Forwarder {
             state.holders.remove(device);
             // Direct evidence that the route is stale permits an immediate new search.
             state.last_discovery = None;
-            crate::daemon_log!("keyferryd lost the tailnet route to device {device}");
+            crate::daemon_log!(
+                "keyferryd lost the tailnet route to device {device} via {}: {reason}",
+                holder_name(route)
+            );
         }
+    }
+
+    /// A fresh proof also renews the cached holder, so the next command needs no extra proof.
+    fn mark_verified(&self, device: &str, route: &Route) {
+        if let Some(holder) = self.state().holders.get_mut(device) {
+            if holder.route == *route {
+                holder.verified_at = Instant::now();
+            }
+        }
+    }
+
+    /// Logs why forwarded work failed, as identifiers and a reason code only, and answers it.
+    fn failed(
+        &self,
+        device: &str,
+        command_id: Option<Uuid>,
+        route: Option<&Route>,
+        reason: &str,
+        response: Response,
+    ) -> Response {
+        log_failure(
+            device,
+            command_id,
+            route,
+            response.status().as_u16(),
+            reason,
+        );
+        response
     }
 
     /// Finds the holder for new work and proves it now. A stale holder is forgotten and the
     /// search repeats once; no request reaches any holder before its proof verifies.
-    async fn prove_holder(self: &Arc<Self>, device: &str) -> Proven {
+    async fn prove_holder(self: &Arc<Self>, device: &str, command_id: Option<Uuid>) -> Proven {
+        let mut lost: Option<(Route, String)> = None;
         for _ in 0..2 {
             let Some(route) = self.locate(device).await else {
+                // No holder is known now; the local handler answers as without forwarding.
+                if let Some((route, reason)) = &lost {
+                    log_failure(device, command_id, Some(route), "local", reason);
+                }
                 return Proven::Local;
             };
             match self.verify_route(&route, device).await {
-                RouteCheck::Verified => return Proven::Route(route),
+                RouteCheck::Verified => {
+                    self.mark_verified(device, &route);
+                    return Proven::Route(route);
+                }
                 RouteCheck::Busy => {
                     if let Some(view) = self.fetch_view(&route, device).await {
-                        return Proven::Refused(
-                            match view.active_command_id {
-                                Some(active) => ApiError::busy(active),
-                                None => ApiError::conflict("tailnet_route.busy"),
-                            }
-                            .into_response(),
-                        );
+                        let response = match view.active_command_id {
+                            Some(active) => ApiError::busy(active),
+                            None => ApiError::conflict("tailnet_route.busy"),
+                        };
+                        return Proven::Refused(self.failed(
+                            device,
+                            command_id,
+                            Some(&route),
+                            "route_proof.busy",
+                            response.into_response(),
+                        ));
                     }
-                    self.forget_holder(device, &route);
+                    self.forget_holder(device, &route, "holder_view.unavailable");
+                    lost = Some((route, "holder_view.unavailable".to_owned()));
                 }
-                RouteCheck::Failed => self.forget_holder(device, &route),
+                RouteCheck::Failed(reason) => {
+                    self.forget_holder(device, &route, &reason);
+                    lost = Some((route, reason));
+                }
             }
         }
-        Proven::Refused(route_unavailable())
+        let (route, reason) = lost.expect("two located holders failed");
+        Proven::Refused(self.failed(
+            device,
+            command_id,
+            Some(&route),
+            &reason,
+            route_unavailable(),
+        ))
     }
 
     async fn overlay(self: &Arc<Self>, views: &mut [DeviceView]) {
@@ -914,7 +1020,7 @@ impl Forwarder {
         if daemon.local_link_authenticated(device) {
             return None;
         }
-        let route = match self.prove_holder(device).await {
+        let route = match self.prove_holder(device, None).await {
             Proven::Route(route) => route,
             Proven::Local => return None,
             Proven::Refused(response) => return Some(response),
@@ -934,8 +1040,12 @@ impl Forwarder {
                     content_type,
                     body,
                 } => passthrough(status, content_type, body),
-                OwnerExchange::NotSent => route_unavailable(),
-                OwnerExchange::Uncertain => route_uncertain(None),
+                OwnerExchange::NotSent(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                }
+                OwnerExchange::Uncertain(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                }
             },
         )
     }
@@ -958,11 +1068,14 @@ impl Forwarder {
                 return Some(unknown_command(command_id, device, StatusCode::ACCEPTED));
             }
             Some(pin) => {
-                if !matches!(
-                    self.verify_route(&pin.route, device).await,
-                    RouteCheck::Verified
-                ) {
-                    return Some(route_unavailable());
+                if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
+                    return Some(self.failed(
+                        device,
+                        Some(command_id),
+                        Some(&pin.route),
+                        &reason,
+                        route_unavailable(),
+                    ));
                 }
                 (pin.route, false)
             }
@@ -970,7 +1083,7 @@ impl Forwarder {
                 if daemon.local_link_authenticated(device) {
                     return None;
                 }
-                match self.prove_holder(device).await {
+                match self.prove_holder(device, Some(command_id)).await {
                     Proven::Route(route) => (route, true),
                     Proven::Local => return None,
                     Proven::Refused(response) => return Some(response),
@@ -986,23 +1099,36 @@ impl Forwarder {
                 .exchange(&route, "POST", &path, Some(&body), COMMAND_TIMEOUT)
                 .await
             {
-                OwnerExchange::NotSent => {
+                OwnerExchange::NotSent(reason) => {
                     if new_pin {
                         self.unpin_command(command_id);
                     }
-                    route_unavailable()
+                    self.failed(
+                        device,
+                        Some(command_id),
+                        Some(&route),
+                        reason,
+                        route_unavailable(),
+                    )
                 }
                 OwnerExchange::Response {
                     status,
                     content_type,
                     body,
-                } => {
-                    if status >= 400 && new_pin {
+                } if status >= 400 => {
+                    if new_pin {
                         self.unpin_command(command_id);
                     }
-                    passthrough(status, content_type, body)
+                    let reason = holder_reason("command", status, &body);
+                    let response = passthrough(status, content_type, body);
+                    self.failed(device, Some(command_id), Some(&route), &reason, response)
                 }
-                OwnerExchange::Uncertain => {
+                OwnerExchange::Response {
+                    status,
+                    content_type,
+                    body,
+                } => passthrough(status, content_type, body),
+                OwnerExchange::Uncertain(reason) => {
                     // Read-only reconciliation, never resubmission.
                     let outcome = format!("/v1/devices/{device}/commands/{command_id}");
                     match self
@@ -1016,7 +1142,13 @@ impl Forwarder {
                         } => passthrough(202, content_type, body),
                         _ => {
                             self.mark_unknown(command_id);
-                            unknown_command(command_id, device, StatusCode::ACCEPTED)
+                            self.failed(
+                                device,
+                                Some(command_id),
+                                Some(&route),
+                                reason,
+                                unknown_command(command_id, device, StatusCode::ACCEPTED),
+                            )
                         }
                     }
                 }
@@ -1044,10 +1176,16 @@ impl Forwarder {
                     content_type,
                     body,
                 } => passthrough(status, content_type, body),
-                OwnerExchange::NotSent | OwnerExchange::Uncertain if pin.unknown => {
+                OwnerExchange::NotSent(_) | OwnerExchange::Uncertain(_) if pin.unknown => {
                     unknown_command(command_id, device, StatusCode::OK)
                 }
-                OwnerExchange::NotSent | OwnerExchange::Uncertain => route_unavailable(),
+                OwnerExchange::NotSent(reason) | OwnerExchange::Uncertain(reason) => self.failed(
+                    device,
+                    Some(command_id),
+                    Some(&pin.route),
+                    reason,
+                    route_unavailable(),
+                ),
             },
         )
     }
@@ -1065,7 +1203,7 @@ impl Forwarder {
         }
         // Disarm needs no proof on the holder and must work while a command runs there.
         let route = if segment != "disarm" {
-            match self.prove_holder(device).await {
+            match self.prove_holder(device, None).await {
                 Proven::Route(route) => route,
                 Proven::Local => return None,
                 Proven::Refused(response) => return Some(response),
@@ -1107,9 +1245,15 @@ impl Forwarder {
                     content_type,
                     body,
                 } => passthrough(status, content_type, body),
-                OwnerExchange::NotSent => route_unavailable(),
-                OwnerExchange::Uncertain if method == Method::GET => route_unavailable(),
-                OwnerExchange::Uncertain => route_uncertain(None),
+                OwnerExchange::NotSent(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                }
+                OwnerExchange::Uncertain(reason) if method == Method::GET => {
+                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                }
+                OwnerExchange::Uncertain(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                }
             },
         )
     }
@@ -1149,8 +1293,12 @@ impl Forwarder {
                     content_type,
                     body,
                 } => passthrough(status, content_type, body),
-                OwnerExchange::NotSent => route_unavailable(),
-                OwnerExchange::Uncertain => route_uncertain(None),
+                OwnerExchange::NotSent(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_unavailable())
+                }
+                OwnerExchange::Uncertain(reason) => {
+                    self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                }
             },
         )
     }
@@ -1189,11 +1337,14 @@ impl Forwarder {
         let (route, remote_epoch, new_pin) = match self.stream_pin(job) {
             Some(pin) if pin.device != device => return None,
             Some(pin) => {
-                if !matches!(
-                    self.verify_route(&pin.route, device).await,
-                    RouteCheck::Verified
-                ) {
-                    return Some(route_unavailable());
+                if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
+                    return Some(self.failed(
+                        device,
+                        None,
+                        Some(&pin.route),
+                        &reason,
+                        route_unavailable(),
+                    ));
                 }
                 (pin.route, pin.remote_epoch, false)
             }
@@ -1201,13 +1352,19 @@ impl Forwarder {
                 if daemon.local_link_authenticated(device) {
                     return None;
                 }
-                let route = match self.prove_holder(device).await {
+                let route = match self.prove_holder(device, None).await {
                     Proven::Route(route) => route,
                     Proven::Local => return None,
                     Proven::Refused(response) => return Some(response),
                 };
                 let Some(epoch) = self.remote_epoch(&route).await else {
-                    return Some(route_unavailable());
+                    return Some(self.failed(
+                        device,
+                        None,
+                        Some(&route),
+                        "holder_epoch.unavailable",
+                        route_unavailable(),
+                    ));
                 };
                 (route, epoch, true)
             }
@@ -1222,11 +1379,11 @@ impl Forwarder {
                 .exchange(&route, "POST", &path, Some(&body), CONTROL_TIMEOUT)
                 .await
             {
-                OwnerExchange::NotSent => {
+                OwnerExchange::NotSent(reason) => {
                     if new_pin {
                         self.unpin_stream(job);
                     }
-                    route_unavailable()
+                    self.failed(device, None, Some(&route), reason, route_unavailable())
                 }
                 OwnerExchange::Response {
                     status,
@@ -1238,12 +1395,16 @@ impl Forwarder {
                     }
                     local_receipt(status, content_type, body, &remote_epoch, &local_epoch)
                 }
-                OwnerExchange::Uncertain => match self.stream_status(&route, device, job).await {
-                    Some((content_type, body)) => {
-                        local_receipt(201, content_type, body, &remote_epoch, &local_epoch)
+                OwnerExchange::Uncertain(reason) => {
+                    match self.stream_status(&route, device, job).await {
+                        Some((content_type, body)) => {
+                            local_receipt(201, content_type, body, &remote_epoch, &local_epoch)
+                        }
+                        None => {
+                            self.failed(device, None, Some(&route), reason, route_uncertain(None))
+                        }
                     }
-                    None => route_uncertain(None),
-                },
+                }
             },
         )
     }
@@ -1302,13 +1463,16 @@ impl Forwarder {
         } else {
             None
         };
-        if needs_proof
-            && !matches!(
-                self.verify_route(&pin.route, device).await,
-                RouteCheck::Verified
-            )
-        {
-            return Some(route_unavailable());
+        if needs_proof {
+            if let Some(reason) = self.verify_route(&pin.route, device).await.failure() {
+                return Some(self.failed(
+                    device,
+                    None,
+                    Some(&pin.route),
+                    &reason,
+                    route_unavailable(),
+                ));
+            }
         }
         let path = format!("/v1/devices/{device}/text-streams/{job}{suffix}");
         let exchange = self
@@ -1320,8 +1484,10 @@ impl Forwarder {
                 content_type,
                 body,
             } => local_receipt(status, content_type, body, &pin.remote_epoch, &local_epoch),
-            OwnerExchange::NotSent => route_unavailable(),
-            OwnerExchange::Uncertain => {
+            OwnerExchange::NotSent(reason) => {
+                self.failed(device, None, Some(&pin.route), reason, route_unavailable())
+            }
+            OwnerExchange::Uncertain(reason) => {
                 // After a lost part or finish response, report the holder's receipt only when it
                 // proves where the request ended; otherwise the result stays unknown.
                 let reconciled = match &action {
@@ -1348,7 +1514,13 @@ impl Forwarder {
                             &local_epoch,
                         )
                     }
-                    None => route_uncertain(child_command_id),
+                    None => self.failed(
+                        device,
+                        None,
+                        Some(&pin.route),
+                        reason,
+                        route_uncertain(child_command_id),
+                    ),
                 }
             }
         })
@@ -1683,7 +1855,9 @@ fn display_name(name: &str) -> String {
 /// route, not this caller's local credential, failed.
 fn passthrough(status: u16, content_type: Option<String>, body: Vec<u8>) -> Response {
     let status = match status {
-        401 | 403 => StatusCode::SERVICE_UNAVAILABLE,
+        401 | 403 => {
+            return ApiError::unavailable("tailnet_route.holder_refused").into_response();
+        }
         other => StatusCode::from_u16(other).unwrap_or(StatusCode::BAD_GATEWAY),
     };
     let content_type = content_type
@@ -1694,6 +1868,45 @@ fn passthrough(status: u16, content_type: Option<String>, body: Vec<u8>) -> Resp
         .headers_mut()
         .insert(header::CONTENT_TYPE, content_type);
     response
+}
+
+/// Why forwarded work failed, as identifiers and a reason code only.
+fn log_failure(
+    device: &str,
+    command_id: Option<Uuid>,
+    route: Option<&Route>,
+    status: impl std::fmt::Display,
+    reason: &str,
+) {
+    crate::daemon_log!(
+        "forwarding failed: device={device} command_id={} holder={} status={status} reason={reason}",
+        command_id.map_or_else(|| "none".to_owned(), |id| id.to_string()),
+        route.map_or_else(|| "none".to_owned(), holder_name),
+    );
+}
+
+fn holder_name(route: &Route) -> String {
+    route
+        .name
+        .clone()
+        .unwrap_or_else(|| encode_hex(&route.installation_id))
+}
+
+/// A holder refusal as a reason code: its HTTP status and, only when it is one, its error code.
+fn holder_reason(scope: &str, status: u16, body: &[u8]) -> String {
+    let code = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")?
+                .as_str()
+                .filter(|code| keyferry_core::is_error_code(code))
+                .map(str::to_owned)
+        });
+    match code {
+        Some(code) => format!("{scope}.holder_status_{status}:{code}"),
+        None => format!("{scope}.holder_status_{status}"),
+    }
 }
 
 fn route_unavailable() -> Response {
@@ -1731,9 +1944,9 @@ pub(crate) enum OwnerExchange {
         body: Vec<u8>,
     },
     /// Connecting or authenticating the owner route failed; no request byte was sent.
-    NotSent,
+    NotSent(&'static str),
     /// The request may have been delivered but no complete response was read.
-    Uncertain,
+    Uncertain(&'static str),
 }
 
 /// One owner-mTLS HTTP/1.1 request to a peer controller, bounded in time and size.
@@ -1749,18 +1962,25 @@ pub(crate) async fn owner_exchange(
     max_response: usize,
 ) -> OwnerExchange {
     let Ok(server_name) = keyferry_gateway::installation_gateway_name(installation_id) else {
-        return OwnerExchange::NotSent;
+        return OwnerExchange::NotSent("owner_route.server_name");
     };
     let Ok(tls_name) = ServerName::try_from(server_name.clone()) else {
-        return OwnerExchange::NotSent;
+        return OwnerExchange::NotSent("owner_route.server_name");
     };
     let connected = time::timeout(timeout, async {
-        let tcp = TcpStream::connect(address).await?;
-        connector.connect(tls_name, tcp).await
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|_| "owner_route.connect_failed")?;
+        connector
+            .connect(tls_name, tcp)
+            .await
+            .map_err(|_| "owner_route.tls_failed")
     })
     .await;
-    let Ok(Ok(mut tls)) = connected else {
-        return OwnerExchange::NotSent;
+    let mut tls = match connected {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(reason)) => return OwnerExchange::NotSent(reason),
+        Err(_) => return OwnerExchange::NotSent("owner_route.connect_timeout"),
     };
     let body = body.unwrap_or_default();
     let content_type = if body.is_empty() {
@@ -1779,8 +1999,16 @@ pub(crate) async fn owner_exchange(
         read_http_response(&mut tls, max_response).await
     })
     .await;
-    let Ok(Ok(response)) = exchanged else {
-        return OwnerExchange::Uncertain;
+    let response = match exchanged {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            return OwnerExchange::Uncertain("owner_route.response_eof")
+        }
+        Ok(Err(error)) if error.kind() == io::ErrorKind::InvalidData => {
+            return OwnerExchange::Uncertain("owner_route.response_invalid")
+        }
+        Ok(Err(_)) => return OwnerExchange::Uncertain("owner_route.io_failed"),
+        Err(_) => return OwnerExchange::Uncertain("owner_route.response_timeout"),
     };
     match parse_http_response(&response) {
         HttpParse::Complete {
@@ -1792,7 +2020,9 @@ pub(crate) async fn owner_exchange(
             content_type: content_type.map(str::to_owned),
             body: body.to_vec(),
         },
-        HttpParse::Incomplete | HttpParse::Malformed => OwnerExchange::Uncertain,
+        HttpParse::Incomplete | HttpParse::Malformed => {
+            OwnerExchange::Uncertain("owner_route.response_invalid")
+        }
     }
 }
 
@@ -2560,6 +2790,156 @@ mod tests {
         panic!("forwarded command did not finish");
     }
 
+    /// The route-proof response a Wi-Fi fixture endpoint sends for a ROUTE_PROOF_REQUEST payload.
+    fn fixture_route_proof(request: &[u8], gateway: [u8; 16], session: [u8; 16]) -> Vec<u8> {
+        let input = keyferry_gateway::RouteProofInput {
+            owner_id: OWNER,
+            device_id: DEVICE,
+            epoch: 1,
+            policy_sequence: 1,
+            policy_hash: [0x31; 32],
+            gateway_installation_id: gateway,
+            controller_installation_id: request[..16].try_into().unwrap(),
+            controller_nonce: request[16..48].try_into().unwrap(),
+            device_boot_nonce: [0x32; 16],
+            endpoint_session_id: session,
+            link_path: keyferry_gateway::GatewayLinkPath::Wifi,
+            usb_ready: true,
+        };
+        let tag = keyferry_gateway::route_proof_tag(&FORWARDER_SECRET, &input).unwrap();
+        keyferry_gateway::encode_route_proof_response(&input, &tag)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Firmware builds at most one route proof per 100 ms (esp_transport.cpp
+    /// kRouteProofMinimumIntervalMs) and answers a faster request with ERROR BUSY. A status read
+    /// that re-proves an aged holder, followed at once by a command, must not lose a healthy
+    /// holder or reject the command.
+    #[tokio::test]
+    async fn consecutive_forwarded_commands_survive_the_endpoint_route_proof_interval() {
+        use crate::discovery::{refresh_interfaces, BeaconPlan, PortableGatewayBinding};
+        use crate::tls::{read_frame, send_frame, tests::respond_on_name};
+        use keyferry_protocol::{error_code, message, result_code, Frame};
+
+        let harness = harness_with_wifi(None, FORWARDER_SECRET, None, true).await;
+        let transport = harness
+            .holder
+            .gateway(&device_id())
+            .unwrap()
+            .transport
+            .clone();
+        let binding = PortableGatewayBinding::Multi(
+            InstallationTlsSecretSet::load(harness.root.join("holder")).unwrap(),
+            vec![transport.clone()],
+        );
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let plan = BeaconPlan::loopback_test(reservation.local_addr().unwrap().port());
+        drop(reservation);
+        let mut listeners = Vec::new();
+        assert!(refresh_interfaces(&mut listeners, &[plan], transport.host_id(), &binding).await);
+
+        let credentials = transport.test_credentials();
+        let gateway_id = transport.host_id();
+        let refused = Arc::new(AtomicUsize::new(0));
+        let device_refused = Arc::clone(&refused);
+        let device = tokio::spawn(async move {
+            let tcp = TcpStream::connect(plan.listener_address()).await.unwrap();
+            let name = keyferry_gateway::device_gateway_name(&DEVICE).unwrap();
+            let (mut stream, ready) =
+                respond_on_name(tcp, &credentials, &[0x33; 32], true, &name).await;
+            let session: [u8; 16] = ready.payload[..16].try_into().unwrap();
+            let mut last_proof: Option<Instant> = None;
+            let mut executed = 0;
+            while let Ok(frame) = read_frame(&mut stream).await {
+                let replies = match frame.message_type {
+                    message::ROUTE_PROOF_REQUEST
+                        if last_proof
+                            .is_some_and(|at| at.elapsed() < Duration::from_millis(100)) =>
+                    {
+                        device_refused.fetch_add(1, Ordering::SeqCst);
+                        vec![(message::ERROR, error_code::BUSY.to_le_bytes().to_vec())]
+                    }
+                    message::ROUTE_PROOF_REQUEST => {
+                        last_proof = Some(Instant::now());
+                        vec![(
+                            message::ROUTE_PROOF_RESPONSE,
+                            fixture_route_proof(&frame.payload, gateway_id, session),
+                        )]
+                    }
+                    message::ARM | message::DISARM => {
+                        vec![(message::ACK, vec![frame.message_type, 0, 0])]
+                    }
+                    message::COMMAND => {
+                        let id = &frame.payload[..16];
+                        let execute = frame.payload[52] == 1;
+                        executed += usize::from(execute);
+                        let results: &[u8] = if execute {
+                            &[
+                                result_code::ACCEPTED,
+                                result_code::STARTED,
+                                result_code::EMITTED,
+                            ]
+                        } else {
+                            &[result_code::ACCEPTED, result_code::EMITTED]
+                        };
+                        results
+                            .iter()
+                            .map(|result| (message::COMMAND_RESULT, [id, &[*result]].concat()))
+                            .collect()
+                    }
+                    other => panic!("unexpected fixture message {other}"),
+                };
+                for (message_type, payload) in replies {
+                    send_frame(
+                        &mut stream,
+                        Frame::v1(message_type, frame.sequence, payload),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            executed
+        });
+        for _ in 0..200 {
+            if transport.is_ready() {
+                break;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(transport.is_ready());
+
+        let forwarder = harness.forwarder.forwarder().unwrap();
+        for index in 0..6 {
+            if index % 2 == 1 {
+                // A pause longer than HOLDER_REVERIFY, as between routine checkpoints.
+                if let Some(holder) = forwarder.state().holders.get_mut(&device_id()) {
+                    holder.verified_at -= HOLDER_REVERIFY;
+                }
+            }
+            // keyctl and the MCP server read device status before sending input.
+            let (_, devices) = call(&harness.forwarder, "GET", "/v1/devices", None).await;
+            assert_eq!(devices["devices"][0]["link_path"], TAILNET_LINK_PATH);
+            let (status, receipt) = call(
+                &harness.forwarder,
+                "POST",
+                &format!("/v1/devices/{}/sequences", device_id()),
+                Some(sequence(Uuid::now_v7())),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "command {index}: {receipt}");
+            let result =
+                wait_for_outcome(&harness.forwarder, receipt["command_id"].as_str().unwrap()).await;
+            assert_eq!(result["outcome"], "EMITTED", "command {index}: {result}");
+        }
+        assert!(
+            refused.load(Ordering::SeqCst) > 0,
+            "proof interval never exercised"
+        );
+        transport.begin_maintenance().await.unwrap();
+        assert_eq!(device.await.unwrap(), 6);
+    }
+
     #[tokio::test]
     async fn ten_forwarded_300_character_commands_survive_holder_listener_replacement() {
         use crate::discovery::{refresh_interfaces, BeaconPlan, PortableGatewayBinding};
@@ -2625,30 +3005,12 @@ mod tests {
                 match frame.message_type {
                     message::ROUTE_PROOF_REQUEST => {
                         assert_eq!(&frame.payload[..16], &controller);
-                        let input = keyferry_gateway::RouteProofInput {
-                            owner_id: OWNER,
-                            device_id: DEVICE,
-                            epoch: 1,
-                            policy_sequence: 1,
-                            policy_hash: [0x31; 32],
-                            gateway_installation_id: gateway_id,
-                            controller_installation_id: controller,
-                            controller_nonce: frame.payload[16..48].try_into().unwrap(),
-                            device_boot_nonce: [0x32; 16],
-                            endpoint_session_id: session,
-                            link_path: keyferry_gateway::GatewayLinkPath::Wifi,
-                            usb_ready: true,
-                        };
-                        let tag =
-                            keyferry_gateway::route_proof_tag(&FORWARDER_SECRET, &input).unwrap();
-                        let payload =
-                            keyferry_gateway::encode_route_proof_response(&input, &tag).unwrap();
                         send_frame(
                             &mut stream,
                             Frame::v1(
                                 message::ROUTE_PROOF_RESPONSE,
                                 frame.sequence,
-                                payload.to_vec(),
+                                fixture_route_proof(&frame.payload, gateway_id, session),
                             ),
                         )
                         .await
