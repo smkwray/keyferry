@@ -88,7 +88,9 @@ impl Default for Service {
             streams: Mutex::default(),
             in_flight: Mutex::default(),
             closed: AtomicBool::new(false),
-            encoders: Arc::new(tokio::sync::Semaphore::new((cpus / 2).clamp(2, MAX_STREAMS))),
+            encoders: Arc::new(tokio::sync::Semaphore::new(
+                (cpus / 2).clamp(2, MAX_STREAMS),
+            )),
             #[cfg(test)]
             fake: Mutex::default(),
             #[cfg(test)]
@@ -604,7 +606,13 @@ mod tests {
                 generation: 1,
                 at: Instant::now(),
             };
-            daemon.0.capture.fake.lock().unwrap().insert(id.into(), frame);
+            daemon
+                .0
+                .capture
+                .fake
+                .lock()
+                .unwrap()
+                .insert(id.into(), frame);
         }
         *daemon.0.capture.fake_wait.lock().unwrap() = WAIT;
         let request = |source: &str| {
@@ -624,9 +632,10 @@ mod tests {
                     .await
                     .unwrap();
                 let status = response.status();
-                let value: serde_json::Value =
-                    serde_json::from_slice(&to_bytes(response.into_body(), MAX_WIRE).await.unwrap())
-                        .unwrap();
+                let value: serde_json::Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), MAX_WIRE).await.unwrap(),
+                )
+                .unwrap();
                 (status, value)
             }
         };

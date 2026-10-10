@@ -270,7 +270,10 @@ pub(crate) async fn serve_multi(listener: crate::MultiTlsListener) {
         let router = listener.router();
         tokio::spawn(async move {
             let _slot = slot;
-            match router.accept_stream_on(stream, crate::TlsLinkPath::Wifi).await {
+            match router
+                .accept_stream_on(stream, crate::TlsLinkPath::Wifi)
+                .await
+            {
                 Ok(device_id) => crate::daemon_log!(
                     "owner-authorized Wi-Fi dongle session authenticated from {peer} for {}",
                     uuid::Uuid::from_bytes(device_id)

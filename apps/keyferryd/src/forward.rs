@@ -266,7 +266,7 @@ pub(crate) struct Forwarder {
     connector: TlsConnector,
     peers: Box<dyn PeerSource>,
     state: Mutex<ForwardState>,
-    refresh: tokio::sync::Mutex<()>,
+    refreshing: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     captures: Mutex<HashMap<String, (Route, String)>>,
     capture_inventory: tokio::sync::Mutex<CaptureInventory>,
 }
@@ -302,7 +302,7 @@ impl Forwarder {
             connector,
             peers,
             state: Mutex::new(ForwardState::default()),
-            refresh: tokio::sync::Mutex::new(()),
+            refreshing: Mutex::default(),
             captures: Mutex::new(HashMap::new()),
             capture_inventory: tokio::sync::Mutex::new(None),
         })
@@ -633,52 +633,70 @@ impl Forwarder {
         }
     }
 
-    /// Brings the holder cache up to date for `devices`. One refresh runs at a time; a full
-    /// tailnet search runs only when a device has no holder and the last search is not recent.
-    async fn refresh(self: Arc<Self>, devices: Vec<String>) {
-        let _flight = self.refresh.lock().await;
-        let mut missing = Vec::new();
-        for device in devices {
-            let cached = self.state().holders.get(&device).cloned();
-            let Some(holder) = cached else {
-                missing.push(device);
-                continue;
-            };
-            let now = Instant::now();
-            let reverify = now.duration_since(holder.verified_at) >= HOLDER_REVERIFY;
-            if !reverify && now.duration_since(holder.view_at) < HOLDER_VIEW_TTL {
-                continue;
+    /// Re-checks one device's cached holder and returns the device if it has none. One check
+    /// per device runs at a time; different devices never wait on each other's holder.
+    async fn refresh_holder(self: Arc<Self>, device: String) -> Option<String> {
+        let flight = Arc::clone(
+            self.refreshing
+                .lock()
+                .expect("holder refresh")
+                .entry(device.clone())
+                .or_default(),
+        );
+        let _flight = flight.lock().await;
+        let Some(holder) = self.state().holders.get(&device).cloned() else {
+            return Some(device);
+        };
+        let now = Instant::now();
+        let reverify = now.duration_since(holder.verified_at) >= HOLDER_REVERIFY;
+        if !reverify && now.duration_since(holder.view_at) < HOLDER_VIEW_TTL {
+            return None;
+        }
+        let check = if reverify {
+            self.verify_route(&holder.route, &device).await
+        } else {
+            RouteCheck::Busy
+        };
+        let view = match check {
+            RouteCheck::Failed(reason) => Err(reason),
+            RouteCheck::Verified | RouteCheck::Busy => {
+                self.fetch_view(&holder.route, &device).await
             }
-            let check = if reverify {
-                self.verify_route(&holder.route, &device).await
-            } else {
-                RouteCheck::Busy
-            };
-            let view = match check {
-                RouteCheck::Failed(reason) => Err(reason),
-                RouteCheck::Verified | RouteCheck::Busy => {
-                    self.fetch_view(&holder.route, &device).await
-                }
-            };
-            let mut state = self.state();
-            match view {
-                Ok(view) => {
-                    if let Some(entry) = state.holders.get_mut(&device) {
-                        entry.view = view;
-                        entry.view_at = Instant::now();
-                        if reverify {
-                            entry.verified_at = Instant::now();
-                        }
+        };
+        let mut state = self.state();
+        match view {
+            Ok(view) => {
+                if let Some(entry) = state.holders.get_mut(&device) {
+                    entry.view = view;
+                    entry.view_at = Instant::now();
+                    if reverify {
+                        entry.verified_at = Instant::now();
                     }
                 }
-                Err(reason) => {
-                    state.holders.remove(&device);
-                    crate::daemon_log!(
-                        "keyferryd lost the tailnet route to device {device} via {}: {reason}",
-                        holder_name(&holder.route)
-                    );
-                    missing.push(device);
-                }
+                None
+            }
+            Err(reason) => {
+                state.holders.remove(&device);
+                crate::daemon_log!(
+                    "keyferryd lost the tailnet route to device {device} via {}: {reason}",
+                    holder_name(&holder.route)
+                );
+                Some(device)
+            }
+        }
+    }
+
+    /// Brings the holder cache up to date for `devices`, each device on its own task; a full
+    /// tailnet search runs only when a device has no holder and the last search is not recent.
+    async fn refresh(self: Arc<Self>, devices: Vec<String>) {
+        let mut checks = JoinSet::new();
+        for device in devices {
+            checks.spawn(Arc::clone(&self).refresh_holder(device));
+        }
+        let mut missing = Vec::new();
+        while let Some(result) = checks.join_next().await {
+            if let Ok(Some(device)) = result {
+                missing.push(device);
             }
         }
         if missing.is_empty() {
@@ -3622,6 +3640,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stalled_holder_never_delays_another_devices_refresh() {
+        let harness = harness(None, FORWARDER_SECRET).await;
+        let (_, devices) = call(&harness.forwarder, "GET", "/v1/devices", None).await;
+        assert_eq!(devices["devices"][0]["via"], "holder-host");
+        let forwarder = harness.forwarder.forwarder().unwrap();
+        // A holder that accepts TCP and never answers TLS, due for a fresh route proof.
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_address = stalled.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = stalled.accept().await {
+                held.push(stream);
+            }
+        });
+        // A holder that hangs up at once (Windows retries a refused loopback connect for ~2 s).
+        let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        tokio::spawn(async move { while closed.accept().await.is_ok() {} });
+        let other = Uuid::from_bytes([0x23; 16]).to_string();
+        {
+            let mut state = forwarder.state();
+            let mut holder = state.holders[&device_id()].clone();
+            holder.route.control = stalled_address;
+            holder.verified_at = Instant::now()
+                .checked_sub(HOLDER_REVERIFY + Duration::from_secs(1))
+                .unwrap();
+            let mut gone = holder.clone();
+            gone.route.control = closed_address;
+            gone.verified_at = Instant::now();
+            gone.view_at = holder.verified_at;
+            state.holders.insert(device_id(), holder);
+            state.holders.insert(other.clone(), gone);
+            state.last_discovery = Some(Instant::now());
+        }
+        let slow = tokio::spawn(Arc::clone(&forwarder).refresh(vec![device_id()]));
+        time::sleep(Duration::from_millis(50)).await;
+        let started = Instant::now();
+        Arc::clone(&forwarder).refresh(vec![other.clone()]).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(!forwarder.state().holders.contains_key(&other));
+        assert!(!slow.is_finished());
+        slow.abort();
+    }
+
+    #[tokio::test]
     async fn holder_without_a_valid_route_proof_is_never_used() {
         // The endpoint answers with a tag this installation cannot verify.
         let harness = harness(None, [0x5f; 32]).await;
@@ -3881,15 +3948,18 @@ mod tests {
         assert_eq!(peers[0].control_port, OWNER_GATEWAY_CONTROL_PORT);
     }
     fn fake_capture(daemon: &Daemon) {
-        daemon.0.capture.fake.lock().unwrap().insert("fake-hdmi".into(), keyferry_capture::frames::Frame {
-            width: 320,
-            height: 240,
-            native: (640, 480),
-            rgb: vec![72; 320 * 240 * 3],
-            serial: 1,
-            generation: 1,
-            at: Instant::now(),
-        });
+        daemon.0.capture.fake.lock().unwrap().insert(
+            "fake-hdmi".into(),
+            keyferry_capture::frames::Frame {
+                width: 320,
+                height: 240,
+                native: (640, 480),
+                rgb: vec![72; 320 * 240 * 3],
+                serial: 1,
+                generation: 1,
+                at: Instant::now(),
+            },
+        );
     }
     async fn capture_source(daemon: &Daemon) -> String {
         // Bypass local FFmpeg discovery only: actual owner-mTLS inventory is production code.

@@ -6245,7 +6245,10 @@ pub(crate) mod tests {
         )
         .await
         .expect("second candidate authenticated while the first stalled");
-        assert_eq!(ready.message_type, keyferry_protocol::message::SESSION_READY);
+        assert_eq!(
+            ready.message_type,
+            keyferry_protocol::message::SESSION_READY
+        );
         time::timeout(Duration::from_secs(1), async {
             while !transport.is_ready() {
                 time::sleep(Duration::from_millis(5)).await;

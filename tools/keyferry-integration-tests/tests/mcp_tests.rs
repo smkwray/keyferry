@@ -608,7 +608,11 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
     let ids = ["sim-agent-a", "sim-agent-b"];
     // Agent B's first command is lost after it may have started; agent A must not notice.
     let transports = [
-        Arc::new(SimulatorTransport::new(vec![]).with_extended_pointer().with_accept_delay(DELAY)),
+        Arc::new(
+            SimulatorTransport::new(vec![])
+                .with_extended_pointer()
+                .with_accept_delay(DELAY),
+        ),
         Arc::new(
             SimulatorTransport::new(vec![SimulationFault::LostAfterStart])
                 .with_extended_pointer()
@@ -619,13 +623,28 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
         MemoryTokenStore::new("test-token-123456"),
         ids.iter()
             .zip(&transports)
-            .map(|(id, t)| (id.to_string(), id.to_string(), t.clone() as Arc<dyn keyferryd::DeviceTransport>))
+            .map(|(id, t)| {
+                (
+                    id.to_string(),
+                    id.to_string(),
+                    t.clone() as Arc<dyn keyferryd::DeviceTransport>,
+                )
+            })
             .collect(),
     )
     .unwrap();
     let visuals: HashMap<String, Arc<Mutex<Visual>>> = ids
         .iter()
-        .map(|id| (id.to_string(), Arc::new(Mutex::new(Visual { pointer: [0.5, 0.5], revision: 0, at: Instant::now() }))))
+        .map(|id| {
+            (
+                id.to_string(),
+                Arc::new(Mutex::new(Visual {
+                    pointer: [0.5, 0.5],
+                    revision: 0,
+                    at: Instant::now(),
+                })),
+            )
+        })
         .collect();
     let posted: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
     let (observed, log) = (visuals.clone(), posted.clone());
@@ -691,13 +710,27 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
             commands.push(lost["command"]["command_id"].as_str().unwrap().to_owned());
         }
         let calibration = s.call("calibrate", &json!({}), &c).unwrap();
-        assert_eq!(calibration["structuredContent"]["bound"], true, "{calibration}");
-        for probe in calibration["structuredContent"]["probes"].as_array().unwrap() {
+        assert_eq!(
+            calibration["structuredContent"]["bound"], true,
+            "{calibration}"
+        );
+        for probe in calibration["structuredContent"]["probes"]
+            .as_array()
+            .unwrap()
+        {
             commands.push(probe["command"]["command_id"].as_str().unwrap().to_owned());
         }
         s.call("screenshot", &json!({}), &c).unwrap();
-        let found = s.call("find_text", &json!({"query":"safe test"}), &c).unwrap();
-        assert_eq!(found["structuredContent"]["boxes"].as_array().unwrap().len(), 1);
+        let found = s
+            .call("find_text", &json!({"query":"safe test"}), &c)
+            .unwrap();
+        assert_eq!(
+            found["structuredContent"]["boxes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         for (name, args) in [
             ("click", json!({"x":160,"y":120})),
             ("type_text", json!({"text":"agent text"})),
@@ -706,7 +739,11 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
             let result = s.call(name, &args, &c).unwrap();
             assert_eq!(result["isError"], false, "{name}: {result}");
             let receipt = &result["structuredContent"];
-            let command = if receipt.get("command").is_some() { &receipt["command"] } else { receipt };
+            let command = if receipt.get("command").is_some() {
+                &receipt["command"]
+            } else {
+                receipt
+            };
             assert_eq!(command["outcome"], "EMITTED");
             commands.push(command["command_id"].as_str().unwrap().to_owned());
         }
@@ -732,24 +769,39 @@ async fn two_agents_drive_two_sticks_concurrently_without_cross_talk() {
     let (b, b_commands, _) = concurrent_b.unwrap();
     a_commands.extend(more);
     let posted = posted.lock().unwrap().clone();
-    let results = [(a.device.clone(), a_commands), (b.device.clone(), b_commands)];
+    let results = [
+        (a.device.clone(), a_commands),
+        (b.device.clone(), b_commands),
+    ];
     for (i, (device, commands)) in results.iter().enumerate() {
         let other = 1 - i;
         for id in commands {
             let id_uuid = uuid::Uuid::parse_str(id).unwrap();
             // Every command ran exactly once, on its own stick only; UNKNOWN was never replayed.
             assert_eq!(transports[i].execution_count(id_uuid), 1, "{device} {id}");
-            assert_eq!(transports[other].execution_count(id_uuid), 0, "{device} {id}");
+            assert_eq!(
+                transports[other].execution_count(id_uuid),
+                0,
+                "{device} {id}"
+            );
             assert!(posted.contains(&(device.clone(), id.clone())));
         }
-        assert_eq!(posted.iter().filter(|(d, _)| d == device).count(), commands.len());
+        assert_eq!(
+            posted.iter().filter(|(d, _)| d == device).count(),
+            commands.len()
+        );
         assert!(!transports[i].is_remotely_armed());
-        assert!(geometry::load(&root, device, "fake-hdmi").unwrap().is_some());
+        assert!(geometry::load(&root, device, "fake-hdmi")
+            .unwrap()
+            .is_some());
     }
     // Serializing the sticks would add agent B's device time to agent A's own run.
     let b_device_time = DELAY * results[1].1.len() as u32;
     let bound = solo + b_device_time.mul_f64(0.6);
-    assert!(a_elapsed < bound && wall < bound, "solo {solo:?}, A {a_elapsed:?}, wall {wall:?}, B device {b_device_time:?}");
+    assert!(
+        a_elapsed < bound && wall < bound,
+        "solo {solo:?}, A {a_elapsed:?}, wall {wall:?}, B device {b_device_time:?}"
+    );
     println!("two agents: solo {solo:?}, A concurrent {a_elapsed:?}, wall {wall:?}, B device {b_device_time:?}");
     drop((a, b));
     task.abort();
