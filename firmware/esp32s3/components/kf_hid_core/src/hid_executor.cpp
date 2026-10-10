@@ -224,6 +224,7 @@ SubmitResult ExecutorState::submit_mouse_movement(const std::uint64_t epoch,
         desired_mouse_.absolute_x = absolute_x_;
         desired_mouse_.absolute_y = absolute_y_;
     }
+    absolute_buttons_unreleased_ |= desired_mouse_.absolute && desired_mouse_.buttons != 0;
     desired_interface_ = InputInterface::mouse;
     pending_mouse_movement_ = true;
     pending_movement_token_ = logical_token;
@@ -260,6 +261,7 @@ SubmitResult ExecutorState::submit_mouse_buttons(const std::uint64_t epoch,
         desired_mouse_.absolute_y = absolute_y_;
     }
     if (extended_pointer_ && report.buttons == 0) { release_absolute_pending_ = true; }
+    absolute_buttons_unreleased_ |= desired_mouse_.absolute && desired_mouse_.buttons != 0;
     desired_interface_ = InputInterface::mouse;
     pending_mouse_movement_ = false;
     pending_movement_token_ = 0;
@@ -370,6 +372,9 @@ bool ExecutorState::mark_mouse_report_accepted(const PointerReport& report,
         report != desired_mouse_) {
         return false;
     }
+    // A relative zero completes the release unless report 4 may still hold a button.
+    const bool absolute_release_follows = !report.absolute && release_absolute_pending_ &&
+                                          absolute_buttons_unreleased_;
     if (pending_mouse_movement_) {
         if (logical_token == 0 || logical_token != pending_movement_token_ ||
             logical_token <= last_movement_token_) {
@@ -392,7 +397,7 @@ bool ExecutorState::mark_mouse_report_accepted(const PointerReport& report,
         }
         current_mouse_ = report;
         if (is_zero(report)) {
-            if (report.absolute || !extended_pointer_) {
+            if (!absolute_release_follows) {
                 if (session_started_ || neutral_evidence_required_) { neutral_mask_ |= kMouseNeutral; }
             }
             release_mouse_pending_ = false;
@@ -403,18 +408,21 @@ bool ExecutorState::mark_mouse_report_accepted(const PointerReport& report,
             neutral_mask_ = 0;
         }
     }
+    if (report.absolute && report.buttons == 0) { absolute_buttons_unreleased_ = false; }
     pending_mouse_movement_ = false;
     pending_movement_token_ = 0;
     report_pending_ = false;
     if (is_zero(report) && !report.absolute && release_absolute_pending_) {
-        desired_mouse_ = {};
-        desired_mouse_.absolute = true;
-        desired_mouse_.absolute_x = absolute_x_;
-        desired_mouse_.absolute_y = absolute_y_;
         release_absolute_pending_ = false;
-        report_pending_ = true;
-        release_unconfirmed_ = true;
-        neutral_evidence_required_ = true;
+        if (absolute_release_follows) {
+            desired_mouse_ = {};
+            desired_mouse_.absolute = true;
+            desired_mouse_.absolute_x = absolute_x_;
+            desired_mouse_.absolute_y = absolute_y_;
+            report_pending_ = true;
+            release_unconfirmed_ = true;
+            neutral_evidence_required_ = true;
+        }
     }
     if (dual_neutral_after_pending_zero_) {
         dual_neutral_after_pending_zero_ = false;

@@ -540,13 +540,27 @@ void Extended_pointer_faults_release_every_report_role(const bool scrolling) {
         assert(keyferry::hid::SerializePointerReport(relative, &wire) == 6);
         assert((wire == std::array<std::uint8_t, 8>{1,0,0,0,0,0,0,0}));
         executor.UsbMouseReportAccepted(relative,0,16);
-        assert(hid.neutral_mask() != 3);
-        auto absolute = hid.desired_mouse_report();
-        assert(absolute.absolute && keyferry::hid::is_zero(absolute));
-        assert(absolute.absolute_x == 32767 && absolute.absolute_y == 32767);
-        assert(keyferry::hid::SerializePointerReport(absolute, &wire) == 8);
-        assert((wire == std::array<std::uint8_t, 8>{4,0,255,127,255,127,0,0}));
-        executor.UsbMouseReportAccepted(absolute,0,17);
+        if (scrolling) {
+            // No report-4 button was pressed: re-sending its coordinates would only move the
+            // cursor. Any follow-up barrier (watchdog) stays on keyboard and report 1.
+            for (int i = 0; i < 8 && hid.report_needed(); ++i) {
+                if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) {
+                    executor.UsbReportAccepted({}, 17);
+                } else {
+                    assert(!hid.desired_mouse_report().absolute);
+                    executor.UsbMouseReportAccepted(hid.desired_mouse_report(), 0, 17);
+                }
+            }
+            assert(!hid.report_needed());
+        } else {
+            assert(hid.neutral_mask() != 3);
+            auto absolute = hid.desired_mouse_report();
+            assert(absolute.absolute && keyferry::hid::is_zero(absolute));
+            assert(absolute.absolute_x == 32767 && absolute.absolute_y == 32767);
+            assert(keyferry::hid::SerializePointerReport(absolute, &wire) == 8);
+            assert((wire == std::array<std::uint8_t, 8>{4,0,255,127,255,127,0,0}));
+            executor.UsbMouseReportAccepted(absolute,0,17);
+        }
         assert(hid.current_mouse_report().buttons == 0);
         assert(!hid.armed());
         // Loss/reset evidence never upgrades the already uncertain command.
@@ -574,9 +588,9 @@ void Extended_click_bytes_preserve_position_and_separate_edges() {
                         executor.UsbMouseReportAccepted(r, hid.desired_mouse_logical_token(), now);
                     }
                 };
-                accept(0); accept(0); accept(0);
+                accept(0); accept(0);
                 executor.BeginSession(7, 2, false, true);
-                accept(0); accept(0); accept(0);
+                accept(0); accept(0);
                 assert(executor.CommandScopedArm(7, 2));
                 std::vector<std::uint8_t> body{0,0,1,0,8,4,0x34,0x12,0x45,0x23};
                 for (int i = 0; i < clicks; ++i) {
@@ -606,7 +620,7 @@ void Extended_click_bytes_preserve_position_and_separate_edges() {
                     executor.Poll(now + hold + 60);
                     now += hold + 70;
                 }
-                accept(now); accept(now + 10); accept(now + 20);
+                accept(now); accept(now + 10);
                 assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
                 assert(results.input_events.back().evidence.neutral_mask == 3);
                 assert(!hid.armed());
@@ -634,8 +648,8 @@ void Extended_drag_bytes_keep_buttons_with_absolute_coordinates() {
                 executor.UsbMouseReportAccepted(r, hid.desired_mouse_logical_token(), now);
             }
         };
-        accept(0); accept(0); accept(0);
-        executor.BeginSession(7, 2, false, true); accept(0); accept(0); accept(0);
+        accept(0); accept(0);
+        executor.BeginSession(7, 2, false, true); accept(0); accept(0);
         assert(executor.CommandScopedArm(7, 2));
         const auto payload = Envelope(Id(84),5000,7,{0,0,1,0,8,4,0x34,0x12,0x45,0x23,10,1,1,8,4,0x56,0x34,0x67,0x45,2,2,hold,0,11,1,1,7,0});
         assert(executor.HandleAuthenticated(7,Frame(2,payload),10));
@@ -654,7 +668,7 @@ void Extended_drag_bytes_keep_buttons_with_absolute_coordinates() {
         accept(50 + hold);
         assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
         assert((wire == std::array<std::uint8_t, 8>{4,0,0x56,0x34,0x67,0x45,0,0}));
-        accept(60 + hold); accept(70 + hold); accept(80 + hold); accept(90 + hold);
+        accept(60 + hold); accept(70 + hold); accept(80 + hold);
         assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
         assert(results.input_events.back().evidence.neutral_mask == 3);
         std::cout << "pointer drag: down=[04 01 34 12 45 23 00 00]; move=[04 01 56 34 67 45 00 00]; up=[01 00 00 00 00 00], [04 00 56 34 67 45 00 00]; seven fault paths neutralize both IDs\n";
@@ -674,8 +688,8 @@ void Extended_scroll_bytes_follow_positioning_collection() {
             executor.UsbMouseReportAccepted(r, hid.desired_mouse_logical_token(), now);
         }
     };
-    accept(0); accept(0); accept(0);
-    executor.BeginSession(7,2,false,true); accept(0); accept(0); accept(0);
+    accept(0); accept(0);
+    executor.BeginSession(7,2,false,true); accept(0); accept(0);
     assert(executor.CommandScopedArm(7,2));
     const auto payload = Envelope(Id(85),5000,7,{
         0,0,1,0,8,4,0x34,0x12,0x45,0x23,
@@ -701,7 +715,7 @@ void Extended_scroll_bytes_follow_positioning_collection() {
     std::array<std::uint8_t, 8> wire{};
     assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 6);
     assert((wire == std::array<std::uint8_t, 8>{1,0,0,0,1,255,0,0}));
-    accept(now); accept(now+10); accept(now+20); accept(now+30);
+    accept(now); accept(now+10); accept(now+20);
     assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
     assert(results.input_events.back().evidence.neutral_mask == 3);
     std::cout << "pointer scroll at (1234,2345): up=[04 00 34 12 45 23 01 00]; down=[04 00 34 12 45 23 FF 00]; left=[04 00 34 12 45 23 00 FF]; right=[04 00 34 12 45 23 00 01]\n";
@@ -716,8 +730,8 @@ void Extended_button_up_drains_both_ids_before_a_following_click() {
         if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) executor.UsbReportAccepted({},now);
         else executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,now);
     };
-    zero(0); zero(0); zero(0);
-    executor.BeginSession(7,2,false,true); zero(0); zero(0); zero(0);
+    zero(0); zero(0);
+    executor.BeginSession(7,2,false,true); zero(0); zero(0);
     assert(executor.CommandScopedArm(7,2));
     const auto payload = Envelope(Id(82),5000,7,{0,0,1,0,10,1,1,8,4,255,127,0,64,11,1,1,6,5,3,40,0,40,0,7,0});
     assert(executor.HandleAuthenticated(7,Frame(2,payload),10));
@@ -733,7 +747,7 @@ void Extended_button_up_drains_both_ids_before_a_following_click() {
     assert(hid.desired_mouse_report().buttons == 4);
     executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,15);
     executor.Poll(56); zero(57); zero(58); executor.Poll(99);
-    zero(100); zero(101); zero(102);
+    zero(100); zero(101);
     assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
     assert(results.input_events.back().evidence.neutral_mask == 3);
     assert(!hid.armed());
