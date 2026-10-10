@@ -103,8 +103,10 @@ The normalized plan fingerprint is SHA-256 over:
 ```
 
 Command ID and timestamps are excluded. The daemon deduplicates retained IDs before mutation. The
-endpoint additionally tracks 64 admitted public IDs per authenticated epoch without eviction and
-requires exact next chunk index/count/profile. No session rotation continues an uncertain command.
+endpoint additionally retains the 64 most recently admitted public IDs per authenticated epoch and
+requires exact next chunk index/count/profile. Admitting a new ID ends every earlier one, so the
+oldest (closed) ID makes room and admission never fails for capacity: a session outlives any number
+of commands. No session rotation continues an uncertain command.
 
 `EMITTED` requires all intended transfers and the final dual-neutral completion. `ABORTED` permits
 prior effects but requires same-generation dual-neutral evidence. `REJECTED` proves no unresolved

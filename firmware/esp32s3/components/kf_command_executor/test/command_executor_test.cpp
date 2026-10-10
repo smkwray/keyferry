@@ -156,7 +156,7 @@ struct Fixture {
     Fixture() : executor(hid, results, watchdog, kProfileHash) {
         hid.on_transport_ready();
         assert(hid.mark_report_accepted({}));
-        executor.BeginSession(7, 2);
+        executor.BeginSession(7);
         executor.UsbReportAccepted({}, 0);
     }
 
@@ -174,7 +174,7 @@ struct MixedFixture {
         hid.on_transport_ready();
         assert(hid.mark_report_accepted({}));
         assert(hid.mark_mouse_report_accepted({}, 0));
-        executor.BeginSession(7, 2, true);
+        executor.BeginSession(7, true);
         executor.UsbReportAccepted({}, 0);
         executor.UsbMouseReportAccepted({}, 0, 0);
     }
@@ -217,17 +217,21 @@ void Executes_with_exact_results_and_terminal_zero() {
     assert(fixture.watchdog.cancel_count == 1);
 }
 
-void Enforces_sequence_expiry_busy_and_arm_consumption() {
+void Enforces_arm_binding_expiry_busy_and_arm_consumption() {
     Fixture fixture;
     fixture.Arm();
+    // The arm binds only the frame after ARM; any later frame is a correlated rejection that
+    // consumes the arm and leaves the session usable.
     const auto first = Envelope(Id(2), 50, 1, WaitActions(20));
-    assert(!fixture.executor.HandleAuthenticated(7, Frame(3, first), 0));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(3, first), 0));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
-    assert(fixture.executor.expected_sequence() == 2);
+    assert(!fixture.hid.armed());
+    fixture.executor.UsbReportAccepted({}, 1);
+    assert(fixture.executor.CommandScopedArm(7, 4));
 
-    assert(fixture.executor.HandleAuthenticated(7, Frame(2, first), 100));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(4, first), 100));
     const auto busy = Envelope(Id(3), 50, 1, Actions());
-    assert(fixture.executor.HandleAuthenticated(7, Frame(3, busy), 101));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(5, busy), 101));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
     fixture.executor.Poll(150);
     assert(keyferry::hid::is_zero(fixture.hid.desired_report()));
@@ -235,8 +239,15 @@ void Enforces_sequence_expiry_busy_and_arm_consumption() {
     assert(fixture.results.events.back().result == ResultCode::kAborted);
 
     const auto unarmed = Envelope(Id(4), 50, 1, Actions());
-    assert(fixture.executor.HandleAuthenticated(7, Frame(4, unarmed), 160));
+    assert(fixture.executor.HandleAuthenticated(7, Frame(6, unarmed), 160));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
+
+    // A malformed envelope that names its command is rejected without a session fault.
+    auto wrong_profile = Envelope(Id(5), 50, 1, Actions());
+    wrong_profile[20] ^= 1U;
+    assert(fixture.executor.HandleAuthenticated(7, Frame(7, wrong_profile), 170));
+    assert(fixture.results.events.back().result == ResultCode::kRejected);
+    assert(!fixture.executor.HandleAuthenticated(7, Frame(8, {}), 171));
 }
 
 void Cancellation_aborts_after_release() {
@@ -302,14 +313,26 @@ void Session_loss_classifies_started_as_unknown_and_prestart_as_aborted() {
     assert(after.results.events.back().result == ResultCode::kUnknown);
 }
 
-void A_later_arm_resynchronizes_the_command_sequence() {
+void Release_follows_the_session_sequence_after_frames_the_executor_never_sees() {
     Fixture fixture;
     assert(fixture.executor.CommandScopedArm(7, 17));
-    assert(fixture.executor.expected_sequence() == 17);
     const auto payload = Envelope(Id(10), 5000, 1, Actions());
     assert(fixture.executor.HandleAuthenticated(7, Frame(17, payload), 10));
     assert(fixture.results.events.back().result == ResultCode::kAccepted);
-    fixture.executor.EndSession();
+    fixture.executor.UsbReportAccepted(KeyA(), 11);
+    fixture.executor.UsbReportAccepted({}, 12);
+    fixture.executor.Poll(20);
+    fixture.executor.UsbReportAccepted({}, 21);
+    assert(fixture.results.events.back().result == ResultCode::kEmitted);
+    // Sequences 18-20 were ARM-BUSY, lease or status frames answered by the endpoint itself.
+    // Hosts build releases with an empty profile: SHA256("") is not the accepted profile.
+    auto release = Envelope(Id(11), 5000, 3, {});
+    release[20] = 0xE3;
+    assert(fixture.executor.HandleAuthenticated(7, Frame(21, release), 30));
+    assert(fixture.results.events.back().result == ResultCode::kAccepted);
+    fixture.executor.UsbReportAccepted({}, 31);
+    assert(fixture.results.events.back().result == ResultCode::kEmitted);
+    assert(!fixture.executor.active());
 }
 
 void Mixed_input_preserves_order_and_requires_both_terminal_neutrals() {
@@ -449,7 +472,7 @@ void Mixed_capability_rejection_clears_arm_and_release_confirms_both_zeros() {
     unnegotiated_hid.on_transport_ready();
     assert(unnegotiated_hid.mark_report_accepted({}));
     assert(unnegotiated_hid.mark_mouse_report_accepted({}, 0));
-    unnegotiated.BeginSession(7, 2);
+    unnegotiated.BeginSession(7);
     unnegotiated.UsbReportAccepted({}, 0);
     unnegotiated.UsbMouseReportAccepted({}, 0, 0);
     assert(unnegotiated.CommandScopedArm(7, 2));
@@ -495,7 +518,7 @@ void Extended_pointer_faults_release_every_report_role(const bool scrolling) {
             }
         };
         drain(0);
-        executor.BeginSession(7, 2, false, true);
+        executor.BeginSession(7, false, true);
         drain(0);
         assert(executor.CommandScopedArm(7, 2));
         // Move first, then hold across another absolute move and a wait; release is balanced.
@@ -589,7 +612,7 @@ void Extended_click_bytes_preserve_position_and_separate_edges() {
                     }
                 };
                 accept(0); accept(0);
-                executor.BeginSession(7, 2, false, true);
+                executor.BeginSession(7, false, true);
                 accept(0); accept(0);
                 assert(executor.CommandScopedArm(7, 2));
                 std::vector<std::uint8_t> body{0,0,1,0,8,4,0x34,0x12,0x45,0x23};
@@ -649,7 +672,7 @@ void Extended_drag_bytes_keep_buttons_with_absolute_coordinates() {
             }
         };
         accept(0); accept(0);
-        executor.BeginSession(7, 2, false, true); accept(0); accept(0);
+        executor.BeginSession(7, false, true); accept(0); accept(0);
         assert(executor.CommandScopedArm(7, 2));
         const auto payload = Envelope(Id(84),5000,7,{0,0,1,0,8,4,0x34,0x12,0x45,0x23,10,1,1,8,4,0x56,0x34,0x67,0x45,2,2,hold,0,11,1,1,7,0});
         assert(executor.HandleAuthenticated(7,Frame(2,payload),10));
@@ -693,7 +716,7 @@ void Extended_held_glide_keeps_button_on_every_report() {
         }
     };
     accept(); accept();
-    executor.BeginSession(7, 2, false, true); accept(); accept();
+    executor.BeginSession(7, false, true); accept(); accept();
     assert(executor.CommandScopedArm(7, 2));
     const auto payload = Envelope(Id(86),5000,7,{0,0,1,0, 8,4,0x34,0x12,0x45,0x23, 10,1,1,
         8,4,0x00,0x20,0x00,0x30, 8,4,0x00,0x30,0x00,0x38, 8,4,0x56,0x34,0x67,0x45,
@@ -737,7 +760,7 @@ void Extended_scroll_bytes_follow_positioning_collection() {
         }
     };
     accept(0); accept(0);
-    executor.BeginSession(7,2,false,true); accept(0); accept(0);
+    executor.BeginSession(7,false,true); accept(0); accept(0);
     assert(executor.CommandScopedArm(7,2));
     const auto payload = Envelope(Id(85),5000,7,{
         0,0,1,0,8,4,0x34,0x12,0x45,0x23,
@@ -779,7 +802,7 @@ void Extended_button_up_drains_both_ids_before_a_following_click() {
         else executor.UsbMouseReportAccepted(hid.desired_mouse_report(),0,now);
     };
     zero(0); zero(0);
-    executor.BeginSession(7,2,false,true); zero(0); zero(0);
+    executor.BeginSession(7,false,true); zero(0); zero(0);
     assert(executor.CommandScopedArm(7,2));
     const auto payload = Envelope(Id(82),5000,7,{0,0,1,0,10,1,1,8,4,255,127,0,64,11,1,1,6,5,3,40,0,40,0,7,0});
     assert(executor.HandleAuthenticated(7,Frame(2,payload),10));
@@ -812,12 +835,12 @@ int main() {
     Extended_pointer_faults_release_every_report_role(false);
     Extended_pointer_faults_release_every_report_role(true);
     Executes_with_exact_results_and_terminal_zero();
-    Enforces_sequence_expiry_busy_and_arm_consumption();
+    Enforces_arm_binding_expiry_busy_and_arm_consumption();
     Cancellation_aborts_after_release();
     Independent_watchdog_forces_zero_disarm_and_unknown_without_poll();
     Watchdog_scheduler_failure_fails_closed();
     Session_loss_classifies_started_as_unknown_and_prestart_as_aborted();
-    A_later_arm_resynchronizes_the_command_sequence();
+    Release_follows_the_session_sequence_after_frames_the_executor_never_sees();
     Mixed_input_preserves_order_and_requires_both_terminal_neutrals();
     Mixed_cancellation_neutralizes_and_duplicate_chunks_do_not_reexecute();
     Late_input_cancellation_is_rejected_after_the_original_terminal_result();

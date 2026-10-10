@@ -61,10 +61,11 @@ enum class InputReplayDecision : std::uint8_t {
     kDuplicate,
     kConflict,
     kOutOfOrder,
-    kWindowFull,
     kInvalid,
 };
 
+// The most recent admitted IDs of one authenticated epoch. A session outlives any fixed number
+// of commands, so admission never fails for capacity: the oldest (necessarily closed) ID leaves.
 class InputReplayWindow final {
   public:
     void Reset() noexcept;
@@ -84,6 +85,7 @@ class InputReplayWindow final {
     };
     std::array<Entry, 64> entries_{};
     std::size_t size_{};
+    std::size_t next_{};
 };
 
 struct InputResultEvidence {

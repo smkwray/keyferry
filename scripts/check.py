@@ -496,6 +496,7 @@ def run_cpp_check(compiler: str) -> None:
                 arguments.append(str(ROOT / "protocol/vectors/local-endpoint-diagnostic.hex"))
             if name == "secure-endpoint-test":
                 arguments.append(str(ROOT / "protocol/vectors/typing-stress.hex"))
+                arguments.append(str(ROOT / "protocol/vectors/pointer-session.hex"))
             run(arguments, cwd=tmp)
 
 

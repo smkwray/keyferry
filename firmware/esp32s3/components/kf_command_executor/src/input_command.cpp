@@ -256,6 +256,7 @@ bool ParseInputChunk(const std::uint8_t* body, const std::size_t length,
 void InputReplayWindow::Reset() noexcept {
     entries_.fill({});
     size_ = 0;
+    next_ = 0;
 }
 
 InputReplayDecision InputReplayWindow::Admit(
@@ -287,10 +288,15 @@ InputReplayDecision InputReplayWindow::Admit(
     if (chunk_index != 0) {
         return InputReplayDecision::kOutOfOrder;
     }
-    if (size_ == entries_.size()) {
-        return InputReplayDecision::kWindowFull;
+    // Execution is serialized: once a new ID is admitted no earlier ID may continue. Every
+    // retained ID is then closed, so the oldest can make room without reopening any command.
+    for (auto& entry : entries_) {
+        entry.closed = true;
     }
-    auto& entry = entries_[size_++];
+    auto& entry = entries_[next_];
+    next_ = (next_ + 1) % entries_.size();
+    size_ = std::min(size_ + 1, entries_.size());
+    entry = {};
     entry.command_id = command_id;
     entry.chunk_count = chunk_count;
     entry.next_chunk = 1;
