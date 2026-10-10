@@ -15,14 +15,15 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $projectRoot
 $logicalCpus = [Environment]::ProcessorCount
-$buildJobCeiling = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
+$cpuPercent, $buildJobCeiling = [int[]]((python (Join-Path $PSScriptRoot 'build_governor.py') --budget) -split ' ')
+if ($LASTEXITCODE -ne 0) { throw 'Build CPU budget is unavailable.' }
 $buildJobs = if ($env:CARGO_BUILD_JOBS) {
     [Math]::Min($buildJobCeiling, [Math]::Max(1, [int]$env:CARGO_BUILD_JOBS))
 } else { $buildJobCeiling }
 $env:CARGO_BUILD_JOBS = [string]$buildJobs
 python scripts/check_process_spawns.py
 if ($LASTEXITCODE -ne 0) { throw 'Process spawning policy failed.' }
-Write-Output "build concurrency: $buildJobs jobs (project.toml cpu_percent of $logicalCpus logical CPUs)"
+Write-Output "build concurrency: $buildJobs jobs (cpu_percent $cpuPercent of $logicalCpus logical CPUs)"
 # Panic locations embed source paths. Map the home, Cargo, and project prefixes (last match wins)
 # so no builder's account reaches a release binary; check_public_tree.py rejects any that remain.
 $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }

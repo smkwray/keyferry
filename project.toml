@@ -7,7 +7,12 @@ created = "2026-09-01"
 
 [build]
 # Single cap for every local build: share of logical CPUs (owner, 2026-10-10).
+# scripts/build_governor.py budget() is the only reader.
 cpu_percent = 50
+
+# Per-host override by hostname (D-20261010-07): more cores without oversubscription.
+[build.hosts.example-host]
+cpu_percent = 75
 
 [name_policy]
 minimum_length = 3

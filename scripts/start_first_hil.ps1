@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
+$null, $buildJobs = [int[]]((python (Join-Path $PSScriptRoot 'build_governor.py') --budget) -split ' ')
+if ($LASTEXITCODE -ne 0) { throw 'Build CPU budget is unavailable.' }
 $runtimeConfig = Join-Path $projectRoot 'secrets\first-hil\keyferryd\runtime.json'
 if (-not (Test-Path -LiteralPath $runtimeConfig -PathType Leaf)) {
     throw 'Private first-HIL runtime configuration is absent.'

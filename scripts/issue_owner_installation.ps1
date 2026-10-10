@@ -24,7 +24,8 @@ if ([string]::IsNullOrWhiteSpace($OwnerKit)) {
 $installationRoot = Join-Path $projectRoot 'secrets\installations'
 $installation = Join-Path $installationRoot $InstallationName
 $pairing = Join-Path $projectRoot 'target\debug\keyferry-pairing.exe'
-$buildJobs = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
+$null, $buildJobs = [int[]]((python (Join-Path $PSScriptRoot 'build_governor.py') --budget) -split ' ')
+if ($LASTEXITCODE -ne 0) { throw 'Build CPU budget is unavailable.' }
 
 function Convert-SecretToText {
     param([Security.SecureString]$Secret)

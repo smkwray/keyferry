@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -14,8 +13,7 @@ from pathlib import Path
 import build_governor
 
 ROOT = Path(__file__).resolve().parents[1]
-CPU_PERCENT = int(re.search(r"(?m)^cpu_percent\s*=\s*(\d+)", (ROOT / "project.toml").read_text(encoding="utf-8")).group(1))
-BUILD_JOB_CEILING = max(1, (os.cpu_count() or 1) * CPU_PERCENT // 100)
+CPU_PERCENT, BUILD_JOB_CEILING = build_governor.budget()
 BUILD_JOBS = min(BUILD_JOB_CEILING,
                  max(1, int(os.environ.get("CARGO_BUILD_JOBS", str(BUILD_JOB_CEILING)))))
 

@@ -3,6 +3,7 @@
 
 Other hosts pass through. Nested entry points verify job membership rather than
 trusting an environment flag. Windows handles release leases on process death.
+budget() is the only reader of project.toml [build]; scripts use --budget.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from ctypes import wintypes as W
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import time
@@ -21,11 +23,17 @@ ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "Global\\KeyferryBuildCpuV1"
 
 
-def budget() -> tuple[int, int]:
-    percent = tomllib.loads((ROOT / "project.toml").read_text())["build"]["cpu_percent"]
+def budget(build: dict | None = None, host: str | None = None,
+           cpus: int | None = None) -> tuple[int, int]:
+    """(cpu_percent, job ceiling): [build.hosts.<HOST>] overrides the [build] default."""
+    if build is None:
+        build = tomllib.loads((ROOT / "project.toml").read_text())["build"]
+    host = (host or socket.gethostname()).split(".")[0].upper()
+    hosts = {name.upper(): value for name, value in build.get("hosts", {}).items()}
+    percent = hosts.get(host, build)["cpu_percent"]
     if type(percent) is not int or not 1 <= percent <= 100:
-        raise ValueError("build.cpu_percent must be an integer in 1..100")
-    return percent, max(1, (os.cpu_count() or 1) * percent // 100)
+        raise ValueError("build cpu_percent must be an integer in 1..100")
+    return percent, max(1, (cpus or os.cpu_count() or 1) * percent // 100)
 
 
 if os.name == "nt":
@@ -193,13 +201,15 @@ def run(command: list[str], receipt: Path | None = None) -> int:
         # Closing the private job below kills any remaining descendants.
         accounting = Accounting()
         checked(K.QueryInformationJobObject(job, 1, C.byref(accounting), C.sizeof(accounting), None))
+        memory = Extended()
+        checked(K.QueryInformationJobObject(job, 9, C.byref(memory), C.sizeof(memory), None))
         code = W.DWORD()
         checked(K.GetExitCodeProcess(process, C.byref(code)))
-        data = dict(command=command, slots=len(leases), cpu_percent=percent,
-                    queue_seconds=round(queue_seconds, 3),
+        data = dict(command=command, host=socket.gethostname(), slots=len(leases),
+                    cpu_percent=percent, queue_seconds=round(queue_seconds, 3),
                     wall_seconds=round(time.perf_counter() - start, 3),
                     cpu_seconds=round((accounting.user + accounting.kernel) / 10_000_000, 3),
-                    exit_code=code.value)
+                    peak_memory_mib=memory.peak_job // 2**20, exit_code=code.value)
         print("build measurement: " + json.dumps(data), flush=True)
         if receipt:
             receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -220,11 +230,16 @@ def run(command: list[str], receipt: Path | None = None) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--budget", action="store_true",
+                        help="print this host's cpu_percent and job ceiling")
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.probe:
         raise SystemExit(0 if governed() else 1)
+    if args.budget:
+        print(*budget())
+        raise SystemExit(0)
     command = args.command
     if command[:1] == ["--"]:
         command = command[1:]

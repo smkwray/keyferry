@@ -59,9 +59,10 @@ if (-not (Test-Path -LiteralPath $idfTools -PathType Container)) {
 
 Push-Location $projectRoot
 try {
-    $buildJobCeiling = [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * [int](([regex]::Match((Get-Content -LiteralPath (Join-Path $projectRoot 'project.toml') -Raw), '(?m)^cpu_percent\s*=\s*(\d+)')).Groups[1].Value) / 100))
+    $cpuPercent, $buildJobCeiling = [int[]]((python (Join-Path $PSScriptRoot 'build_governor.py') --budget) -split ' ')
+    if ($LASTEXITCODE -ne 0) { throw 'Build CPU budget is unavailable.' }
     if ($Jobs -gt $buildJobCeiling) {
-        throw "Requested build concurrency $Jobs exceeds the project.toml cpu_percent ceiling of $buildJobCeiling jobs."
+        throw "Requested build concurrency $Jobs exceeds the cpu_percent $cpuPercent ceiling of $buildJobCeiling jobs."
     }
     $buildJobs = [Math]::Min([int]$env:CARGO_BUILD_JOBS, $(if ($Jobs -eq 0) { $buildJobCeiling } else { $Jobs }))
     if ($MscMemoryProbe -and
@@ -69,13 +70,12 @@ try {
          -not (Test-Path -LiteralPath (Join-Path $projectRoot $BaselineDir) -PathType Container))) {
         throw 'MscMemoryProbe requires -BaselineDir build/<name> from a completed matching baseline build.'
     }
-    Write-Output "Build concurrency: $buildJobs jobs (cpu_percent ceiling: $buildJobCeiling)"
-    $sourceEpoch = (git log -1 --format=%ct).Trim()
-    if ($sourceEpoch -notmatch '^[0-9]+$') {
-        throw 'Could not derive deterministic SOURCE_DATE_EPOCH from Git.'
+    Write-Output "Build concurrency: $buildJobs jobs (cpu_percent $cpuPercent ceiling: $buildJobCeiling)"
+    # A caller-supplied epoch wins, so a Git-less synced checkout on a remote builder can build.
+    if (-not $env:SOURCE_DATE_EPOCH) { $env:SOURCE_DATE_EPOCH = "$(git log -1 --format=%ct)".Trim() }
+    if ($env:SOURCE_DATE_EPOCH -notmatch '^[0-9]+$') {
+        throw 'SOURCE_DATE_EPOCH is invalid or could not be derived from Git.'
     }
-    if (-not $env:SOURCE_DATE_EPOCH) { $env:SOURCE_DATE_EPOCH = $sourceEpoch }
-    if ($env:SOURCE_DATE_EPOCH -notmatch '^[0-9]+$') { throw 'Invalid SOURCE_DATE_EPOCH.' }
     $env:IDF_PY_BUILD_JOBS = $buildJobs
     $env:CMAKE_BUILD_PARALLEL_LEVEL = $buildJobs
     $privateHeaderArgument = @()
@@ -103,6 +103,16 @@ try {
     $env:CCACHE_DIR = 'C:\tools\keyferry-idf-ccache'
     $env:IDF_CCACHE_ENABLE = if ($NoCcache) { '0' } else { '1' }
     $env:IDF_TOOLS_PATH = $idfTools
+    # export.ps1 selects the environment by the PATH interpreter's version, so put the pinned
+    # environment's own base interpreter first; a builder's default Python may differ.
+    $pythonEnvironments = @(Get-ChildItem -LiteralPath (Join-Path $idfTools 'python_env') -Directory)
+    if ($pythonEnvironments.Count -ne 1) { throw 'Expected exactly one pinned ESP-IDF Python environment.' }
+    $pythonHome = @(Get-Content -LiteralPath (Join-Path $pythonEnvironments[0].FullName 'pyvenv.cfg') |
+        Where-Object { $_ -match '^home\s*=' } | ForEach-Object { ($_ -split '=', 2)[1].Trim() })
+    if ($pythonHome.Count -ne 1 -or -not (Test-Path -LiteralPath (Join-Path $pythonHome[0] 'python.exe') -PathType Leaf)) {
+        throw 'The pinned ESP-IDF Python environment has no installed base interpreter.'
+    }
+    $env:PATH = "$($pythonHome[0]);$env:PATH"
     . $idfExport | Out-Null
     if (-not $NoCcache -and -not (Get-Command ccache -ErrorAction SilentlyContinue)) {
         throw 'Pinned ESP-IDF tools do not provide Windows ccache; use -NoCcache explicitly.'

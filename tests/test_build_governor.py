@@ -3,10 +3,12 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 
 from scripts.build_governor import budget
@@ -14,6 +16,42 @@ from scripts.build_governor import budget
 ROOT = Path(__file__).resolve().parents[1]
 GOVERNOR = ROOT / "scripts/build_governor.py"
 PERCENT, CEILING = budget()
+
+
+class BudgetTests(unittest.TestCase):
+    BUILD = {"cpu_percent": 50, "hosts": {"example-host": {"cpu_percent": 75}}}
+
+    def test_default_and_host_override(self):
+        self.assertEqual(budget(self.BUILD, "example-host", 20), (50, 10))
+        self.assertEqual(budget(self.BUILD, "example-host", 32), (75, 24))
+        self.assertEqual(budget(self.BUILD, "example-host.local", 32), (75, 24))
+        self.assertEqual(budget({"cpu_percent": 50}, "example-host", 1), (50, 1))
+
+    def test_invalid_percent_fails_closed(self):
+        for value in (0, 101, "75", 75.0, True):
+            with self.assertRaises(ValueError):
+                budget({"cpu_percent": 50, "hosts": {"example-host": {"cpu_percent": value}}}, "example-host", 32)
+        with self.assertRaises(KeyError):
+            budget({"cpu_percent": 50, "hosts": {"example-host": {}}}, "example-host", 32)
+
+    def test_project_budget_has_one_reader(self):
+        # Every build entry point asks the governor; none parses project.toml itself.
+        self.assertEqual(budget(tomllib.loads((ROOT / "project.toml").read_text())["build"],
+                                "NO-SUCH-HOST", 20), (50, 10))
+        parse = re.compile(r"""cpu_percent(\\s|\[\[:space:\]\])|\[["']cpu_percent["']\]""")
+        readers = [path.name for path in (ROOT / "scripts").iterdir()
+                   if path.is_file() and parse.search(path.read_text(errors="ignore"))]
+        self.assertEqual(readers, ["build_governor.py"])
+        printed = subprocess.run([sys.executable, str(GOVERNOR), "--budget"], capture_output=True,
+                                 text=True, check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(printed.stdout.split(), [str(PERCENT), str(CEILING)])
+
+    def test_remote_builder_is_governed_and_verifies_transfers(self):
+        script = (ROOT / "scripts/remote_build.ps1").read_text()
+        self.assertIn("python scripts/build_governor.py --receipt", script)
+        self.assertIn("SHA256 mismatch after transfer", script)
+        self.assertIn("ls-files -- '*.lock'", script)
+        self.assertIn("if ($code) { throw", script)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows Job Objects")
