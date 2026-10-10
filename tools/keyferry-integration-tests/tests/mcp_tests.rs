@@ -111,6 +111,7 @@ async fn harness(
         pointer: [0.5, 0.5],
         revision: 0,
         at: Instant::now(),
+        path: Vec::new(),
     }));
     let observed = pointer.clone();
     let app = daemon.router().layer(axum::middleware::from_fn(
@@ -127,8 +128,10 @@ async fn harness(
                     let value: Value = serde_json::from_slice(&bytes).unwrap();
                     for action in value["actions"].as_array().unwrap() {
                         if action["type"] == "move_absolute" || action["type"] == "drag" {
-                            observed.lock().unwrap().pointer =
-                                [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()];
+                            let at = [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()];
+                            let mut visual = observed.lock().unwrap();
+                            visual.pointer = at;
+                            visual.path.push(at);
                         } else {
                             observed.lock().unwrap().revision += 1;
                         }
@@ -598,4 +601,117 @@ async fn text_checkpoint_requests_capture_ocr_on_every_poll() {
     .unwrap();
     task.abort();
     fs::remove_dir_all(root).unwrap();
+}
+
+/// Largest distance between consecutive requested reports, from the session's start position.
+fn largest_jump(path: &[[f64; 2]]) -> f64 {
+    path.windows(2)
+        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+        .fold(0.0, f64::max)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_agent_pointer_motion_glides_including_calibration_and_split_batches() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        let calibration = s.call("calibrate", &json!({}), &c).unwrap();
+        assert_eq!(calibration["structuredContent"]["bound"], true);
+        let probes = s.frames.pointer.as_ref().unwrap().lock().unwrap().path.len();
+        assert!(probes > 10 * 12, "every probe glides: {probes} reports");
+        s.call("screenshot", &json!({}), &c).unwrap();
+        for (name, args) in [
+            ("move", json!({"x":150,"y":110})),
+            ("click", json!({"x":280,"y":200,"button":"right"})),
+            ("click", json!({"x":60,"y":200,"double":true})),
+            ("drag", json!({"from_x":280,"from_y":60,"to_x":60,"to_y":200})),
+            ("scroll", json!({"x":280,"y":200,"dx":0,"dy":-2})),
+        ] {
+            let result = s.call(name, &args, &c).unwrap();
+            assert_eq!(result["isError"], false, "{name}: {result}");
+            assert_eq!(result["structuredContent"]["settled"], true, "{name}");
+        }
+        // Far-apart clicks overflow one input sequence; they split, still gliding throughout.
+        let actions: Vec<Value> = (0..16)
+            .map(|i| json!({"tool":"click","arguments":{"x":if i % 2 == 0 {40} else {290},"y":40 + 10 * i}}))
+            .collect();
+        let response = s
+            .call("batch", &json!({"actions":actions,"settle":false,"return_screenshot":false}), &c)
+            .unwrap();
+        let result = &response["structuredContent"];
+        assert_eq!(response["isError"], false, "{result}");
+        assert!(result["command_count"].as_u64().unwrap() > 1, "{result}");
+        let receipts = result["actions"].as_array().unwrap();
+        assert_eq!(receipts.len(), 16);
+        for receipt in receipts {
+            assert_eq!(receipt["command"]["outcome"], "EMITTED");
+            let id = uuid::Uuid::parse_str(receipt["command"]["command_id"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(transport.execution_count(id), 1);
+        }
+        let visual = s.frames.pointer.as_ref().unwrap().lock().unwrap();
+        // The session's first report is the documented origin, where this cursor starts.
+        assert_eq!(visual.path[0], routines::GLIDE.origin);
+        let jump = largest_jump(&visual.path);
+        assert!(jump < 0.12, "largest step {jump}");
+        assert_eq!(s.presumed(), visual.path.last().copied());
+        assert!(!transport.is_remotely_armed());
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn faulted_glides_never_replay_and_track_only_possible_starts() {
+    for fault in [
+        SimulationFault::LostAfterStart,
+        SimulationFault::BeforeAccept,
+    ] {
+        let (mut s, transport, _, task) = harness(vec![fault], true).await;
+        let root = s.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let c = AtomicBool::new(false);
+            s.call("screenshot", &json!({}), &c).unwrap();
+            let error = s
+                .call(
+                    "drag",
+                    &json!({"from_x":40,"from_y":40,"to_x":290,"to_y":200,"uncalibrated":true}),
+                    &c,
+                )
+                .unwrap_err();
+            assert_eq!(error["code"], "command.failed_or_unknown", "{error}");
+            if let Some(id) = error["command"]["command_id"].as_str() {
+                assert!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()) <= 1);
+            }
+            assert!(!transport.is_remotely_armed());
+            let path = s
+                .frames
+                .pointer
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .path
+                .clone();
+            if fault == SimulationFault::LostAfterStart {
+                // An interrupted glide stops on the segment toward its end; presume the end.
+                assert_eq!(error["command"]["outcome"], "UNKNOWN");
+                assert_eq!(s.presumed(), path.last().copied());
+            } else {
+                assert_eq!(
+                    s.presumed(),
+                    None,
+                    "a command that never started moves nothing"
+                );
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        fs::remove_dir_all(root).unwrap();
+    }
 }
