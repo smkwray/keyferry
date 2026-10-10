@@ -76,7 +76,7 @@ def descriptor():
     return data
 
 
-def atom_usb_descriptors(image, report):
+def no_msc_usb_descriptors(image, report):
     # Exact three-interface USB personality, including unchanged IF0/IF1.
     config = bytes.fromhex(
         "09025b000301008032"
@@ -84,9 +84,10 @@ def atom_usb_descriptors(image, report):
         "0904010002030000050921110100012222000705020340000a0705820340000a"
         "09040200010300000609211101000122"
     ) + len(report).to_bytes(2, "little") + bytes.fromhex("0705830308000a")
-    require(config in image, "Atom IF0/IF1/IF2 descriptor differs or MSC is present")
-    require(bytes.fromhex("12010002000000403a300440020101020301") in image,
-            "Atom VID/PID or bcdDevice 0102 differs")
+    require(config in image, "HID IF0/IF1/IF2 descriptor differs or MSC is present")
+    device = bytes.fromhex("12010002000000403a300440020101020301")
+    require(device in image,
+            "HID VID/PID or bcdDevice 0102 differs")
 
 
 def inspect_build(build, data):
@@ -110,16 +111,17 @@ def inspect_build(build, data):
         from check_msc_size_probe import inspect_file_handoff
         inspect_file_handoff(build)
         require(flash.get("0x120000") == "keyferry_hil_endpoint.bin", "app-only offset differs")
-    elif board == "m5stack_atoms3_lite":
+    elif board in ("m5stack_atoms3_lite", "lilygo_t_dongle_s3"):
         for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
-            require(token in cache, "Atom storage build enabled")
+            require(token in cache, "Unqualified storage build enabled")
         for token in ("# CONFIG_TINYUSB_MSC_ENABLED is not set", "# CONFIG_SPIRAM is not set",
                       "# CONFIG_TINYUSB_CDC_ENABLED is not set"):
-            require(token in config, "Atom storage/PSRAM/CDC differs")
-        atom_usb_descriptors(image, data)
-        require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Atom first-install offset differs")
-        from check_esp_transport import build_checks
-        build_checks(build)
+            require(token in config, "No-MSC storage/PSRAM/CDC differs")
+        no_msc_usb_descriptors(image, data)
+        require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Factory app offset differs")
+        if board == "m5stack_atoms3_lite":
+            from check_esp_transport import build_checks
+            build_checks(build)
     else:
         require(False, "unsupported extended-pointer board: " + board)
 
