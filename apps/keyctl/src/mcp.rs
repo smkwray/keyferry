@@ -1713,6 +1713,17 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         if region.is_some_and(|r| !r.valid(&first)) {
             return Err(failure("input.region"));
         }
+        // A cursor or small dialog never moves the frame mean past the noise margin. With a
+        // fresh animation mask from the last action, use the action observer's pixel test too.
+        let mask = self
+            .animation
+            .as_ref()
+            .filter(|(_, mask, at)| {
+                at.elapsed() < Duration::from_secs(30)
+                    && mask.small()
+                    && mask.changed(&first, &first).is_ok()
+            })
+            .map(|(_, mask, _)| mask.clone());
         let start = Instant::now();
         let mut stable = Instant::now();
         let mut previous = first.clone();
@@ -1744,6 +1755,14 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             }
             let matched = if name == "wait_for_change" {
                 baseline > 0.01
+                    || match &mask {
+                        Some(mask) => {
+                            mask.changed_region(&first, &next, region)
+                                .map_err(failure)?
+                                >= 6
+                        }
+                        None => false,
+                    }
             } else {
                 samples >= 3 && stable.elapsed() >= Duration::from_millis(300)
             };

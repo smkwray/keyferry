@@ -92,6 +92,8 @@ struct FrameOptions {
     source: Option<String>,
     size: Option<(u32, u32)>,
     scale: Option<(u32, u32)>,
+    /// Proportional downscale inside ffmpeg so no side exceeds this; never upscales.
+    bound: Option<u32>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -151,6 +153,7 @@ fn parse(args: &[String]) -> Result<Request, Error> {
         source,
         size,
         scale,
+        bound: None,
     }))
 }
 
@@ -496,7 +499,7 @@ pub fn select_source<'a>(devices: &'a [Device], source: Option<&str>) -> Result<
                 !["webcam", "camera", "facetime", "virtual"]
                     .iter()
                     .any(|s| name.contains(s))
-                    && ["capture", "hdmi", "hagibis", "ms2130", "elgato"]
+                    && ["capture", "hdmi", "hagibis", "ms2130", "elgato", "cam link"]
                         .iter()
                         .any(|s| name.contains(s))
             }
@@ -552,11 +555,21 @@ fn frame_args(backend: Backend, device: &Device, options: &FrameOptions) -> Vec<
         Backend::V4l2 => device.id.clone(),
     };
     args.extend(["-i".into(), input, "-map".into(), "0:v:0".into()]);
-    let filter = options.scale.map_or_else(
-        || "fps=15".to_owned(),
-        |(w, h)| format!("fps=15,scale={w}:{h}:flags=fast_bilinear"),
-    );
-    args.extend(["-vf".into(), filter]);
+    // At most 15 fps by dropping only. The fps filter duplicates frames to fill input gaps,
+    // so a consumer slower than the source (4K PNG) fell further behind on every frame.
+    let mut filter = "select='isnan(prev_selected_t)+gte(t-prev_selected_t,0.06)'".to_owned();
+    if let Some((w, h)) = options.scale {
+        filter += &format!(",scale={w}:{h}:flags=fast_bilinear");
+    } else if let Some(b) = options.bound {
+        // Area-average large modes before PNG encode/decode; cursor outlines keep their weight.
+        filter += &format!(",scale=w='min(iw,{b})':h='min(ih,{b})':force_original_aspect_ratio=decrease:flags=area");
+    }
+    args.extend([
+        "-vf".into(),
+        filter,
+        "-fps_mode".into(),
+        "passthrough".into(),
+    ]);
     args.extend(
         [
             "-an",
@@ -658,6 +671,8 @@ pub fn stream_setup(source: Option<&str>) -> Result<(String, Vec<String>), &'sta
         size: (backend == Backend::Dshow && device.id.contains("vid_345f&pid_2130"))
             .then_some((1280, 720)),
         scale: None,
+        // Cards without a scaler (Cam Link 4K) deliver only their HDMI input mode.
+        bound: Some(super::frames::MAX_SIDE),
     };
     Ok((device.id.clone(), frame_args(backend, device, &options)))
 }

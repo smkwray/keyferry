@@ -109,6 +109,10 @@ fn default_selection_needs_one_recognized_non_webcam() {
     )
     .unwrap();
     assert_eq!(select_source(&devices, None).unwrap().name, "Hagibis");
+    assert!(recognized(&Device {
+        name: "Cam Link 4K".into(),
+        id: "cam".into(),
+    }));
     assert_eq!(
         select_source(&devices, Some(&devices[0].id)).unwrap().name,
         "Logitech Webcam C925e"
@@ -148,11 +152,13 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
         source: None,
         size: Some((1920, 1080)),
         scale: Some((960, 540)),
+        bound: None,
     };
     let device = Device {
         name: "capture".into(),
         id: "3".into(),
     };
+    let rate = "select='isnan(prev_selected_t)+gte(t-prev_selected_t,0.06)'";
     for (backend, input) in [
         (Backend::Dshow, "video=3"),
         (Backend::Avfoundation, "3:none"),
@@ -161,9 +167,28 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
         let values = frame_args(backend, &device, &options);
         assert!(values.windows(2).any(|pair| pair == ["-i", input]));
         assert!(!values.iter().any(|arg| arg == "-frames:v"));
+        assert!(values.windows(2).any(|pair| pair
+            == [
+                "-vf".to_owned(),
+                format!("{rate},scale=960:540:flags=fast_bilinear")
+            ]));
+        // Rate limiting only drops; no filter or muxer duplicates frames into a backlog.
+        assert!(!values.iter().any(|value| value.contains("fps=")));
         assert!(values
             .windows(2)
-            .any(|pair| pair == ["-vf", "fps=15,scale=960:540:flags=fast_bilinear"]));
+            .any(|pair| pair == ["-fps_mode", "passthrough"]));
+        let bounded = FrameOptions {
+            out: "private.png".into(),
+            source: None,
+            size: None,
+            scale: None,
+            bound: Some(1280),
+        };
+        assert!(frame_args(backend, &device, &bounded).windows(2).any(|pair| pair
+            == [
+                "-vf".to_owned(),
+                format!("{rate},scale=w='min(iw,1280)':h='min(ih,1280)':force_original_aspect_ratio=decrease:flags=area")
+            ]));
         assert_eq!(values.last().unwrap(), "pipe:1");
         assert!(!values.iter().any(|value| value.contains("private.png")));
         if backend == Backend::Dshow {
