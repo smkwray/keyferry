@@ -14,12 +14,15 @@ lan_arguments=
 # Bluetooth stays on by default while stick Wi-Fi authentication is unreliable (firmware defect
 # under diagnosis); --bluetooth off makes a controller Wi-Fi/Tailscale-only.
 bluetooth=auto
+bluetooth_explicit=false
+lan_explicit=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --controller) [ "$#" -ge 2 ] || usage; controller=$2; shift 2 ;;
         --installation) [ "$#" -ge 2 ] || usage; installation=$2; shift 2 ;;
         --lan-interface)
             [ "$#" -ge 2 ] || usage
+            lan_explicit=true
             name=$2
             case "$name" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
             case "$name" in [A-Za-z0-9]*) ;; *) usage ;; esac
@@ -32,6 +35,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --bluetooth)
             [ "$#" -ge 2 ] || usage
+            bluetooth_explicit=true
             case "$2" in off|auto) bluetooth=$2 ;; *) usage ;; esac
             shift 2
             ;;
@@ -40,6 +44,38 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$controller" ] || usage
+# Program-only refreshes preserve the existing transport choices unless explicitly changed.
+existing_agent="$HOME/Library/LaunchAgents/io.github.smkwray.keyferryd.plist"
+if [ -z "$installation" ] && [ -f "$existing_agent" ]; then
+    old_lan=
+    old_bluetooth=
+    index=0
+    while value=$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$index" "$existing_agent" 2>/dev/null); do
+        index=$((index + 1))
+        case "$value" in
+            --lan-interface|--bluetooth)
+                argument=$(/usr/libexec/PlistBuddy -c "Print :ProgramArguments:$index" "$existing_agent")
+                index=$((index + 1))
+                if [ "$value" = --lan-interface ]; then
+                    case "$argument" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
+                    old_lan="${old_lan}${old_lan:+ }$argument"
+                else
+                    case "$argument" in off|auto) old_bluetooth=$argument ;; *) usage ;; esac
+                fi
+                ;;
+        esac
+    done
+    if [ "$lan_explicit" = false ]; then
+        [ -n "$old_lan" ] || { echo "installed LAN settings are missing" >&2; exit 1; }
+        lan_interfaces=$old_lan
+        lan_arguments=
+        for name in $lan_interfaces; do lan_arguments="$lan_arguments --lan-interface $name"; done
+    fi
+    if [ "$bluetooth_explicit" = false ]; then
+        [ -n "$old_bluetooth" ] || { echo "installed Bluetooth settings are missing" >&2; exit 1; }
+        bluetooth=$old_bluetooth
+    fi
+fi
 # Default: listen for sticks on every active private home/office network the computer joins.
 if [ -z "$lan_interfaces" ]; then
     lan_interfaces=auto
@@ -92,7 +128,6 @@ had_installed_app=false
 had_installed_installation=false
 had_launch_agent=false
 launch_agent_was_loaded=false
-verification_started=false
 
 for executable in "$source_controller" "$source_daemon" "$source_ble_bridge" "$source_pairing" "$source_cli"; do
     [ -f "$executable" ] && [ -x "$executable" ] || {
@@ -135,14 +170,9 @@ tree_hash() {
     ) | shasum -a 256 | awk '{print $1}'
 }
 
-stop_verification_daemon() {
-    launchctl kill TERM "$launch_domain/$launch_label" 2>/dev/null || true
-}
-
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
-    [ "$verification_started" != true ] || stop_verification_daemon
     if [ "$apply_started" = true ] && [ "$apply_succeeded" != true ]; then
         launchctl bootout "$launch_domain/$launch_label" 2>/dev/null || true
         pkill -TERM -f "$installed_controller" 2>/dev/null || true
@@ -234,7 +264,7 @@ if [ "$mode" = Plan ]; then
         "lan_interfaces=${lan_interfaces:-none}" \
         "bluetooth=$bluetooth" \
         "launch_agent=$launch_agent" \
-        'daemon_runs=only-while-keyferry-is-open'
+        'daemon_runs=at-user-login-independent-of-desktop-app'
     exit 0
 fi
 
@@ -355,10 +385,10 @@ if [ "$mode" = Apply ]; then
     /usr/libexec/PlistBuddy -c "Add :ProgramArguments:$argument_index string --bluetooth" "$plist_stage"
     argument_index=$((argument_index + 1))
     /usr/libexec/PlistBuddy -c "Add :ProgramArguments:$argument_index string $bluetooth" "$plist_stage"
-    # The agent defines the daemon's verified command but never starts on its own: the Keyferry
-    # app kickstarts it on launch and signals it on exit. It stays loaded between launches.
-    plutil -insert RunAtLoad -bool false "$plist_stage"
-    plutil -insert KeepAlive -bool false "$plist_stage"
+    # CoreBluetooth/TCC requires the logged-in user session: use a LaunchAgent, not a
+    # system LaunchDaemon. The daemon owns its BLE helper; closing the UI changes neither.
+    plutil -insert RunAtLoad -bool true "$plist_stage"
+    plutil -insert KeepAlive -bool true "$plist_stage"
     plutil -insert ProcessType -string Interactive "$plist_stage"
     plutil -insert ThrottleInterval -integer 5 "$plist_stage"
     plutil -insert StandardOutPath -string "$daemon_stdout" "$plist_stage"
@@ -387,19 +417,18 @@ plutil -lint "$launch_agent" >/dev/null
 expected_command="$installed_daemon --installation $installed_installation$lan_arguments --bluetooth $bluetooth"
 [ "$(plutil -extract StandardOutPath raw "$launch_agent")" = "$daemon_stdout" ] || exit 1
 [ "$(plutil -extract StandardErrorPath raw "$launch_agent")" = "$daemon_stderr" ] || exit 1
-[ "$(plutil -extract RunAtLoad raw "$launch_agent")" = false ] &&
-[ "$(plutil -extract KeepAlive raw "$launch_agent")" = false ] || {
-    echo "the launch agent must run only when the Keyferry app starts it" >&2
+[ "$(plutil -extract RunAtLoad raw "$launch_agent")" = true ] &&
+[ "$(plutil -extract KeepAlive raw "$launch_agent")" = true ] &&
+[ "$(plutil -extract ThrottleInterval raw "$launch_agent")" = 5 ] || {
+    echo "the launch agent must run at login and stay alive independently of the UI" >&2
     exit 1
 }
-# The daemon runs only while the Keyferry app is open. Verification starts it when it is not
-# already running, checks it, and stops it again.
+# Apply/Verify starts a stopped controller and leaves the independently supervised service running.
 launch_state=$(launchctl print "$launch_domain/$launch_label" 2>/dev/null) || {
     echo "the Keyferry launch agent is not loaded" >&2
     exit 1
 }
 if ! printf '%s\n' "$launch_state" | awk '$1 == "pid" && $2 == "=" {found = 1} END {exit !found}'; then
-    verification_started=true
     launchctl kickstart "$launch_domain/$launch_label"
 fi
 
@@ -491,20 +520,6 @@ if [ "$authorized" = true ] && [ -n "$tailscale_command" ]; then
     fi
 fi
 
-if [ "$verification_started" = true ]; then
-    stop_verification_daemon
-    attempts=0
-    while [ "$attempts" -lt 40 ] && kill -0 "$daemon_pid" 2>/dev/null; do
-        sleep 0.25
-        attempts=$((attempts + 1))
-    done
-    kill -0 "$daemon_pid" 2>/dev/null && {
-        echo "the installed daemon did not stop after verification" >&2
-        exit 1
-    }
-    verification_started=false
-fi
-
 if [ "$mode" = Apply ]; then
     if [ "$had_installed_app" = true ] && [ -d "$transaction_rollback" ]; then
         [ "$rollback" = "$HOME/Applications/.Keyferry.app.previous" ] || exit 90
@@ -518,4 +533,4 @@ if [ "$mode" = Apply ]; then
     apply_succeeded=true
 fi
 
-echo "Verification OK: Keyferry is installed as a controller and nearby gateway; its service runs only while Keyferry is open."
+echo "Verification OK: Keyferry is installed as a controller and nearby gateway; its service is running independently of the desktop app and starts at user login."

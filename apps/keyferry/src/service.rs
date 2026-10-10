@@ -1,9 +1,6 @@
-//! Keyferry's background service runs only while the desktop app is open (D-20260926-04).
-//!
-//! The installers define the service in exactly one verified place, a Task Scheduler task on
-//! Windows or a launchd agent on macOS, with no automatic start. The app starts it on launch and
-//! stops it on exit. Where no service is defined, as in a development run, both steps report
-//! [`ServiceOutcome::NotInstalled`] and change nothing.
+//! The installed controller runs at user login independently of the optional desktop UI.
+//! Starting attaches to the supervised service; an explicit stop unloads it until a later start.
+//! macOS uses the GUI user's LaunchAgent for CoreBluetooth/TCC, rather than a system daemon.
 
 use crate::tailnet::{bounded_lossy, output_with_timeout, DiscoveryError};
 use std::{
@@ -172,7 +169,7 @@ fn stop_task(schtasks: &Path, run: &mut Runner<'_>) -> Result<ServiceOutcome, St
 }
 
 // `kickstart` without `-k` leaves a running daemon alone. An agent that exists on disk but is not
-// loaded is loaded first; it has RunAtLoad=false, so loading alone starts nothing.
+// loaded is loaded first; RunAtLoad starts it and KeepAlive supervises it.
 fn start_agent(
     launchctl: &Path,
     domain: &str,
@@ -201,8 +198,8 @@ fn start_agent(
     Ok(ServiceOutcome::Started)
 }
 
-// SIGTERM ends the daemon; with KeepAlive=false launchd does not restart it, and the agent stays
-// loaded for the next launch.
+// An explicit stop unloads the agent so KeepAlive cannot immediately restart it.
+// Its definition remains on disk for the next login or explicit start.
 fn stop_agent(
     launchctl: &Path,
     domain: &str,
@@ -213,28 +210,11 @@ fn stop_agent(
     if !printed.success {
         return Ok(ServiceOutcome::NotInstalled);
     }
-    if launchd_pid(&printed.stdout).is_none() {
-        return Ok(ServiceOutcome::NotRunning);
-    }
     require(
-        run(&Invocation::new(
-            launchctl,
-            ["kill", "TERM", target.as_str()],
-        ))?,
+        run(&Invocation::new(launchctl, ["bootout", target.as_str()]))?,
         "launchd did not stop the service",
     )?;
     Ok(ServiceOutcome::Stopped)
-}
-
-/// The running process ID from `launchctl print`, which omits `pid` while the job is idle.
-fn launchd_pid(printed: &str) -> Option<u32> {
-    printed.lines().find_map(|line| {
-        let mut words = line.split_whitespace();
-        match (words.next(), words.next(), words.next(), words.next()) {
-            (Some("pid"), Some("="), Some(pid), None) => pid.parse().ok(),
-            _ => None,
-        }
-    })
 }
 
 fn require(completion: Completion, action: &str) -> Result<(), String> {
@@ -456,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_stop_signals_only_a_running_daemon_and_keeps_the_agent_loaded() {
+    fn macos_explicit_stop_unloads_the_running_agent() {
         let running =
             "gui/501/io.github.smkwray.keyferryd = {\n\tstate = running\n\tpid = 4242\n}\n";
         let mut script = Script::new([ok(running), ok("")]);
@@ -464,25 +444,17 @@ mod tests {
         assert_eq!(outcome, ServiceOutcome::Stopped);
         assert_eq!(
             script.commands()[1],
-            "/bin/launchctl | kill | TERM | gui/501/io.github.smkwray.keyferryd"
+            "/bin/launchctl | bootout | gui/501/io.github.smkwray.keyferryd"
         );
         assert!(script
             .commands()
             .iter()
-            .all(|command| !command.contains("bootout")));
+            .any(|command| command.contains("bootout")));
 
-        let mut script = Script::new([ok("state = not running\n")]);
+        let mut script = Script::new([ok("state = not running\n"), ok("")]);
         let outcome = macos(Some(PLIST)).stop(&mut |invocation| script.run(invocation));
-        assert_eq!(outcome, ServiceOutcome::NotRunning);
-        assert_eq!(script.seen.len(), 1);
-    }
-
-    #[test]
-    fn launchd_pid_reads_only_an_exact_pid_line() {
-        assert_eq!(launchd_pid("\tpid = 77\n"), Some(77));
-        assert_eq!(launchd_pid("\tlast exit code = 0\n"), None);
-        assert_eq!(launchd_pid("\tpid = 77 extra\n"), None);
-        assert_eq!(launchd_pid("\tpid = none\n"), None);
+        assert_eq!(outcome, ServiceOutcome::Stopped);
+        assert_eq!(script.seen.len(), 2);
     }
 
     #[test]
@@ -507,7 +479,7 @@ mod tests {
         assert!(windows.contains(&format!("$taskName = '{WINDOWS_TASK_NAME}'")));
         assert!(windows.contains("-MultipleInstances IgnoreNew"));
         assert!(macos.contains(&format!("launch_label={MACOS_LAUNCH_LABEL}\n")));
-        assert!(macos.contains("plutil -insert RunAtLoad -bool false"));
-        assert!(macos.contains("plutil -insert KeepAlive -bool false"));
+        assert!(macos.contains("plutil -insert RunAtLoad -bool true"));
+        assert!(macos.contains("plutil -insert KeepAlive -bool true"));
     }
 }

@@ -18,18 +18,28 @@ const DEVICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// Time allowed for remaining tasks after they are dropped at runtime shutdown.
 const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-/// The daemon runs only while the Keyferry app is open (D-20260926-04); the app's service
-/// manager stops it with SIGTERM on macOS. A stop request ends device work through
+/// The login service runs independently of the optional desktop UI. A stop request ends work through
 /// [`keyferryd::Daemon::shutdown`], then dropping every task closes the remaining sockets and
 /// kills the macOS Bluetooth helper, whose handle is `kill_on_drop`.
 fn main() -> Result<(), keyferryd::DaemonError> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "keyferryd service\n  keyferryd [--port PORT]\n  keyferryd --config PATH [--port PORT] [--ble [--ble-single-shot]] [--tailnet-address IP] [--tailnet-port PORT]\n  keyferryd --installation DIRECTORY [--port PORT] [--ble-single-shot | --bluetooth off|auto] [--lan-interface NAME|auto]... [--tailnet-address IP] [--tailnet-port PROBE_PORT]\n\nAn issued installation enables nearby Bluetooth (unless --bluetooth off) and follows the local Tailscale IPv4 address automatically unless --tailnet-address is supplied. Each explicit --lan-interface enables owner-authorized device TLS and directed discovery on that interface only."
+        );
+        return Ok(());
+    }
+    let options = parse_options(&args)?;
+    // Hold ownership through shutdown, before waiting for credentials or starting transports.
+    // Process death releases this OS lock without stale-PID recovery.
+    let _instance = keyferryd::FileTokenStore::default().lock_instance()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let started = Arc::new(OnceLock::new());
     let result = runtime.block_on(async {
         let result = tokio::select! {
-            result = run(Arc::clone(&started)) => result,
+            result = run(options, Arc::clone(&started)) => result,
             () = shutdown_signal() => {
                 println!("keyferryd stopping");
                 Ok(())
@@ -86,15 +96,10 @@ async fn shutdown_signal() {
     std::future::pending::<()>().await
 }
 
-async fn run(started: Arc<OnceLock<keyferryd::Daemon>>) -> Result<(), keyferryd::DaemonError> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!(
-            "keyferryd service\n  keyferryd [--port PORT]\n  keyferryd --config PATH [--port PORT] [--ble [--ble-single-shot]] [--tailnet-address IP] [--tailnet-port PORT]\n  keyferryd --installation DIRECTORY [--port PORT] [--ble-single-shot | --bluetooth off|auto] [--lan-interface NAME|auto]... [--tailnet-address IP] [--tailnet-port PROBE_PORT]\n\nAn issued installation enables nearby Bluetooth (unless --bluetooth off) and follows the local Tailscale IPv4 address automatically unless --tailnet-address is supplied. Each explicit --lan-interface enables owner-authorized device TLS and directed discovery on that interface only."
-        );
-        return Ok(());
-    }
-    let options = parse_options(&args)?;
+async fn run(
+    options: Options,
+    started: Arc<OnceLock<keyferryd::Daemon>>,
+) -> Result<(), keyferryd::DaemonError> {
     #[cfg(not(any(windows, target_os = "macos")))]
     if options.ble || options.installation.is_some() {
         return Err(keyferryd::DaemonError::Tls(

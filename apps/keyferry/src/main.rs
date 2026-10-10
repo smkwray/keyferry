@@ -61,9 +61,6 @@ static DEVICE_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static DEVICE_REFRESH_RERUN: AtomicBool = AtomicBool::new(false);
 /// When the watched device was last seen not authenticated; `None` while it is connected.
 static DEVICE_OFFLINE_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
-/// Serializes starting and stopping the background service; `true` once the app is exiting, after
-/// which nothing starts it again.
-static SERVICE_EXITING: Mutex<bool> = Mutex::new(false);
 
 struct ActiveEndpoint {
     client: ApiClient,
@@ -146,7 +143,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .backend_name("winit".into())
         .renderer_name("software".into())
         .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(false))
-        .with_winit_custom_application_handler(StopServiceOnExit)
         .select()?;
     let window = ui::MainWindow::new()?;
     window.set_usb_file_limit_kib((keyferry_protocol::file::MAX_FILE_BYTES / 1024) as i32);
@@ -203,12 +199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     start_event_feed(window.as_weak(), client, diagnostics_enabled);
 
     let result = window.run();
-    stop_local_service();
     result?;
     Ok(())
 }
 
-/// Keyferry's background service runs only while this app is open (D-20260926-04). Start it, then
+/// Attach to the independently supervised login service. Start it if stopped, then
 /// refresh once its local API answers. Without an installed service, as in a development run, the
 /// app uses whatever daemon is already running.
 fn start_local_service(
@@ -218,12 +213,6 @@ fn start_local_service(
 ) {
     thread::spawn(move || {
         let outcome = {
-            let exiting = SERVICE_EXITING
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *exiting {
-                return;
-            }
             let run: &mut service::Runner<'_> = &mut service::run_command;
             ServiceManager::for_this_computer(run)
                 .map_or_else(ServiceOutcome::Failed, |manager| manager.start(run))
@@ -274,36 +263,6 @@ fn local_api_answers_within(timeout: Duration) -> bool {
             return false;
         }
         thread::sleep(SERVICE_READY_POLL);
-    }
-}
-
-/// Closing the app stops its background service and leaves the service defined for the next
-/// launch. Runs from winit's `exiting` (window close, and Cmd+Q on macOS, which can end the process
-/// without returning from the event loop) and again after the event loop returns; only the first
-/// call acts.
-fn stop_local_service() {
-    let mut exiting = SERVICE_EXITING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if *exiting {
-        return;
-    }
-    *exiting = true;
-    let run: &mut service::Runner<'_> = &mut service::run_command;
-    if let Ok(manager) = ServiceManager::for_this_computer(run) {
-        let _ = manager.stop(run);
-    }
-}
-
-struct StopServiceOnExit;
-
-impl slint::winit_030::CustomApplicationHandler for StopServiceOnExit {
-    fn exiting(
-        &mut self,
-        _event_loop: &slint::winit_030::winit::event_loop::ActiveEventLoop,
-    ) -> slint::winit_030::EventResult {
-        stop_local_service();
-        slint::winit_030::EventResult::Propagate
     }
 }
 

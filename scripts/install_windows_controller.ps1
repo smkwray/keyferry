@@ -32,6 +32,26 @@ $installedInstallation = Join-Path $stateRoot 'installation'
 $shortcutPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Keyferry.lnk'
 $currentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+# A program-only refresh preserves the installed transport selection unless explicitly changed.
+if ([string]::IsNullOrWhiteSpace($InstallationDirectory)) {
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -ne $existingTask) {
+        $existingActions = @($existingTask.Actions)
+        if ($existingActions.Count -ne 1 -or $existingActions[0].Execute -ine $installedDaemon) {
+            throw 'Cannot preserve settings from an unrecognized installed controller task.'
+        }
+        $installedArguments = $existingActions[0].Arguments
+        if (-not $PSBoundParameters.ContainsKey('LanInterface')) {
+            $LanInterface = @([regex]::Matches($installedArguments, '--lan-interface "([^"\r\n]+)"') |
+                ForEach-Object { $_.Groups[1].Value })
+            if ($LanInterface.Count -eq 0) { throw 'Installed LAN settings are missing.' }
+        }
+        if (-not $PSBoundParameters.ContainsKey('Bluetooth')) {
+            $Bluetooth = [regex]::Match($installedArguments, '--bluetooth (auto|off)').Groups[1].Value
+            if (-not $Bluetooth) { throw 'Installed Bluetooth settings are missing.' }
+        }
+    }
+}
 $selectedLanInterfaces = [Collections.Generic.List[string]]::new()
 $seenLanInterfaces = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($name in @($LanInterface)) {
@@ -324,7 +344,7 @@ if ($Mode -eq 'Plan') {
         Installation = $installedInstallation
         InstallationTreeSHA256 = $sourceInstallationHash
         DaemonArguments = $expectedArguments
-        DaemonRuns = 'only while the Keyferry app is open'
+        DaemonRuns = 'at user login, independently of the desktop app'
         LanInterfaces = @($selectedLanInterfaces)
         LegacyGatewayRetirement = if ($null -ne $detectedLegacyTask) {
             'after successful Apply'
@@ -343,7 +363,6 @@ $rollbackRoot = $null
 $desktopTaskBefore = $null
 $desktopTaskXml = $null
 $desktopTaskWasRunning = $false
-$verificationStartedDaemon = $false
 $hadController = $false
 $hadDaemon = $false
 $hadPairing = $false
@@ -453,15 +472,17 @@ if ($Mode -eq 'Apply') {
     Protect-OwnerOnly $programRoot
     Protect-OwnerOnly $stateRoot
 
-    # The task defines the daemon's verified command but never starts on its own: the Keyferry app
-    # runs it on launch and ends it on exit. IgnoreNew keeps a second run from starting a duplicate.
+    # The GUI-subsystem daemon runs directly, without a console or shell wrapper.
+    # Interactive logon retains Bluetooth access; IgnoreNew prevents duplicate task runs.
     $action = New-ScheduledTaskAction -Execute $installedDaemon -Argument $expectedArguments -WorkingDirectory $programRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentAccount
     $principal = New-ScheduledTaskPrincipal -UserId $currentAccount -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -Hidden `
+        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $taskName -Action $action `
-        -Principal $principal -Settings $settings `
-        -Description 'Keyferry desktop daemon, run only while the Keyferry app is open: local control, nearby gateway, and authenticated tailnet route' `
+        -Principal $principal -Settings $settings -Trigger $trigger `
+        -Description 'Keyferry always-on user-login controller: local control, nearby gateway, and authenticated tailnet route' `
         -Force | Out-Null
 
     $shell = New-Object -ComObject WScript.Shell
@@ -484,10 +505,14 @@ if ((Get-AccountSid $task.Principal.UserId) -ne $currentSid -or
     $task.Principal.RunLevel -ne 'Limited') {
     throw 'Scheduled daemon ownership does not match the desktop installation.'
 }
-if (@($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or
-    $task.Settings.RestartCount -ne 0 -or
+$triggers = @($task.Triggers | Where-Object { $null -ne $_ })
+if ($triggers.Count -ne 1 -or $triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or
+    (Get-AccountSid $triggers[0].UserId) -ne $currentSid -or
+    -not $triggers[0].Enabled -or -not $task.Settings.Hidden -or
+    $task.Settings.RestartCount -ne 999 -or $task.Settings.RestartInterval -ne 'PT1M' -or
+    $task.Settings.ExecutionTimeLimit -ne 'PT0S' -or
     $task.Settings.MultipleInstances -ne 'IgnoreNew') {
-    throw 'The scheduled daemon must run only when the Keyferry app starts it.'
+    throw 'The scheduled daemon must start at this user login, run hidden, and restart on failure.'
 }
 if ((Get-FileHash -LiteralPath $installedController -Algorithm SHA256).Hash -cne $controllerHash -or
     (Get-FileHash -LiteralPath $installedDaemon -Algorithm SHA256).Hash -cne $daemonHash -or
@@ -502,13 +527,11 @@ $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 if ($shortcut.TargetPath -cne $installedController -or $shortcut.WorkingDirectory -cne $programRoot) {
     throw 'The Keyferry shortcut does not match the desktop installation.'
 }
-# The daemon runs only while the Keyferry app is open. Verification starts it when it is not
-# already running, checks it, and stops it again. Until the app authorizes this computer, the
-# daemon waits without opening listeners, so only its command identifies it.
+# Apply starts the controller immediately; Verify also starts a stopped service and leaves it running.
+# Before authorization the daemon waits without listeners, identified by its exact command.
 $authorized = Test-Path -LiteralPath $installedInstallation -PathType Container
 if ($task.State -ne 'Running') {
     Start-ScheduledTask -TaskName $taskName
-    $verificationStartedDaemon = $true
 }
 $deadline = [DateTime]::UtcNow.AddSeconds(10)
 do {
@@ -589,29 +612,23 @@ if ($authorized) {
     }
 }
 
-if ($verificationStartedDaemon) {
-    Stop-ScheduledTask -TaskName $taskName
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ($null -ne (Get-InstalledDaemonCommandProcessId) -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 250
-    }
-    if ($null -ne (Get-InstalledDaemonCommandProcessId)) {
-        throw 'The installed daemon did not stop after verification.'
-    }
-    $verificationStartedDaemon = $false
-}
-
 if ($Mode -eq 'Apply' -and $null -ne $legacyTask) {
     Unregister-ScheduledTask -TaskName $legacyTaskName -Confirm:$false
     $restoreLegacyTask = $false
 }
+if ($Mode -eq 'Apply') {
+    $startupShortcut = Join-Path ([Environment]::GetFolderPath('Startup')) 'Keyferry.lnk'
+    if (Test-Path -LiteralPath $startupShortcut) {
+        $startup = (New-Object -ComObject WScript.Shell).CreateShortcut($startupShortcut)
+        if ($startup.TargetPath -ieq $installedController) {
+            Remove-Item -LiteralPath $startupShortcut
+        }
+    }
+}
 $applySucceeded = $Mode -eq 'Apply'
 
-Write-Output "Verification OK: Keyferry is installed for $currentAccount as a controller and nearby gateway; its service runs only while Keyferry is open."
+Write-Output "Verification OK: Keyferry is installed for $currentAccount as a controller and nearby gateway; its hidden service is running independently of the desktop app and starts at user login."
 } finally {
-    if ($verificationStartedDaemon) {
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    }
     if ($applyStarted -and -not $applySucceeded) {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
