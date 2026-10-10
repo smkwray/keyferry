@@ -227,8 +227,16 @@ function Install-FileWithRollback {
     param([string]$Staged, [string]$Destination)
 
     $previous = "$Destination.previous"
+    # A running program (e.g. an agent's `keyctl mcp`) keeps its old image locked: Windows allows
+    # renaming it but not deleting it. Set it aside and clean up stale copies when they unlock.
+    Get-ChildItem -LiteralPath (Split-Path -Parent $Destination) -Filter "$(Split-Path -Leaf $Destination).stale-*" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $previous) {
-        Remove-Item -LiteralPath $previous -Force
+        try {
+            Remove-Item -LiteralPath $previous -Force -ErrorAction Stop
+        } catch {
+            Move-Item -LiteralPath $previous -Destination "$Destination.stale-$([DateTime]::UtcNow.Ticks)"
+        }
     }
     if (Test-Path -LiteralPath $Destination) {
         Move-Item -LiteralPath $Destination -Destination $previous
