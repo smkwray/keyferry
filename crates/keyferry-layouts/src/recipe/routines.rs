@@ -26,6 +26,9 @@ pub const GLIDE: Glide = Glide {
     origin: [0.5, 0.5],
 };
 
+/// Gap between single-detent scroll reports.
+pub const SCROLL_DETENT_MS: u64 = 30;
+
 fn report(p: [f64; 2]) -> Value {
     json!({"type":"move_absolute","x":p[0],"y":p[1]})
 }
@@ -279,7 +282,16 @@ pub fn input_actions(
         }
         Step::Scroll { x, y, dx, dy } => {
             let mut actions = glide_to(cursor, point(*x, *y)?);
-            actions.push(json!({"type":"scroll","horizontal":dx,"vertical":dy}));
+            // One report per detent, like a wheel: macOS scrolls ~1 px for one 60-detent report
+            // but ~2 lines per detent for separate +-1 reports (example-host, 2026-10-10).
+            let detents = dx.unsigned_abs().max(dy.unsigned_abs());
+            for i in 0..detents {
+                let part = |v: i64| if i < v.unsigned_abs() { v.signum() } else { 0 };
+                if i > 0 {
+                    actions.push(json!({"type":"wait","ms":SCROLL_DETENT_MS}));
+                }
+                actions.push(json!({"type":"scroll","horizontal":part(*dx),"vertical":part(*dy)}));
+            }
             actions
         }
         Step::Drag {
@@ -1100,7 +1112,7 @@ mod tests {
                 step["double"] = json!(double);
                 step["button"] = json!("right");
             } else {
-                step["dy"] = json!(-3);
+                step["dy"] = json!(-1);
                 step["dx"] = json!(0);
             }
             let stretch = compile(json!([step]), Some([0.0, 0.0]));
@@ -1164,6 +1176,37 @@ mod tests {
             drag.actions.iter().all(|a| a["type"] != "drag"),
             "no jump drag"
         );
+    }
+
+    #[test]
+    fn scroll_sends_one_report_per_detent() {
+        let at = Some([640.0 / 1279.0, 360.0 / 1279.0]);
+        let compile = |dx: i64, dy: i64| {
+            let steps: Vec<Step> =
+                serde_json::from_value(json!([{"type":"scroll","x":640,"y":360,"dx":dx,"dy":dy}]))
+                    .unwrap();
+            let mut parts = compile_stretch(&steps, None, 5000, &mut screen, at).unwrap();
+            assert_eq!(parts.len(), 1, "one command");
+            parts.remove(0).actions
+        };
+        let actions = compile(2, -5);
+        let scrolls: Vec<_> = actions.iter().filter(|a| a["type"] == "scroll").collect();
+        let axis =
+            |k: &str| -> Vec<i64> { scrolls.iter().map(|a| a[k].as_i64().unwrap()).collect() };
+        let (h, v) = (axis("horizontal"), axis("vertical"));
+        assert_eq!(scrolls.len(), 5);
+        assert_eq!((h.iter().sum::<i64>(), v.iter().sum::<i64>()), (2, -5));
+        assert!(h.iter().chain(&v).all(|d| d.abs() <= 1));
+        let waits: Vec<_> = actions.iter().filter(|a| a["type"] == "wait").collect();
+        assert_eq!(waits.len(), 4);
+        assert!(waits.iter().all(|w| w["ms"] == SCROLL_DETENT_MS));
+        let largest = compile(-127, 127);
+        assert_eq!(
+            largest.iter().filter(|a| a["type"] == "scroll").count(),
+            127
+        );
+        let planned = compiled(&largest).planned_ms;
+        assert!(planned < 10_000, "largest scroll plans {planned} ms");
     }
 
     #[test]
