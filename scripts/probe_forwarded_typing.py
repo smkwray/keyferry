@@ -1,4 +1,8 @@
-"""Bounded typing probe: random alphanumeric text, no Enter, metadata-only evidence."""
+"""Bounded typing probe: random alphanumeric text, no Enter, metadata-only evidence.
+
+With --shift-taps N it instead sends N single Shift taps (no text, no focus change, no Mac
+access), each right after an exact-device status read, waiting --reverify-gap seconds before
+every --reverify-every'th tap so the status read re-proves an aged holder first."""
 import argparse
 from datetime import datetime, timezone
 import json
@@ -13,8 +17,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--keyctl", required=True)
     parser.add_argument("--device", required=True)
-    parser.add_argument("--focus-host", required=True, help="Authorized Mac hosting the USB target")
+    parser.add_argument("--focus-host", help="Authorized Mac hosting the USB target")
+    parser.add_argument("--shift-taps", type=int, default=0)
+    parser.add_argument("--reverify-every", type=int, default=3)
+    parser.add_argument("--reverify-gap", type=float, default=31.0)
     args = parser.parse_args()
+    if not args.shift_taps and not args.focus_host:
+        parser.error("--focus-host is required for the typing probe")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     output_lock = threading.Lock()
 
@@ -85,9 +94,25 @@ def main():
     clear = json.dumps(dict(schema="keyferry.keyboard-sequence.v1", profile="windows-us",
                            arm="command-scoped", start_within_ms=5000,
                            actions=[dict(type="chord", keys=["LEFT_CONTROL", "U"])]))
+    observer = threading.Thread(target=observe, daemon=True)
+    if args.shift_taps:
+        shift = json.dumps(dict(schema="keyferry.keyboard-sequence.v1", profile="windows-us",
+                                arm="command-scoped", start_within_ms=5000,
+                                actions=[dict(type="tap", key="LEFT_SHIFT")]))
+        observer.start()
+        try:
+            for index in range(1, args.shift_taps + 1):
+                if index % args.reverify_every == 0:
+                    time.sleep(args.reverify_gap)
+                ready()
+                command(index, "sequence", shift)
+            emit(completed=args.shift_taps, operation="shift_tap")
+        finally:
+            stop.set()
+            observer.join(timeout=16)
+        return
     ready()
     focus()
-    observer = threading.Thread(target=observe, daemon=True)
     observer.start()
     try:
         command(0, "sequence", clear)
