@@ -675,6 +675,54 @@ void Extended_drag_bytes_keep_buttons_with_absolute_coordinates() {
     }
 }
 
+// The host glides a held drag as back-to-back absolute records (routines::glide_to). Every
+// glide report must be report 4 carrying the held button; a button-less or report-1 report
+// mid-glide would end the drag on the target.
+void Extended_held_glide_keeps_button_on_every_report() {
+    keyferry::hid::ExecutorState hid;
+    Results results; Watchdog watchdog;
+    CommandExecutor executor(hid, results, watchdog, kProfileHash);
+    assert(hid.enable_extended_pointer()); hid.on_transport_ready();
+    std::uint64_t now = 0;
+    auto accept = [&]() {
+        now += 10;
+        if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard) {
+            executor.UsbReportAccepted(hid.desired_report(), now);
+        } else {
+            executor.UsbMouseReportAccepted(hid.desired_mouse_report(), hid.desired_mouse_logical_token(), now);
+        }
+    };
+    accept(); accept();
+    executor.BeginSession(7, 2, false, true); accept(); accept();
+    assert(executor.CommandScopedArm(7, 2));
+    const auto payload = Envelope(Id(86),5000,7,{0,0,1,0, 8,4,0x34,0x12,0x45,0x23, 10,1,1,
+        8,4,0x00,0x20,0x00,0x30, 8,4,0x00,0x30,0x00,0x38, 8,4,0x56,0x34,0x67,0x45,
+        2,2,40,0, 11,1,1, 7,0});
+    assert(executor.HandleAuthenticated(7,Frame(2,payload),now));
+    accept();  // start position, no button
+    const std::array<std::array<std::uint8_t, 8>, 4> held{{
+        {4,1,0x34,0x12,0x45,0x23,0,0}, {4,1,0x00,0x20,0x00,0x30,0,0},
+        {4,1,0x00,0x30,0x00,0x38,0,0}, {4,1,0x56,0x34,0x67,0x45,0,0}}};
+    std::array<std::uint8_t, 8> wire{};
+    for (const auto& expected : held) {
+        assert(hid.report_needed());
+        assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
+        assert(wire == expected);
+        accept();
+    }
+    executor.Poll(now + 39); assert(!hid.report_needed());
+    executor.Poll(now + 40);
+    assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 6);
+    assert((wire == std::array<std::uint8_t, 8>{1,0,0,0,0,0,0,0}));
+    now += 40; accept();
+    assert(keyferry::hid::SerializePointerReport(hid.desired_mouse_report(), &wire) == 8);
+    assert((wire == std::array<std::uint8_t, 8>{4,0,0x56,0x34,0x67,0x45,0,0}));
+    accept(); accept(); accept();
+    assert(results.input_events.back().evidence.result == ResultCode::kEmitted);
+    assert(results.input_events.back().evidence.neutral_mask == 3);
+    std::cout << "pointer held glide: down + 3 moves all [04 01 ..]; release [01 00..], [04 00 56 34 67 45 00 00]\n";
+}
+
 void Extended_scroll_bytes_follow_positioning_collection() {
     keyferry::hid::ExecutorState hid;
     Results results; Watchdog watchdog;
@@ -759,6 +807,7 @@ int main() {
     Extended_scroll_bytes_follow_positioning_collection();
     Extended_click_bytes_preserve_position_and_separate_edges();
     Extended_drag_bytes_keep_buttons_with_absolute_coordinates();
+    Extended_held_glide_keeps_button_on_every_report();
     Extended_button_up_drains_both_ids_before_a_following_click();
     Extended_pointer_faults_release_every_report_role(false);
     Extended_pointer_faults_release_every_report_role(true);

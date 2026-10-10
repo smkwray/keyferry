@@ -17,7 +17,11 @@ Consumer Control or System Control reports are declared. The non-boot IF2
 
 The two report IDs have separate Mouse application collections, each containing
 a Pointer physical collection and a five-bit 0..1 button field plus three
-constant padding bits. Button presses follow the most recent positioning report:
+constant padding bits. Report 4's buttons, padding and absolute X/Y sit in a
+Digitizer Stylus (0x0D/0x20) logical collection; its wheel and pan stay outside.
+macOS otherwise assigns every button outside a digitizer collection to the
+relative pointer and dispatches absolute moves with no buttons, releasing every
+drag on its first move (pointer.6 on example-host). Button presses follow the most recent positioning report:
 after absolute movement, clicks/down use report 4 with retained X/Y; before any
 absolute move or after relative X/Y movement, they use report 1. Wheel and Consumer
 AC Pan follow the same selection, retaining absolute X/Y and current buttons in
@@ -30,13 +34,14 @@ and up transfers at the 10 ms report interval. No wire records or budgets change
 AtomS3 Lite uses the same IF0/IF1/IF2, reports, capability and shared executor,
 with no IF3/MSC, PSRAM or file handoff. Its board build defaults to extended
 pointer and rejects a legacy-pointer or MSC configuration. Its USB-HID PID is
-0x4004, bcdDevice 0x0103; Waveshare remains 0x4008 with MSC. Atom first install
+0x4004, bcdDevice 0x0104; Waveshare remains 0x4008 with MSC. Atom first install
 uses the board's 3 MiB factory slot at 0x10000 after exact-unit recovery proof;
 the Waveshare app-only procedure below does not apply to Atom. Static resource
 fit does not close Atom runtime TLS heap, USB attach or target-input gates.
 
 The existing personality PID is retained, with bcdDevice 0x0102 -> 0x0103 for
-pointer.5's added absolute-report pan byte (pointer.4 used 0x0102).
+pointer.5's added absolute-report pan byte (pointer.4 used 0x0102) and 0x0104
+for pointer.8's Stylus collection (report bytes unchanged).
 No public PID allocation is requested by this lane. Microsoft's USB flags key
 includes VID, PID and revision, and revision participates in hardware IDs:
 [device registry](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-device-specific-registry-settings),

@@ -6,6 +6,7 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+STYLUS = (0x0D, 0x20, 2)  # Digitizer page, Stylus usage, Logical collection
 
 
 def require(condition, message):
@@ -30,6 +31,7 @@ def descriptor(data=None):
     fields = {}
     bits = {}
     axes = {}
+    stylus = {}
     offset = 0
     while offset < len(data):
         prefix = data[offset]
@@ -50,11 +52,13 @@ def descriptor(data=None):
         elif tag == 0x18: usage_minimum = value
         elif tag == 0x28: usage_maximum = value
         elif tag == 0x80:
-            require(collections == [(1, 2, 1), (1, 1, 0)],
+            require(collections[:2] == [(1, 2, 1), (1, 1, 0)],
                     "each report must be Pointer physical inside Mouse application")
+            require(collections[2:] in ([], [STYLUS]), "unexpected nested collection")
             fields.setdefault(report_id, []).append((
                 bits.get(report_id, 0), page, size, count, minimum, maximum,
                 value, usage_minimum, usage_maximum))
+            stylus.setdefault(report_id, []).append(collections[2:] == [STYLUS])
             bits[report_id] = bits.get(report_id, 0) + size * count
             for p, u in usage:
                 if (p == 1 and u in (0x30, 0x31, 0x38)) or (p == 0x0C and u == 0x0238):
@@ -89,12 +93,19 @@ def descriptor(data=None):
                 f"report {report_id} relative wheel differs")
         require(axes.get((report_id, 0x0C, 0x0238)) == (-127, 127, 8, 6, pan_offset, 1),
                 f"report {report_id} relative Consumer AC Pan differs")
+    # macOS gives every Button element outside a Digitizer collection to the relative pointer
+    # and dispatches report-4 moves from a button-less absolute transducer, releasing a held
+    # drag. Report 4's buttons, padding and X/Y share one Stylus logical collection; its wheel
+    # and pan stay outside, or the transducer would claim them from scrolling.
+    require(stylus[1] == [False] * len(fields[1]), "report 1 must not be a digitizer transducer")
+    require(stylus[4] == [True, True, True, False, False],
+            "report 4 buttons and absolute X/Y must share the Stylus collection, wheel/pan outside")
     require(bytes([0x05,9,0x19,1,0x29,5]) in data, "five pointer buttons missing")
     require(bytes([0x05,0x0C,0x0A,0x38,0x02]) in data, "relative AC Pan missing")
     for token in (
         "constexpr auto kMouseProtocol = HID_ITF_PROTOCOL_NONE;",
         "kSelectedMouseReportDescriptorSize, kMouseEndpoint",
-        "constexpr std::uint16_t kInputDeviceRevision = 0x0103;",
+        "constexpr std::uint16_t kInputDeviceRevision = 0x0104;",
         "static_assert(kConfigurationDescriptor[72] == HID_SUBCLASS_NONE);",
         "static_assert(kConfigurationDescriptor[73] == HID_ITF_PROTOCOL_NONE);",
         "usb_transfer_generation_ != usb_attachment_generation_",
@@ -120,9 +131,9 @@ def no_msc_usb_descriptors(image, report):
         "09040200010300000609211101000122"
     ) + len(report).to_bytes(2, "little") + bytes.fromhex("0705830308000a")
     require(config in image, "HID IF0/IF1/IF2 descriptor differs or MSC is present")
-    device = bytes.fromhex("12010002000000403a300440030101020301")
+    device = bytes.fromhex("12010002000000403a300440040101020301")
     require(device in image,
-            "HID VID/PID or bcdDevice 0103 differs")
+            "HID VID/PID or bcdDevice 0104 differs")
 
 
 def inspect_build(build, data):
@@ -139,8 +150,8 @@ def inspect_build(build, data):
     require(data in image, "exact pointer descriptor is absent from image")
     flash = json.loads((build / "flasher_args.json").read_text())["flash_files"]
     if board == "waveshare_geek_v1_1_reference":
-        require(bytes.fromhex("12010002000000403a300840030101020301") in image,
-                "Waveshare VID/PID or bcdDevice 0103 differs")
+        require(bytes.fromhex("12010002000000403a300840040101020301") in image,
+                "Waveshare VID/PID or bcdDevice 0104 differs")
         require("KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache, "Waveshare file handoff disabled")
         require("CONFIG_TINYUSB_MSC_ENABLED=y" in config, "Waveshare MSC disabled")
         from check_msc_size_probe import inspect_file_handoff
