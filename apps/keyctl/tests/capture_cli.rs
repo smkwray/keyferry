@@ -97,12 +97,10 @@ fn fake_ffmpeg(mode: &str) {
     }
     if mode == "flood" {
         let mut out = io::stdout().lock();
-        let bytes = [0; 65536];
-        for _ in 0..1100 {
-            if out.write_all(&bytes).is_err() {
-                process::exit(1);
-            }
-        }
+        // Reach the streaming framer's size gate instead of its invalid-signature gate.
+        out.write_all(b"\x89PNG\r\n\x1a\n").unwrap();
+        out.write_all(&u32::MAX.to_be_bytes()).unwrap();
+        out.write_all(b"IDAT").unwrap();
         return;
     }
     let mut width = 2;
