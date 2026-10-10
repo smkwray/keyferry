@@ -1069,20 +1069,27 @@ mod tests {
     /// Live before/after capture metrics. Frames stay in memory; only counts and timings are
     /// printed. `before` replays the previously installed 720p, paeth-filtered pipeline.
     #[test]
-    #[ignore = "requires the capture card: KEYFERRY_LIVE_SOURCE=ID [KEYFERRY_LIVE_MODE=before], --ignored --nocapture"]
+    #[ignore = "requires the capture card: KEYFERRY_LIVE_SOURCE=ID [KEYFERRY_LIVE_MODE=before|mjpeg]"]
     fn live_capture_metrics_without_content() {
         use super::super::ocr::{NativeOcr, Ocr};
         let source = std::env::var("KEYFERRY_LIVE_SOURCE").expect("KEYFERRY_LIVE_SOURCE");
         let (_, mut args) = super::super::capture::stream_setup(Some(&source)).unwrap();
-        let before = std::env::var("KEYFERRY_LIVE_MODE").as_deref() == Ok("before");
-        if before {
-            let at = args.iter().position(|a| a == "-video_size").unwrap();
-            args.splice(
-                at..at + 6,
-                ["-video_size".to_owned(), "1280x720".to_owned()],
-            );
-            let at = args.iter().position(|a| a == "-pred").unwrap();
-            args.drain(at..at + 2);
+        let mode = std::env::var("KEYFERRY_LIVE_MODE").unwrap_or_else(|_| "after-native".into());
+        let at = args.iter().position(|a| a == "-video_size").unwrap();
+        match mode.as_str() {
+            "before" => {
+                args.splice(
+                    at..at + 6,
+                    ["-video_size".to_owned(), "1280x720".to_owned()],
+                );
+                let at = args.iter().position(|a| a == "-pred").unwrap();
+                args.drain(at..at + 2);
+            }
+            // The same native size and rate, compressed on the card.
+            "mjpeg" => {
+                args.splice(at + 2..at + 4, ["-vcodec".to_owned(), "mjpeg".to_owned()]);
+            }
+            _ => {}
         }
         let state = Arc::new(Mutex::new(State {
             requested_at: Some(Instant::now()),
@@ -1116,7 +1123,8 @@ mod tests {
         gaps.sort_by(f64::total_cmp);
         let (width, height) = fit(last.native, 1280);
         let view = last.resized(width, height);
-        let mut metrics = serde_json::json!({"mode":if before {"before-720p"} else {"after-native"},
+        let (signal, mean_luma) = super::super::capture::signal(&last.rgb);
+        let mut metrics = serde_json::json!({"mode":mode,"signal":signal,"mean_luma":mean_luma,
             "native":last.native,"first_frame_ms":first_frame_ms,"fps":fps,
             "frame_gap_ms_p50":gaps[gaps.len() / 2],"frame_gap_ms_max":gaps[gaps.len() - 1]});
         for (name, frame) in [("served", &*last), ("agent_view", &view)] {
