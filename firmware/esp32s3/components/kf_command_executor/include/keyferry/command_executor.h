@@ -47,6 +47,7 @@ class CommandExecutor final {
     bool CommandScopedArm(std::uint64_t epoch, std::uint32_t command_sequence);
 
     // The caller supplies one authenticated COMMAND frame and a monotonic millisecond timestamp.
+    // True includes correlated rejection; false denotes a session/protocol fault.
     bool HandleAuthenticated(std::uint64_t epoch, const protocol::DecodedFrame& frame,
                              std::uint64_t now_ms);
     void Poll(std::uint64_t now_ms);

@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include <fstream>
+#include <string>
+#include "keyferry/command_executor.h"
 
 namespace {
 
@@ -65,7 +68,7 @@ DecodedFrame Decode(const std::vector<std::uint8_t>& wire,
   return frame;
 }
 
-class FakeEffects final : public Effects {
+class FakeEffects : public Effects {
  public:
   void FailClosed(std::uint64_t epoch) override {
     ++fail_closed_count;
@@ -521,9 +524,13 @@ void TestMalformedAndOversizeFailClosed() {
   assert(session.BeginTls(policy, tls));
   const std::uint8_t empty_frame = 0;
   assert(!session.ConsumeTls(&empty_frame, 1));
+  assert(session.reject_diagnostic().site == 3);
+  assert(session.reject_diagnostic().message_type == 0);
+  assert(session.reject_diagnostic().sequence == 0);
   const std::uint64_t malformed_epoch = session.epoch();
 
   assert(session.BeginTls(policy, tls));
+  assert(session.reject_diagnostic().site == 0);
   std::array<std::uint8_t, keyferry::endpoint::kMaxWireFrame + 1> oversized{};
   oversized.fill(1);
   assert(!session.ConsumeTls(oversized.data(), oversized.size()));
@@ -558,7 +565,158 @@ void TestHandshakeSequenceAndEpochOverflow() {
 
 }  // namespace
 
-int main() {
+// Exercise the real session and executor with Rust-produced production bytes.
+class StressEffects final : public FakeEffects, public keyferry::command::ResultSink,
+                            public keyferry::command::HeldKeyDeadlineScheduler {
+ public:
+  keyferry::hid::ExecutorState hid;
+  keyferry::command::CommandExecutor executor;
+  std::uint64_t now{1};
+  bool terminal{};
+  unsigned completed{};
+  StressEffects(const std::array<std::uint8_t, 32>& profile)
+      : executor(hid, *this, *this, profile) {
+    assert(hid.enable_extended_pointer());
+    hid.on_transport_ready();
+    while (hid.report_needed()) Tick();
+  }
+  bool SessionAuthenticated(std::uint64_t epoch, const SessionReady&) override {
+    executor.BeginSession(epoch, 0, true, true);
+    while (hid.report_needed()) Tick();
+    return true;
+  }
+  bool CommandScopedArm(std::uint64_t epoch, std::uint32_t sequence) override {
+    return executor.CommandScopedArm(epoch, sequence);
+  }
+  bool AuthenticatedFrame(std::uint64_t epoch, const DecodedFrame& frame) override {
+    terminal = false;
+    return executor.HandleAuthenticated(epoch, frame, now);
+  }
+  void FailClosed(std::uint64_t epoch) override {
+    FakeEffects::FailClosed(epoch);
+    executor.EndSession();
+  }
+  void CommandResult(std::uint32_t, const std::array<std::uint8_t, 16>&,
+                     keyferry::protocol::ResultCode result) override {
+    if (result == keyferry::protocol::ResultCode::kEmitted) {
+      terminal = true;
+      ++completed;
+    }
+  }
+  bool Schedule(std::uint64_t, std::uint64_t) override { return true; }
+  void InputCommandResult(std::uint32_t, const keyferry::command::InputResultEvidence& evidence) override {
+    if (evidence.result == keyferry::protocol::ResultCode::kEmitted) {
+      assert(evidence.neutral_mask == 3);
+      terminal = true;
+      ++completed;
+    }
+  }
+  void Cancel(std::uint64_t) override {}
+  void Tick() {
+    ++now;
+    if (hid.report_needed()) {
+      if (hid.desired_interface() == keyferry::hid::InputInterface::keyboard)
+        executor.UsbReportAccepted(hid.desired_report(), now);
+      else
+        executor.UsbMouseReportAccepted(hid.desired_mouse_report(),
+                                        hid.desired_mouse_logical_token(), now);
+    }
+    executor.Poll(now);
+  }
+};
+
+void TestRustTypingStress(const char* path) {
+  std::ifstream input(path);
+  std::string hex;
+  input >> hex;
+  assert(!hex.empty() && hex.size() % 2 == 0);
+  std::vector<std::uint8_t> bytes;
+  for (std::size_t i = 0; i < hex.size(); i += 2)
+    bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+  // Extract the production SHA256 profile from the first command, not a second authority.
+  std::array<std::uint8_t, keyferry::protocol::kMaxDecodedFrame> scratch{};
+  std::array<std::uint8_t, 32> profile{};
+  std::vector<std::vector<std::uint8_t>> frames;
+  std::size_t begin = 0;
+  for (std::size_t i = 0; i < bytes.size(); ++i) if (bytes[i] == 0) {
+    frames.emplace_back(bytes.begin() + begin, bytes.begin() + i + 1);
+    const auto frame = Decode(frames.back(), scratch);
+    // C++ re-encoding must agree byte for byte with Rust.
+    assert(Frame(static_cast<MessageType>(frame.message_type), frame.sequence,
+                 {frame.payload, frame.payload + frame.payload_length}) == frames.back());
+    if (frame.message_type == static_cast<std::uint8_t>(MessageType::kCommand))
+      std::copy_n(frame.payload + 20, 32, profile.begin());
+    begin = i + 1;
+  }
+  for (const auto split : {1U, 7U, 128U, 512U, 513U}) {
+    StressEffects effects(profile);
+    std::array<std::uint8_t, 16> id{}; id[0] = 1;
+    EndpointSession session(id, effects);
+    TlsClientPolicy policy{};
+    policy.server_name = "controller.invalid"; policy.server_name_length = 18;
+    policy.port = 4433; policy.peer_spki_sha256.fill(0xA5);
+    assert(session.BeginTls(policy, {keyferry::endpoint::kTls12Version,
+        keyferry::endpoint::kRequiredCipherSuite, PeerKeyAlgorithm::kEcdsaP256,
+        policy.peer_spki_sha256}));
+    std::vector<std::uint8_t> challenge(66, 1);
+    challenge[64] = keyferry::protocol::kMajor; challenge[65] = keyferry::protocol::kMinor;
+    auto wire = Frame(MessageType::kAuthChallenge, 0, challenge);
+    assert(session.ConsumeTls(wire.data(), wire.size()));
+    std::vector<std::uint8_t> ready(34, 0);
+    std::fill_n(ready.begin(), 16, 1);
+    ready[16] = keyferry::protocol::kMajor; ready[17] = keyferry::protocol::kMinor;
+    WriteLe32(ready.data() + 18, 1); WriteLe32(ready.data() + 22, 45000);
+    WriteLe32(ready.data() + 26, 10000); WriteLe32(ready.data() + 30, 500);
+    wire = Frame(MessageType::kSessionReady, 1, ready);
+    assert(session.ConsumeTls(wire.data(), wire.size()));
+    for (std::size_t f = 0; f < frames.size(); f += 2) {
+      wire = frames[f]; wire.insert(wire.end(), frames[f + 1].begin(), frames[f + 1].end());
+      for (std::size_t offset = 0; offset < wire.size(); offset += split) {
+        const auto count = std::min<std::size_t>(split, wire.size() - offset);
+        if (!session.ConsumeTls(wire.data() + offset, count)) {
+          std::fprintf(stderr, "stress rejection: frame=%zu split=%u completed=%u pending=%d\n",
+                       f, split, effects.completed, effects.hid.report_needed());
+          assert(false);
+        }
+      }
+      if (split == 513 && f == 0) {
+        const auto next = Decode(frames[3], scratch);
+        const auto busy_command = Frame(MessageType::kCommand, 4,
+                                        {next.payload, next.payload + next.payload_length});
+        assert(session.ConsumeTls(busy_command.data(), busy_command.size()));
+        assert(effects.executor.active() && session.authenticated());
+        const auto busy_arm = Frame(MessageType::kArm, 5, {1, 0, 0, 0, 0});
+        assert(session.ConsumeTls(busy_arm.data(), busy_arm.size()));
+        const auto reply = Decode(effects.sent, scratch);
+        assert(reply.message_type == static_cast<std::uint8_t>(MessageType::kError));
+        assert(reply.payload[0] == static_cast<std::uint8_t>(keyferry::protocol::ErrorCode::kBusy));
+      }
+      const auto deadline = effects.now + 2000;
+      while (!effects.terminal && effects.now < deadline) effects.Tick();
+      assert(effects.terminal);
+      // Rearm at exactly the boundary promised to the host, before any extra USB callback.
+      // No extra USB callback is allowed between terminal receipt and rearm.
+      assert(!effects.hid.report_needed());
+      assert(session.authenticated());
+      if (split == 513) {
+        const auto stale_arm = frames[2];
+        assert(!session.ConsumeTls(stale_arm.data(), stale_arm.size()));
+        assert(session.reject_diagnostic().site == 6);
+        assert(session.reject_diagnostic().sequence == 4);
+        assert(session.reject_diagnostic().message_type == static_cast<std::uint8_t>(MessageType::kArm));
+        assert(!effects.hid.armed());
+        while (effects.hid.report_needed()) effects.Tick();
+        assert(keyferry::hid::is_zero(effects.hid.current_report()));
+        assert(keyferry::hid::is_zero(effects.hid.current_mouse_report()));
+        break;
+      }
+    }
+    assert(split == 513 ? effects.completed == 1 : effects.completed > 40);
+  }
+}
+
+int main(int argc, char** argv) {
+  if (argc == 2) TestRustTypingStress(argv[1]);
   std::puts("test: configuration");
   std::fflush(stdout);
   TestConfigurationValidation();

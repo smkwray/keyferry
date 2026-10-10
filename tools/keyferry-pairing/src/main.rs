@@ -810,9 +810,23 @@ fn local_status_with(
         .map_err(|_| "local receipt status failed")?;
     // Never send a new page to older firmware, which rejects it as BAD_REPORT.
     // Once advertised, missing or malformed diagnostic data is an error.
-    let wifi_diagnostic = wifi_diagnostic_value(&device, || {
+    let mut wifi_diagnostic = wifi_diagnostic_value(&device, || {
         client.status(local_status_page::WIFI_DIAGNOSTIC)
     })?;
+    if let StatusPage::Device(metadata) = &device {
+        if metadata.capabilities & capability::ENDPOINT_REJECT_DIAGNOSTICS_V1 != 0 {
+            let endpoint = client
+                .status(local_status_page::ENDPOINT_DIAGNOSTIC)
+                .map_err(|_| "local endpoint diagnostic status failed")?;
+            let StatusPage::EndpointDiagnostic(_) = &endpoint else {
+                return Err("local endpoint diagnostic status has wrong page");
+            };
+            wifi_diagnostic
+                .as_object_mut()
+                .ok_or("missing Wi-Fi diagnostic status")?
+                .extend(local_status_value(endpoint)?.as_object().unwrap().clone());
+        }
+    }
     let document = serde_json::json!({
         "schema": "keyferry.local-status.v1",
         "wifi_diagnostic": wifi_diagnostic,
@@ -863,6 +877,11 @@ fn local_status_value(page: StatusPage) -> Result<serde_json::Value, &'static st
             "policy_state": value.policy_state,
             "wifi_error": value.wifi_error,
             "nvs_error": value.nvs_error,
+        })),
+        StatusPage::EndpointDiagnostic(value) => Ok(serde_json::json!({
+            "endpoint_reject_site": value.reject_site,
+            "endpoint_message_type": value.message_type,
+            "endpoint_sequence": value.sequence,
         })),
         StatusPage::WifiDiagnostic(value) => Ok(serde_json::json!({
             "last_wifi_reject_reason": keyferry_protocol::wifi_reject_reason::name(value.last_wifi_reject_reason)

@@ -5312,6 +5312,117 @@ pub(crate) mod tests {
         }
     }
 
+    // Synthetic off-device traffic only: never captures owner text. The native
+    // endpoint test consumes these exact production planner/envelope/codec bytes.
+    #[test]
+    fn export_native_typing_stress_vectors() {
+        let alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let text: String = (0..300)
+            .map(|i| alphabet[(i * 37 + 11) % alphabet.len()] as char)
+            .collect();
+        let clear: keyferry_layouts::KeyboardSequenceV1 = serde_json::from_value(serde_json::json!({
+            "schema": "keyferry.keyboard-sequence.v1", "command_id": "019d1234-5678-7abc-8123-456789abcdef",
+            "profile": "windows-us", "arm": "command-scoped", "start_within_ms": 5000,
+            "actions": [{"type": "chord", "keys": ["LEFT_CONTROL", "U"]}]
+        })).unwrap();
+        let mut wire = Vec::new();
+        let mut sequence = 2;
+        for (index, steps) in [
+            keyferry_layouts::compile_sequence(&clear).unwrap().steps,
+            keyferry_layouts::plan_text_us(&text, keyferry_layouts::TypingTiming::DESKTOP_SAFE)
+                .unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let command = super::PlannedCommand {
+                command_id: uuid::Uuid::from_u128(index as u128 + 1),
+                chunks: crate::plan_chunks(steps).unwrap(),
+                action_count: 0,
+                char_count: 0,
+                profile: "windows-us".to_owned(),
+                expires_at: std::time::Instant::now() + Duration::from_secs(5),
+                arm_before_first: true,
+                input: None,
+            };
+            for chunk in &command.chunks {
+                wire.extend(
+                    keyferry_protocol::encode_wire(&Frame::v1(
+                        keyferry_protocol::message::ARM,
+                        sequence,
+                        vec![1, 0, 0, 0, 0],
+                    ))
+                    .unwrap(),
+                );
+                sequence += 1;
+                let body = encode_report_body(chunk).unwrap();
+                let payload =
+                    command_payload(&command, COMMAND_KIND_EXECUTE, &body, COMMAND_MAX_MS).unwrap();
+                wire.extend(
+                    keyferry_protocol::encode_wire(&Frame::v1(
+                        keyferry_protocol::message::COMMAND,
+                        sequence,
+                        payload,
+                    ))
+                    .unwrap(),
+                );
+                sequence += 1;
+            }
+        }
+        let request: keyferry_layouts::InputSequenceV1 = serde_json::from_value(serde_json::json!({
+            "schema": "keyferry.input-sequence.v2", "command_id": "019d1234-5678-7abc-8123-456789abcdef",
+            "keyboard_profile": "windows-us", "arm": "command-scoped", "start_within_ms": 5000,
+            "actions": [{"type": "text", "value": text}]
+        })).unwrap();
+        let input = keyferry_layouts::compile_input_sequence(&request).unwrap();
+        let command = super::PlannedCommand {
+            command_id: uuid::Uuid::from_u128(3),
+            chunks: Vec::new(),
+            action_count: 0,
+            char_count: 300,
+            profile: "windows-us".to_owned(),
+            expires_at: std::time::Instant::now() + Duration::from_secs(5),
+            arm_before_first: true,
+            input: None,
+        };
+        for chunk in &input.chunks {
+            wire.extend(
+                keyferry_protocol::encode_wire(&Frame::v1(
+                    keyferry_protocol::message::ARM,
+                    sequence,
+                    vec![1, 0, 0, 0, 0],
+                ))
+                .unwrap(),
+            );
+            sequence += 1;
+            wire.extend(
+                keyferry_protocol::encode_wire(&Frame::v1(
+                    keyferry_protocol::message::COMMAND,
+                    sequence,
+                    command_payload(
+                        &command,
+                        keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V2,
+                        &chunk.body,
+                        COMMAND_MAX_MS,
+                    )
+                    .unwrap(),
+                ))
+                .unwrap(),
+            );
+            sequence += 1;
+        }
+        assert!(sequence > 80);
+        let hex = wire.iter().map(|b| format!("{b:02x}")).collect::<String>() + "\n";
+        if let Some(path) = std::env::var_os("KEYFERRY_NATIVE_STRESS_VECTOR") {
+            std::fs::write(path, hex).unwrap();
+        } else {
+            assert_eq!(
+                hex,
+                include_str!("../../../protocol/vectors/typing-stress.hex")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn multi_chunk_execution_rearms_each_later_chunk() {
         let (mut host, mut device) = duplex(4096);

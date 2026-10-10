@@ -147,6 +147,14 @@ bool EncodeStatusPage(const protocol::LocalManagementStatusPage page,
             static_cast<std::uint32_t>(snapshot.network.nvs_error));
       return true;
     }
+    case protocol::LocalManagementStatusPage::kEndpointDiagnostic: {
+      const auto& wifi = snapshot.wifi_diagnostic;
+      if (wifi.endpoint_reject_site > 8) { output->fill(0); return false; }
+      (*output)[1] = wifi.endpoint_reject_site;
+      (*output)[2] = wifi.endpoint_message_type;
+      Put32(output->data() + 4, wifi.endpoint_sequence);
+      return true;
+    }
     case protocol::LocalManagementStatusPage::kWifiDiagnostic: {
       const auto& wifi = snapshot.wifi_diagnostic;
       if (wifi.last_wifi_reject_reason > protocol::WifiRejectReason::kOther ||

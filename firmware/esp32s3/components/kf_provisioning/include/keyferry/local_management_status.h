@@ -91,6 +91,9 @@ struct WifiDiagnosticStatus {
   std::uint32_t attempt_count{};
   std::uint32_t elapsed_to_tls_ms{};
   std::uint32_t elapsed_to_close_ms{};
+  std::uint8_t endpoint_reject_site{};
+  std::uint8_t endpoint_message_type{};
+  std::uint32_t endpoint_sequence{};
 };
 
 struct StatusSnapshot {

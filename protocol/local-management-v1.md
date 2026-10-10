@@ -181,6 +181,17 @@ staged data and releases the lease. If a mutation may have executed, its result 
 
 ## Wi-Fi reject diagnostic extension
 
+`ENDPOINT_REJECT_DIAGNOSTICS_V1` (`0x10000000`, USB-local only) additionally advertises
+the authenticated `ENDPOINT_DIAGNOSTIC` page (`0x0B`). It describes the same last
+completed Wi-Fi attempt as `WIFI_DIAGNOSTIC`, survives cleanup and reconnect, and
+contains metadata only: schema 1 at byte 0, reject site at byte 1, message type at
+byte 2, zero at byte 3, session sequence `u32LE` at bytes 4–7, zero at bytes 8–15.
+Sites: 0 none, 1 offline/null input, 2 frame overflow, 3 wire codec, 4 protocol
+version, 5 handshake/frame dispatch, 6 session sequence, 7 deferred control service,
+8 execution delegate service. Type/sequence are zero when no decoded frame exists.
+No frame bytes or typed text are retained. Older firmware is never queried for
+this page unless it advertises the capability. Missing advertised data is an error.
+
 `WIFI_DIAGNOSTIC` (`0x0A`) is an authenticated read-only status page. Existing
 pages and envelope bytes remain unchanged. The USB challenge and authenticated
 `DEVICE` page advertise `WIFI_REJECT_DIAGNOSTICS_V1` (`0x00000080`) when supported.

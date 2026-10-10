@@ -304,6 +304,7 @@ pub mod local_management_status_page {
     pub const PROBE_HEAP: u8 = 0x08;
     pub const PROBE_STACK: u8 = 0x09;
     pub const WIFI_DIAGNOSTIC: u8 = 0x0A;
+    pub const ENDPOINT_DIAGNOSTIC: u8 = 0x0B;
 }
 
 pub mod wifi_reject_reason {
@@ -409,6 +410,7 @@ pub mod capability {
     pub const SCREEN_POWER_V1: u32 = 0x02000000;
     pub const USB_FILE_SET_V2: u32 = 0x04000000;
     pub const POINTER_EXTENDED_V1: u32 = 0x08000000;
+    pub const ENDPOINT_REJECT_DIAGNOSTICS_V1: u32 = 0x10000000;
 }
 
 pub mod output_mode {

@@ -1276,7 +1276,8 @@ class HilRuntime final : public keyferry::transport::Delegate,
       snapshot.wifi_diagnostic = {
           wifi.last_wifi_reject_reason, wifi.beacon_tls_identity_equal,
           wifi.identity_checked, wifi.tls_verified, wifi.attempt_count,
-          wifi.elapsed_to_tls_ms, wifi.elapsed_to_close_ms};
+          wifi.elapsed_to_tls_ms, wifi.elapsed_to_close_ms, wifi.endpoint_reject_site,
+          wifi.endpoint_message_type, wifi.endpoint_sequence};
     }
     snapshot.network.endpoint_authenticated = authenticated_epoch_ != 0;
     snapshot.network.configuration_valid =
@@ -3200,7 +3201,9 @@ extern "C" void app_main() {
           static_cast<std::uint32_t>(
               keyferry::protocol::Capability::kLocalManagementV1) |
               static_cast<std::uint32_t>(
-                  keyferry::protocol::Capability::kWifiRejectDiagnosticsV1),
+                  keyferry::protocol::Capability::kWifiRejectDiagnosticsV1) |
+              static_cast<std::uint32_t>(
+                  keyferry::protocol::Capability::kEndpointRejectDiagnosticsV1),
           provisioning_effects, *local_coordinator);
       local_management_ready = true;
     }
@@ -3216,7 +3219,9 @@ extern "C" void app_main() {
     metadata.capabilities =
         keyferry::endpoint::FirmwareCapabilityMask(firmware_identity) |
         static_cast<std::uint32_t>(
-            keyferry::protocol::Capability::kWifiRejectDiagnosticsV1);
+            keyferry::protocol::Capability::kWifiRejectDiagnosticsV1) |
+        static_cast<std::uint32_t>(
+            keyferry::protocol::Capability::kEndpointRejectDiagnosticsV1);
     metadata.policy_sequence =
         config_context.boot.roaming.anchor.policy_sequence;
     metadata.receipts = &local_receipts;
