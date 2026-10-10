@@ -5428,6 +5428,142 @@ pub(crate) mod tests {
         }
     }
 
+    /// One long agent session on one authenticated epoch, compiled exactly as `keyctl mcp`
+    /// steps reach the wire: gliding calibration probes, long glides, clicks, drags, detent
+    /// scrolls, chords and text, each an ARM/COMMAND pair per chunk. It closes with the daemon's
+    /// UNKNOWN recovery: a frame the endpoint answers itself, then RELEASE_INPUT_ALL_V2.
+    #[test]
+    fn export_native_pointer_session_vectors() {
+        use keyferry_layouts::recipe::routines::{has_keyboard, input_actions, Step};
+        let calibration = [
+            [0.12, 0.15],
+            [0.80, 0.20],
+            [0.25, 0.78],
+            [0.73, 0.72],
+            [0.45, 0.42],
+            [0.60, 0.60],
+            [0.18, 0.62],
+            [0.68, 0.35],
+            [0.35, 0.55],
+            [0.12, 0.15],
+        ];
+        let mut steps = Vec::new();
+        for _ in 0..3 {
+            for [x, y] in calibration {
+                steps.push(serde_json::json!({"type":"move","x":(x * 1279.0) as u32,"y":(y * 719.0) as u32}));
+            }
+        }
+        for i in 0..10 {
+            let (x, y) = if i % 2 == 0 { (5, 5) } else { (1270, 712) };
+            steps.push(serde_json::json!({"type":"move","x":x,"y":y}));
+            steps.push(
+                serde_json::json!({"type":"click","x":640 + i * 3,"y":360,"double":i % 3 == 0}),
+            );
+        }
+        for i in 0..6 {
+            steps.push(serde_json::json!({"type":"drag","from_x":5 + i,"from_y":5,"to_x":1270,"to_y":700 - i}));
+            steps.push(serde_json::json!({"type":"scroll","x":640,"y":360,"dx":i % 3,"dy":if i % 2 == 0 { -5 } else { 5 }}));
+        }
+        for keys in [["CTRL", "A"], ["CTRL", "C"], ["CMD", "TAB"]] {
+            steps.push(serde_json::json!({"type":"key","keys":keys}));
+        }
+        steps.push(serde_json::json!({"type":"type_text","text":"keyferry pointer session"}));
+        let profile = keyferry_layouts::LEGACY_WIRE_MAPPING;
+        let mut cursor = None;
+        let mut wire = Vec::new();
+        let mut sequence = 2;
+        fn push(wire: &mut Vec<u8>, sequence: &mut u32, message_type: u8, payload: Vec<u8>) {
+            let frame = Frame::v1(message_type, *sequence, payload);
+            wire.extend(keyferry_protocol::encode_wire(&frame).unwrap());
+            *sequence += 1;
+        }
+        let commands = steps.len();
+        assert!(commands > 64);
+        for (index, step) in steps.into_iter().enumerate() {
+            let step: Step = serde_json::from_value(step).unwrap();
+            let actions = input_actions(
+                &step,
+                &mut |x, y| Ok([f64::from(x) / 1279.0, f64::from(y) / 719.0]),
+                &mut cursor,
+            )
+            .unwrap();
+            let mut request = serde_json::json!({"schema":keyferry_layouts::INPUT_SEQUENCE_SCHEMA_V2,"command_id":uuid::Uuid::from_u128(0x01995fa0_0000_7000_8000_000000001000 + index as u128).to_string(),"arm":"command-scoped","start_within_ms":5000,"actions":actions});
+            if request["actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(has_keyboard)
+            {
+                request["keyboard_profile"] = serde_json::json!(profile);
+            }
+            let input =
+                keyferry_layouts::compile_input_sequence(&serde_json::from_value(request).unwrap())
+                    .unwrap();
+            assert!(input.requires_extended);
+            let command = super::PlannedCommand {
+                command_id: uuid::Uuid::from_u128(
+                    0x01995fa0_0000_7000_8000_000000001000 + index as u128,
+                ),
+                chunks: Vec::new(),
+                action_count: 0,
+                char_count: 0,
+                profile: profile.to_owned(),
+                expires_at: std::time::Instant::now() + Duration::from_secs(5),
+                arm_before_first: true,
+                input: None,
+            };
+            for chunk in &input.chunks {
+                push(
+                    &mut wire,
+                    &mut sequence,
+                    keyferry_protocol::message::ARM,
+                    vec![keyferry_protocol::arm_policy::COMMAND_SCOPED, 0, 0, 0, 0],
+                );
+                push(
+                    &mut wire,
+                    &mut sequence,
+                    keyferry_protocol::message::COMMAND,
+                    command_payload(
+                        &command,
+                        keyferry_protocol::command_kind::EXECUTE_INPUT_CHUNK_V2,
+                        &chunk.body,
+                        COMMAND_MAX_MS,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        push(
+            &mut wire,
+            &mut sequence,
+            keyferry_protocol::message::LEASE_RENEW,
+            vec![0, 0, 0, 0],
+        );
+        let release = empty_command(sequence);
+        push(
+            &mut wire,
+            &mut sequence,
+            keyferry_protocol::message::COMMAND,
+            command_payload(
+                &release,
+                keyferry_protocol::command_kind::RELEASE_INPUT_ALL_V2,
+                &[],
+                COMMAND_MAX_MS,
+            )
+            .unwrap(),
+        );
+        assert!(sequence as usize > 2 + 2 * commands);
+        let hex = wire.iter().map(|b| format!("{b:02x}")).collect::<String>() + "\n";
+        if let Some(path) = std::env::var_os("KEYFERRY_NATIVE_POINTER_VECTOR") {
+            std::fs::write(path, hex).unwrap();
+        } else {
+            assert_eq!(
+                hex,
+                include_str!("../../../protocol/vectors/pointer-session.hex")
+            );
+        }
+    }
+
     #[tokio::test]
     async fn multi_chunk_execution_rearms_each_later_chunk() {
         let (mut host, mut device) = duplex(4096);

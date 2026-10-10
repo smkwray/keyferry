@@ -587,6 +587,8 @@ class StressEffects final : public FakeEffects, public keyferry::command::Result
   std::uint64_t now{1};
   bool terminal{};
   unsigned completed{};
+  unsigned failed{};
+  keyferry::command::InputResultEvidence last_failure{};
   StressEffects(const std::array<std::uint8_t, 32>& profile)
       : executor(hid, *this, *this, profile) {
     assert(hid.enable_extended_pointer());
@@ -622,6 +624,10 @@ class StressEffects final : public FakeEffects, public keyferry::command::Result
       assert(evidence.neutral_mask == 3);
       terminal = true;
       ++completed;
+    } else if (evidence.result != keyferry::protocol::ResultCode::kAccepted &&
+               evidence.result != keyferry::protocol::ResultCode::kStarted) {
+      ++failed;
+      last_failure = evidence;
     }
   }
   void Cancel(std::uint64_t) override {}
@@ -638,7 +644,10 @@ class StressEffects final : public FakeEffects, public keyferry::command::Result
   }
 };
 
-void TestRustTypingStress(const char* path) {
+// Splits a Rust-exported wire vector into frames. C++ re-encoding must agree byte for byte, and
+// the production SHA256 profile comes from the commands, not a second authority.
+std::vector<std::vector<std::uint8_t>> ReadVectorFrames(const char* path,
+                                                        std::array<std::uint8_t, 32>* profile) {
   std::ifstream input(path);
   std::string hex;
   input >> hex;
@@ -646,42 +655,116 @@ void TestRustTypingStress(const char* path) {
   std::vector<std::uint8_t> bytes;
   for (std::size_t i = 0; i < hex.size(); i += 2)
     bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
-  // Extract the production SHA256 profile from the first command, not a second authority.
   std::array<std::uint8_t, keyferry::protocol::kMaxDecodedFrame> scratch{};
-  std::array<std::uint8_t, 32> profile{};
   std::vector<std::vector<std::uint8_t>> frames;
   std::size_t begin = 0;
   for (std::size_t i = 0; i < bytes.size(); ++i) if (bytes[i] == 0) {
     frames.emplace_back(bytes.begin() + begin, bytes.begin() + i + 1);
     const auto frame = Decode(frames.back(), scratch);
-    // C++ re-encoding must agree byte for byte with Rust.
     assert(Frame(static_cast<MessageType>(frame.message_type), frame.sequence,
                  {frame.payload, frame.payload + frame.payload_length}) == frames.back());
-    if (frame.message_type == static_cast<std::uint8_t>(MessageType::kCommand))
-      std::copy_n(frame.payload + 20, 32, profile.begin());
+    if (frame.message_type == static_cast<std::uint8_t>(MessageType::kCommand) &&
+        std::all_of(profile->begin(), profile->end(), [](std::uint8_t b) { return b == 0; }))
+      std::copy_n(frame.payload + 20, 32, profile->begin());
     begin = i + 1;
   }
+  return frames;
+}
+
+void AuthenticateStressSession(EndpointSession& session) {
+  TlsClientPolicy policy{};
+  policy.server_name = "controller.invalid"; policy.server_name_length = 18;
+  policy.port = 4433; policy.peer_spki_sha256.fill(0xA5);
+  assert(session.BeginTls(policy, {keyferry::endpoint::kTls12Version,
+      keyferry::endpoint::kRequiredCipherSuite, PeerKeyAlgorithm::kEcdsaP256,
+      policy.peer_spki_sha256}));
+  std::vector<std::uint8_t> challenge(66, 1);
+  challenge[64] = keyferry::protocol::kMajor; challenge[65] = keyferry::protocol::kMinor;
+  auto wire = Frame(MessageType::kAuthChallenge, 0, challenge);
+  assert(session.ConsumeTls(wire.data(), wire.size()));
+  std::vector<std::uint8_t> ready(34, 0);
+  std::fill_n(ready.begin(), 16, 1);
+  ready[16] = keyferry::protocol::kMajor; ready[17] = keyferry::protocol::kMinor;
+  WriteLe32(ready.data() + 18, 1); WriteLe32(ready.data() + 22, 45000);
+  WriteLe32(ready.data() + 26, 10000); WriteLe32(ready.data() + 30, 500);
+  wire = Frame(MessageType::kSessionReady, 1, ready);
+  assert(session.ConsumeTls(wire.data(), wire.size()));
+}
+
+// Feeds `wire` in reads of `split` bytes, so frames straddle TLS record reads.
+bool ConsumeSplit(EndpointSession& session, const std::vector<std::uint8_t>& wire,
+                  std::size_t split) {
+  for (std::size_t offset = 0; offset < wire.size(); offset += split) {
+    const auto count = std::min<std::size_t>(split, wire.size() - offset);
+    if (!session.ConsumeTls(wire.data() + offset, count)) return false;
+  }
+  return true;
+}
+
+// A long `keyctl mcp` session on one epoch (calibration probes, glides, clicks, drags, scrolls,
+// chords, text), exported by keyferryd. Every command completes with dual-neutral EMITTED and
+// the next ARM arrives at the exact boundary; the daemon's UNKNOWN-recovery tail (a frame the
+// endpoint answers itself, then RELEASE_INPUT_ALL) also completes on the same session.
+void TestRustPointerSession(const char* path) {
+  std::array<std::uint8_t, 32> profile{};
+  const auto frames = ReadVectorFrames(path, &profile);
+  std::array<std::uint8_t, keyferry::protocol::kMaxDecodedFrame> scratch{};
+  for (const auto split : {1U, 7U, 512U, 513U}) {
+    StressEffects effects(profile);
+    std::array<std::uint8_t, 16> id{}; id[0] = 1;
+    EndpointSession session(id, effects);
+    AuthenticateStressSession(session);
+    std::size_t f = 0;
+    unsigned chunks = 0;
+    for (; Decode(frames[f], scratch).message_type == static_cast<std::uint8_t>(MessageType::kArm);
+         f += 2) {
+      auto wire = frames[f];
+      wire.insert(wire.end(), frames[f + 1].begin(), frames[f + 1].end());
+      const bool consumed = ConsumeSplit(session, wire, split);
+      const auto deadline = effects.now + 2000;
+      while (consumed && !effects.terminal && effects.failed == 0 && effects.now < deadline)
+        effects.Tick();
+      if (!consumed || !effects.terminal) {
+        std::fprintf(stderr,
+                     "pointer session: chunk=%u split=%u consumed=%d site=%u type=0x%02x "
+                     "sequence=%u failed=%u result=%u reason=0x%04x active=%d pending=%d\n",
+                     chunks, split, consumed, session.reject_diagnostic().site,
+                     session.reject_diagnostic().message_type,
+                     session.reject_diagnostic().sequence, effects.failed,
+                     static_cast<unsigned>(effects.last_failure.result),
+                     static_cast<unsigned>(effects.last_failure.reason),
+                     effects.executor.active(), effects.hid.report_needed());
+        assert(false);
+      }
+      ++chunks;
+      assert(!effects.hid.report_needed() && session.authenticated());
+    }
+    assert(chunks > 64 && effects.completed == chunks);
+    const auto renew = frames[f];
+    assert(Decode(renew, scratch).message_type ==
+           static_cast<std::uint8_t>(MessageType::kLeaseRenew));
+    assert(ConsumeSplit(session, renew, split));
+    assert(Decode(effects.sent, scratch).message_type ==
+           static_cast<std::uint8_t>(MessageType::kError));
+    assert(ConsumeSplit(session, frames[f + 1], split));
+    while (!effects.terminal && effects.now < 1000000) effects.Tick();
+    assert(f + 2 == frames.size() && effects.completed == chunks + 1 && effects.failed == 0);
+    assert(session.authenticated() && !effects.hid.armed() && !effects.hid.report_needed());
+    assert(keyferry::hid::is_zero(effects.hid.current_report()));
+    assert(keyferry::hid::is_zero(effects.hid.current_mouse_report()));
+  }
+}
+
+void TestRustTypingStress(const char* path) {
+  std::array<std::uint8_t, keyferry::protocol::kMaxDecodedFrame> scratch{};
+  std::array<std::uint8_t, 32> profile{};
+  const auto frames = ReadVectorFrames(path, &profile);
   for (const auto split : {1U, 7U, 128U, 512U, 513U}) {
     StressEffects effects(profile);
     std::array<std::uint8_t, 16> id{}; id[0] = 1;
     EndpointSession session(id, effects);
-    TlsClientPolicy policy{};
-    policy.server_name = "controller.invalid"; policy.server_name_length = 18;
-    policy.port = 4433; policy.peer_spki_sha256.fill(0xA5);
-    assert(session.BeginTls(policy, {keyferry::endpoint::kTls12Version,
-        keyferry::endpoint::kRequiredCipherSuite, PeerKeyAlgorithm::kEcdsaP256,
-        policy.peer_spki_sha256}));
-    std::vector<std::uint8_t> challenge(66, 1);
-    challenge[64] = keyferry::protocol::kMajor; challenge[65] = keyferry::protocol::kMinor;
-    auto wire = Frame(MessageType::kAuthChallenge, 0, challenge);
-    assert(session.ConsumeTls(wire.data(), wire.size()));
-    std::vector<std::uint8_t> ready(34, 0);
-    std::fill_n(ready.begin(), 16, 1);
-    ready[16] = keyferry::protocol::kMajor; ready[17] = keyferry::protocol::kMinor;
-    WriteLe32(ready.data() + 18, 1); WriteLe32(ready.data() + 22, 45000);
-    WriteLe32(ready.data() + 26, 10000); WriteLe32(ready.data() + 30, 500);
-    wire = Frame(MessageType::kSessionReady, 1, ready);
-    assert(session.ConsumeTls(wire.data(), wire.size()));
+    AuthenticateStressSession(session);
+    std::vector<std::uint8_t> wire;
     for (std::size_t f = 0; f < frames.size(); f += 2) {
       wire = frames[f]; wire.insert(wire.end(), frames[f + 1].begin(), frames[f + 1].end());
       for (std::size_t offset = 0; offset < wire.size(); offset += split) {
@@ -729,7 +812,8 @@ void TestRustTypingStress(const char* path) {
 }
 
 int main(int argc, char** argv) {
-  if (argc == 2) TestRustTypingStress(argv[1]);
+  if (argc >= 2) TestRustTypingStress(argv[1]);
+  if (argc >= 3) TestRustPointerSession(argv[2]);
   std::puts("test: configuration");
   std::fflush(stdout);
   TestConfigurationValidation();
