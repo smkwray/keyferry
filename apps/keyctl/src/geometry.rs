@@ -1,5 +1,5 @@
 //! Cursor binding evidence and nonsecret geometry. No retained frames or OCR text.
-use super::frames::Frame;
+use super::frames::{pixel_changed, Frame, MotionMask};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -82,18 +82,28 @@ pub(super) fn linear(f: &Frame, x: f64, y: f64) -> Result<[f64; 2], &'static str
 
 /// Intersection of two temporal differences isolates the cursor in the middle frame.
 /// Two compact components or animation reject rather than guess a binding.
-pub(super) fn cursor(a: &Frame, b: &Frame, c: &Frame) -> Result<[f64; 2], &'static str> {
+pub(super) fn cursor(
+    a: &Frame,
+    b: &Frame,
+    c: &Frame,
+    ignored: &MotionMask,
+) -> Result<[f64; 2], &'static str> {
     let key = |f: &Frame| (f.width, f.height, f.native, f.generation);
     if key(a) != key(b) || key(b) != key(c) {
         return Err("capture.geometry_changed");
     }
     let count = b.width as usize * b.height as usize;
     let mut mask = vec![false; count];
-    let differs = |p: &[u8], q: &[u8]| p.iter().zip(q).any(|(p, q)| p.abs_diff(*q) >= 35);
+    // Validates the mask's frame binding before indexing it.
+    ignored.changed(a, b)?;
+    if !ignored.small() {
+        return Err("calibration.animated_or_ambiguous");
+    }
     for (i, marked) in mask.iter_mut().enumerate() {
         let k = i * 3;
-        *marked = differs(&a.rgb[k..k + 3], &b.rgb[k..k + 3])
-            && differs(&b.rgb[k..k + 3], &c.rgb[k..k + 3]);
+        *marked = !ignored.ignored(i)
+            && pixel_changed(&a.rgb[k..k + 3], &b.rgb[k..k + 3])
+            && pixel_changed(&b.rgb[k..k + 3], &c.rgb[k..k + 3]);
     }
     if mask.iter().filter(|v| **v).count() > count / 50 {
         return Err("calibration.animated_or_ambiguous");

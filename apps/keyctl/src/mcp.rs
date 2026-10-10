@@ -25,6 +25,9 @@ use daemon_frames::{automatic_device, DaemonFrames};
 
 const MAX_MESSAGE: usize = 65_536;
 const FRAME_WAIT: Duration = Duration::from_secs(20);
+const ACTION_WAIT: Duration = Duration::from_secs(3);
+const SETTLE: Duration = Duration::from_millis(350);
+const ANIMATION_SAMPLE: Duration = Duration::from_millis(1100);
 const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.\nkeyctl capture calibrate DEVICE [--source NAME_OR_ID]\n  Moves pointer through daemon once per probe; requires an approved harmless target.";
 
 fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
@@ -259,6 +262,11 @@ fn tools() -> Vec<Value> {
                    properties: Value,
                    required: &[&str],
                    read_only: bool| {
+        let description = if !read_only && name != "calibrate" {
+            format!("{description} Returns settled after visible change and 350 ms quiet (3 s observation bound), latency_ms to first change or timeout, and frame_id. settled:false never authorizes replay.")
+        } else {
+            description.to_owned()
+        };
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
     };
@@ -279,7 +287,7 @@ fn tools() -> Vec<Value> {
         add(name,"Observe fresh frames, optionally within a screenshot-pixel region. Returns matched or timed_out; never treats a frozen/missing stream as stable.",json!({"timeout_ms":{"type":"integer","minimum":1,"maximum":30000},"region":region}),&["timeout_ms"],true);
     }
     add("find_text","Local OCR line boxes in screenshot pixels, optional case-insensitive substring query. No persistence/logging; Windows only.",json!({"query":{"type":"string","maxLength":256}}),&[],true);
-    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Use a static harmless target. Persists only geometry.",json!({}),&[],false);
+    add("calibrate","Move pointer at safe known positions, prove capture binding, fit geometry and verify an independent probe. Masks small animations learned while stationary; waits up to 3 s per probe and reports measured latency_ms. Persists only geometry. Use an approved harmless target.",json!({}),&[],false);
     add("status","Authenticated device/armed state, pointer capability, capture restart status and current/persisted geometry binding.",json!({}),&[],true);
     add(
         "list_devices",
@@ -717,9 +725,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             if !text.is_ascii() {
                 return Err(failure("text.unsupported"));
             }
-            return self
-                .submission(vec![json!({"type":"text","value":text})], false, cancelled)
-                .map(|v| tool_result(v, false));
+            let (before, mask) = self.stationary(cancelled)?;
+            let mut result =
+                self.submission(vec![json!({"type":"text","value":text})], false, cancelled)?;
+            self.settle_result(&before, &mask, &mut result, cancelled);
+            return Ok(tool_result(result, false));
         }
         if name == "key" {
             let keys = args["keys"]
@@ -730,9 +740,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             } else {
                 json!({"type":"chord","keys":keys})
             };
-            return self
-                .submission(vec![action], false, cancelled)
-                .map(|v| tool_result(v, false));
+            let (before, mask) = self.stationary(cancelled)?;
+            let mut result = self.submission(vec![action], false, cancelled)?;
+            self.settle_result(&before, &mask, &mut result, cancelled);
+            return Ok(tool_result(result, false));
         }
         self.frames.request_ocr(name == "find_text");
         let frame = self.frame(cancelled)?;
@@ -819,11 +830,118 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             "scroll"=>actions.push(json!({"type":"scroll","vertical":args["dy"],"horizontal":args["dx"]})),
             _=>return Err(failure("rpc.unknown_tool")),
         }
-        let result = self.submission(actions, true, cancelled)?;
-        Ok(tool_result(
-            json!({"command":result,"uncalibrated":uncalibrated,"mapping":if uncalibrated{"linear-full-frame"}else{"calibrated"}}),
-            false,
-        ))
+        let (before, mask) = self.stationary(cancelled)?;
+        // A reconnect during animation sampling invalidates the already compiled mapping.
+        mask.changed(&frame, &before).map_err(failure)?;
+        let command = self.submission(actions, true, cancelled)?;
+        let mut result = json!({"command":command,"uncalibrated":uncalibrated,"mapping":if uncalibrated{"linear-full-frame"}else{"calibrated"}});
+        self.settle_result(&before, &mask, &mut result, cancelled);
+        Ok(tool_result(result, false))
+    }
+
+    fn stationary(
+        &mut self,
+        cancelled: &AtomicBool,
+    ) -> Result<(Arc<Frame>, frames::MotionMask), Value> {
+        self.frames.request_ocr(false);
+        let first = self.frame(cancelled)?;
+        let mut mask = frames::MotionMask::new(&first);
+        let start = Instant::now();
+        let mut previous = first;
+        while start.elapsed() < ANIMATION_SAMPLE {
+            let remaining = ANIMATION_SAMPLE.saturating_sub(start.elapsed());
+            match self
+                .frames
+                .latest(Some(previous.serial), remaining, cancelled)
+            {
+                Ok(next) => {
+                    if next.serial <= previous.serial || next.at <= previous.at {
+                        return Err(failure("capture.stale_frame"));
+                    }
+                    mask.learn(&previous, &next).map_err(failure)?;
+                    previous = next;
+                }
+                Err("capture.frame_timeout") => break,
+                Err(code) => return Err(failure(code)),
+            }
+        }
+        Ok((previous, mask))
+    }
+
+    /// A quiet old frame is not completion. First observe significant change, then require
+    /// a continuous quiet interval on fresh frames. Screens and masks remain in memory.
+    fn observe_action(
+        &mut self,
+        before: &Arc<Frame>,
+        mask: &frames::MotionMask,
+        cancelled: &AtomicBool,
+    ) -> Result<(Arc<Frame>, Value), Value> {
+        let start = Instant::now();
+        let mut previous = before.clone();
+        let mut anchor = before.clone();
+        let mut stable_since = start;
+        let mut latency = None;
+        // Large animations are not masked; they must settle normally.
+        let unmasked = frames::MotionMask::new(before);
+        let mask = if mask.small() { mask } else { &unmasked };
+        loop {
+            let remaining = ACTION_WAIT.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Ok((
+                    previous.clone(),
+                    json!({"settled":false,"latency_ms":latency.unwrap_or(start.elapsed().as_millis()),"frame_id":previous.serial}),
+                ));
+            }
+            let next = match self
+                .frames
+                .latest(Some(previous.serial), remaining, cancelled)
+            {
+                Ok(next) => next,
+                Err("capture.frame_timeout") => continue,
+                Err(code) => return Err(failure(code)),
+            };
+            if next.serial <= previous.serial || next.at <= previous.at {
+                return Err(failure("capture.stale_frame"));
+            }
+            let changed = mask.changed(before, &next).map_err(failure)? >= 6;
+            if next.at >= start && changed && latency.is_none() {
+                latency = Some(start.elapsed().as_millis());
+                stable_since = Instant::now();
+                anchor = next.clone();
+            }
+            if mask.changed(&anchor, &next).map_err(failure)? >= 6 {
+                stable_since = Instant::now();
+                anchor = next.clone();
+            }
+            if next.at >= start && latency.is_some() && stable_since.elapsed() >= SETTLE {
+                return Ok((
+                    next.clone(),
+                    json!({"settled":true,"latency_ms":latency,"frame_id":next.serial}),
+                ));
+            }
+            previous = next;
+        }
+    }
+
+    fn settle_result(
+        &mut self,
+        before: &Arc<Frame>,
+        mask: &frames::MotionMask,
+        result: &mut Value,
+        cancelled: &AtomicBool,
+    ) {
+        let start = Instant::now();
+        let observation = match self.observe_action(before, mask, cancelled) {
+            Ok((_, observation)) => observation,
+            // Input has already completed: preserve its receipt and never suggest replay.
+            Err(error) => {
+                json!({"settled":false,"latency_ms":start.elapsed().as_millis(),"frame_id":null,"settle_error":error})
+            }
+        };
+        result
+            .as_object_mut()
+            .expect("action result")
+            .extend(observation.as_object().expect("observation").clone());
     }
     fn wait(
         &mut self,
@@ -883,44 +1001,24 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
             previous = next;
         }
     }
-    fn probe(&mut self, p: [f64; 2], cancelled: &AtomicBool) -> Result<(Arc<Frame>, Value), Value> {
+    fn probe(
+        &mut self,
+        p: [f64; 2],
+        mask: &frames::MotionMask,
+        cancelled: &AtomicBool,
+    ) -> Result<(Arc<Frame>, Value), Value> {
         let before = self.frame(cancelled)?;
-        let receipt = self.submission(
+        let mut receipt = self.submission(
             vec![json!({"type":"move_absolute","x":p[0],"y":p[1]})],
             true,
             cancelled,
         )?;
-        // Ignore frames captured while the command was still running.
-        let complete = Instant::now();
-        let deadline = complete + Duration::from_secs(3);
-        let mut serial = before.serial;
-        loop {
-            let f = self
-                .frames
-                .latest(
-                    Some(serial),
-                    deadline.saturating_duration_since(Instant::now()),
-                    cancelled,
-                )
-                .map_err(failure)?;
-            serial = f.serial;
-            if (f.width, f.height, f.native, f.generation)
-                != (
-                    before.width,
-                    before.height,
-                    before.native,
-                    before.generation,
-                )
-            {
-                return Err(failure("capture.geometry_changed"));
-            }
-            if f.at >= complete + Duration::from_millis(120) {
-                return Ok((f, receipt));
-            }
-            if Instant::now() >= deadline {
-                return Err(failure("calibration.frame_timeout"));
-            }
+        let (frame, observation) = self.observe_action(&before, mask, cancelled)?;
+        if observation["settled"] != true {
+            return Err(failure("calibration.cursor_not_seen"));
         }
+        receipt["latency_ms"] = observation["latency_ms"].clone();
+        Ok((frame, receipt))
     }
     fn calibrate(&mut self, cancelled: &AtomicBool) -> Result<Value, Value> {
         self.choose_device()?;
@@ -929,6 +1027,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         self.geometry = None;
         self.loaded = true;
         self.require_pointer()?;
+        let (_, mask) = self.stationary(cancelled)?;
+        if !mask.small() {
+            return Err(failure("calibration.animated_or_ambiguous"));
+        }
         let positions = [
             [0.12, 0.15],
             [0.80, 0.20],
@@ -942,12 +1044,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         // Only three frames retained while streaming probes; snapshots never hit disk.
         let mut samples = Vec::new();
         for (i, p) in positions.iter().enumerate() {
-            let (f, receipt) = self.probe(*p, cancelled)?;
+            let (f, receipt) = self.probe(*p, &mask, cancelled)?;
             receipts.push(json!({"position":p,"frame_id":f.serial,"command":receipt}));
             captured.push(f);
             if captured.len() == 3 {
-                let point =
-                    geometry::cursor(&captured[0], &captured[1], &captured[2]).map_err(failure)?;
+                let point = geometry::cursor(&captured[0], &captured[1], &captured[2], &mask)
+                    .map_err(failure)?;
                 samples.push((positions[i - 1], point));
                 captured.remove(0);
             }
@@ -959,11 +1061,11 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         let fitted = geometry::fit(&self.device, source, last, &samples).map_err(failure)?;
         let before = last.clone();
         let check = [0.35, 0.55];
-        let (middle, receipt) = self.probe(check, cancelled)?;
+        let (middle, receipt) = self.probe(check, &mask, cancelled)?;
         receipts.push(json!({"position":check,"frame_id":middle.serial,"command":receipt}));
-        let (after, receipt) = self.probe(positions[0], cancelled)?;
+        let (after, receipt) = self.probe(positions[0], &mask, cancelled)?;
         receipts.push(json!({"position":positions[0],"frame_id":after.serial,"command":receipt}));
-        let observed = geometry::cursor(&before, &middle, &after).map_err(failure)?;
+        let observed = geometry::cursor(&before, &middle, &after, &mask).map_err(failure)?;
         if (0..2)
             .any(|a| (observed[a] - fitted.origin[a] - fitted.extent[a] * check[a]).abs() > 5.0)
         {
@@ -972,8 +1074,12 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         geometry::save(&self.root, &fitted).map_err(failure)?;
         self.bound_generation = Some(after.generation);
         self.geometry = Some(fitted.clone());
+        let latency_ms = receipts
+            .iter()
+            .filter_map(|r| r["command"]["latency_ms"].as_u64())
+            .max();
         Ok(
-            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
+            json!({"bound":true,"geometry":fitted,"active_video_rectangle":fitted.active_rectangle(),"probes":receipts,"latency_ms":latency_ms,"verification_error_px":[observed[0]-fitted.origin[0]-fitted.extent[0]*check[0],observed[1]-fitted.origin[1]-fitted.extent[1]*check[1]],"pointer_moved":true}),
         )
     }
 }

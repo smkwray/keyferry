@@ -33,7 +33,18 @@ struct FakeFrames {
     next: u64,
     scripted: VecDeque<Frame>,
     change_after: Option<u64>,
-    pointer: Option<Arc<Mutex<[f64; 2]>>>,
+    pointer: Option<Arc<Mutex<Visual>>>,
+    visible: Visual,
+    delay: Duration,
+    animate: bool,
+    never_change: bool,
+    started: Instant,
+}
+#[derive(Clone)]
+struct Visual {
+    pointer: [f64; 2],
+    revision: u8,
+    at: Instant,
 }
 impl FakeFrames {
     fn new() -> Self {
@@ -42,6 +53,15 @@ impl FakeFrames {
             scripted: VecDeque::new(),
             change_after: None,
             pointer: None,
+            visible: Visual {
+                pointer: [0.5, 0.5],
+                revision: 0,
+                at: Instant::now(),
+            },
+            delay: Duration::ZERO,
+            animate: false,
+            never_change: false,
+            started: Instant::now(),
         }
     }
 }
@@ -69,10 +89,52 @@ impl FrameSource for FakeFrames {
             thread::sleep(Duration::from_millis(50));
         }
         self.next = self.next.max(after.unwrap_or(0)) + 1;
-        let mut f = self.pointer.as_ref().map_or_else(
-            || frame(320, 240, self.next),
-            |p| cursor_frame(*p.lock().unwrap(), self.next),
-        );
+        if let Some(pointer) = &self.pointer {
+            let desired = pointer.lock().unwrap();
+            if !self.never_change && desired.at.elapsed() >= self.delay {
+                self.visible = desired.clone();
+            }
+        }
+        let mut f = if self.pointer.is_some() {
+            cursor_frame(self.visible.pointer, self.next)
+        } else {
+            frame(320, 240, self.next)
+        };
+        if self.visible.revision != 0 {
+            for y in 208..214 {
+                for x in 20..28 {
+                    let i = (y * f.width + x) as usize * 3;
+                    f.rgb[i..i + 3].fill(if self.visible.revision % 2 == 1 {
+                        200
+                    } else {
+                        100
+                    });
+                }
+            }
+        }
+        if self.animate {
+            let elapsed = self.started.elapsed().as_millis();
+            // Blink every 200 ms and advance a clock glyph every second, away from probes.
+            for (x, width, value) in [
+                (
+                    280,
+                    3,
+                    if (elapsed / 200).is_multiple_of(2) {
+                        255
+                    } else {
+                        60
+                    },
+                ),
+                (288, 8, 100 + (elapsed / 1000 % 4) as u8 * 40),
+            ] {
+                for y in 8..20 {
+                    for x in x..x + width {
+                        let i = (y * f.width + x) as usize * 3;
+                        f.rgb[i..i + 3].fill(value);
+                    }
+                }
+            }
+        }
         if self.change_after.is_some_and(|n| self.next >= n) {
             f.rgb.fill(255);
         }
@@ -237,9 +299,10 @@ fn cursor_differencing_synthetic_and_ambiguity() {
     let a = cursor_frame([0.1, 0.1], 1);
     let b = cursor_frame([0.7, 0.2], 2);
     let c = cursor_frame([0.3, 0.8], 3);
-    assert_eq!(geometry::cursor(&a, &b, &c).unwrap(), [216.0, 66.0]);
+    let mask = frames::MotionMask::new(&a);
+    assert_eq!(geometry::cursor(&a, &b, &c, &mask).unwrap(), [216.0, 66.0]);
     assert_eq!(
-        geometry::cursor(&a, &a, &a).unwrap_err(),
+        geometry::cursor(&a, &a, &a, &mask).unwrap_err(),
         "calibration.cursor_not_seen"
     );
     let mut b2 = b.clone();
@@ -250,12 +313,12 @@ fn cursor_differencing_synthetic_and_ambiguity() {
         }
     }
     assert_eq!(
-        geometry::cursor(&a, &b2, &c).unwrap_err(),
+        geometry::cursor(&a, &b2, &c, &mask).unwrap_err(),
         "calibration.animated_or_ambiguous"
     );
     let mut c2 = c.clone();
     c2.generation = 2;
-    assert!(geometry::cursor(&a, &b, &c2).is_err());
+    assert!(geometry::cursor(&a, &b, &c2, &mask).is_err());
 }
 
 #[test]
@@ -383,7 +446,11 @@ async fn harness(
     } else {
         0
     };
-    let pointer = Arc::new(Mutex::new([0.5, 0.5]));
+    let pointer = Arc::new(Mutex::new(Visual {
+        pointer: [0.5, 0.5],
+        revision: 0,
+        at: Instant::now(),
+    }));
     let observed = pointer.clone();
     let app = daemon.router().layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -399,10 +466,13 @@ async fn harness(
                     let value: Value = serde_json::from_slice(&bytes).unwrap();
                     for action in value["actions"].as_array().unwrap() {
                         if action["type"] == "move_absolute" || action["type"] == "drag" {
-                            *observed.lock().unwrap() =
+                            observed.lock().unwrap().pointer =
                                 [action["x"].as_f64().unwrap(), action["y"].as_f64().unwrap()];
+                        } else {
+                            observed.lock().unwrap().revision += 1;
                         }
                     }
+                    observed.lock().unwrap().at = Instant::now();
                     axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
                 } else {
                     request
@@ -542,6 +612,94 @@ async fn calibrated_simulator_binding_and_all_actions() {
     })
     .await
     .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_animated_capture_calibrates_and_settles_every_mcp_action() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    s.frames.delay = Duration::from_millis(1500);
+    s.frames.animate = true;
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        let calibration = s.dispatch(json!({"jsonrpc":"2.0","id":"calibration","method":"tools/call","params":{"name":"calibrate","arguments":{}}}), &c).unwrap();
+        assert_eq!(calibration["result"]["isError"], false, "{calibration}");
+        let calibrated = &calibration["result"]["structuredContent"];
+        assert_eq!(calibrated["bound"], true);
+        assert!(calibrated["latency_ms"].as_u64().unwrap() >= 1400);
+        assert!((s.geometry.as_ref().unwrap().origin[0] - 20.0).abs() < 1.0);
+        assert!((s.geometry.as_ref().unwrap().extent[1] - 180.0).abs() < 1.0);
+        let persisted = geometry::load(&s.root, SIMULATOR_DEVICE_ID, "fake-hdmi").unwrap().unwrap();
+        let record = serde_json::to_value(persisted).unwrap();
+        assert_eq!(record.as_object().unwrap().len(), 7);
+        assert!(record.get("latency_ms").is_none());
+        s.call("screenshot", &json!({}), &c).unwrap();
+        for (name, arguments) in [
+            ("move", json!({"x":150,"y":110})),
+            ("click", json!({"x":180,"y":130})),
+            ("drag", json!({"from_x":100,"from_y":80,"to_x":220,"to_y":170})),
+            ("scroll", json!({"x":160,"y":120,"dx":1,"dy":-1})),
+            ("key", json!({"keys":["OPTION","A"]})),
+            ("type_text", json!({"text":"ordinary ascii"})),
+        ] {
+            let start = Instant::now();
+            let response = s.dispatch(json!({"jsonrpc":"2.0","id":name,"method":"tools/call","params":{"name":name,"arguments":arguments}}), &c).unwrap();
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            let result = &response["result"]["structuredContent"];
+            assert_eq!(result["settled"], true, "{name}: {result}");
+            let latency = result["latency_ms"].as_u64().unwrap();
+            assert!((1400..=2600).contains(&latency), "{name}: {latency}");
+            assert!(start.elapsed() >= Duration::from_millis(1750));
+            let command = if result.get("command").is_some() { &result["command"] } else { result };
+            assert_eq!(command["outcome"], "EMITTED");
+            let id = uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
+            assert_eq!(transport.execution_count(id), 1);
+            assert!(!transport.is_remotely_armed());
+            let shot = s.call("screenshot", &json!({}), &c).unwrap();
+            assert!(shot["structuredContent"]["frame_id"].as_u64().unwrap() >= result["frame_id"].as_u64().unwrap());
+            let visible = &s.frames.visible;
+            let requested = s.frames.pointer.as_ref().unwrap().lock().unwrap();
+            assert_eq!(visible.pointer, requested.pointer);
+            assert_eq!(visible.revision, requested.revision);
+        }
+    }).await.unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn animated_capture_without_cursor_response_times_out_without_binding_or_replay() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    s.frames.never_change = true;
+    s.frames.animate = true;
+    tokio::task::spawn_blocking(move || {
+        init(&mut s);
+        let c = AtomicBool::new(false);
+        s.call("screenshot", &json!({}), &c).unwrap();
+        let start = Instant::now();
+        let response = s.dispatch(json!({"jsonrpc":"2.0","id":"move","method":"tools/call","params":{"name":"move","arguments":{"x":100,"y":150,"uncalibrated":true}}}), &c).unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["settled"], false);
+        assert!(result["latency_ms"].as_u64().unwrap() >= 2900);
+        assert!(result["frame_id"].as_u64().is_some());
+        assert!(start.elapsed() < Duration::from_secs(6));
+        let id = uuid::Uuid::parse_str(result["command"]["command_id"].as_str().unwrap()).unwrap();
+        assert_eq!(transport.execution_count(id), 1);
+        let start = Instant::now();
+        let response = s.dispatch(json!({"jsonrpc":"2.0","id":"calibration","method":"tools/call","params":{"name":"calibrate","arguments":{}}}), &c).unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(response["result"]["structuredContent"]["error"]["code"], "calibration.cursor_not_seen");
+        assert!(start.elapsed() >= Duration::from_secs(3));
+        assert!(start.elapsed() < Duration::from_secs(6));
+        assert!(s.geometry.is_none() && s.bound_generation.is_none());
+        assert!(geometry::load(&s.root, SIMULATOR_DEVICE_ID, "fake-hdmi").unwrap().is_none());
+        assert!(!transport.is_remotely_armed());
+    }).await.unwrap();
     task.abort();
     fs::remove_dir_all(root).unwrap();
 }
