@@ -1583,6 +1583,11 @@ mod tests {
 
     #[test]
     fn production_plan_path_reads_exact_files_and_returns_compact_json() {
+        const PORT: &str = if cfg!(windows) {
+            "COM7"
+        } else {
+            "/dev/cu.keyferry-synthetic"
+        };
         const BOARD: &[u8] =
             include_bytes!("../../../tests/fixtures/qualified-board-manifest.toml");
         const PARTITIONS: &[u8] =
@@ -1697,7 +1702,7 @@ mod tests {
         };
         let raw_clone_observation = json!({
             "schema": "keyferry.clone-split-observation.v1",
-            "port": "COM16",
+            "port": PORT,
             "rom_mac": clone_binding.rom_mac.clone(),
             "chip": "esp32s3",
             "soc_revision": "v0.2",
@@ -1719,18 +1724,18 @@ mod tests {
         let observed = clone_observation(
             &prepared_package,
             &clone_binding,
-            "COM16",
+            PORT,
             &serde_json::to_vec(&raw_clone_observation).unwrap(),
         )
         .unwrap();
-        assert_eq!(observed.exact_unit.port, "COM16");
+        assert_eq!(observed.exact_unit.port, PORT);
         let mut unknown = raw_clone_observation;
         unknown["unexpected"] = json!(true);
         assert_eq!(
             clone_observation(
                 &prepared_package,
                 &clone_binding,
-                "COM16",
+                PORT,
                 &serde_json::to_vec(&unknown).unwrap(),
             ),
             Err("firmware.clone_split_observation")
@@ -1775,7 +1780,7 @@ mod tests {
                 port: &str,
                 requirements: RomProbeRequirements,
             ) -> Result<Vec<u8>, &'static str> {
-                assert_eq!(port, "COM7");
+                assert_eq!(port, PORT);
                 assert_eq!(requirements.bootloader_size_bytes, BOOTLOADER.len() as u64);
                 assert_eq!(
                     requirements.partition_table_size_bytes,
@@ -1788,7 +1793,7 @@ mod tests {
             serde_json::to_vec(&json!({
                 "schema": "keyferry.rom-probe-result.v1",
                 "mode": "READ_ONLY_PLAN",
-                "port": "COM7",
+                "port": PORT,
                 "rom_mac": "02:00:00:00:00:01",
                 "chip": "esp32s3",
                 "soc_revision": "v0.2",
@@ -1811,7 +1816,7 @@ mod tests {
                 "--package".to_owned(),
                 package.to_string_lossy().into_owned(),
                 "--port".to_owned(),
-                "COM7".to_owned(),
+                PORT.to_owned(),
                 "--unit-record".to_owned(),
                 unit_record.to_string_lossy().into_owned(),
             ],
@@ -1823,7 +1828,7 @@ mod tests {
         .unwrap();
         let exact: serde_json::Value = serde_json::from_str(&exact_output).unwrap();
         assert_eq!(exact["mode"], "EXACT_UNIT_PLAN");
-        assert_eq!(exact["target"]["port"], "COM7");
+        assert_eq!(exact["target"]["port"], PORT);
         assert_eq!(exact["authorization_sha256"].as_str().unwrap().len(), 64);
         assert!(!exact_output.contains("02:00:00:00:00:01"));
         struct FakeBackup;
@@ -1837,7 +1842,7 @@ mod tests {
             ) -> Result<serde_json::Value, &'static str> {
                 assert_eq!(package.image().len(), 4096);
                 assert!(!record.is_empty());
-                assert_eq!(port, "COM7");
+                assert_eq!(port, PORT);
                 assert!(output.is_dir());
                 Ok(json!({"schema":"keyferry.firmware-backup-result.v1","outcome":"READ_VERIFIED"}))
             }
@@ -1848,7 +1853,7 @@ mod tests {
             "--package".to_owned(),
             package.to_string_lossy().into_owned(),
             "--port".to_owned(),
-            "COM7".to_owned(),
+            PORT.to_owned(),
             "--unit-record".to_owned(),
             unit_record.to_string_lossy().into_owned(),
             "--output".to_owned(),
@@ -1918,7 +1923,7 @@ print(json.dumps({{'schema':'keyferry.backup-session-result.v1','size_bytes':167
             let result = ProductionBackupRunner.backup_with_paths(
                 &prepared_package,
                 &fs::read(&unit_record).unwrap(),
-                "COM7",
+                PORT,
                 &destination,
                 &python,
                 &helper,
