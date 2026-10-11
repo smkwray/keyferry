@@ -2,8 +2,9 @@
 use super::ui;
 use keyferry::api::{ApiClient, CommandOutcome, DeviceView};
 use keyferry_layouts::{
-    compile_sequence, KeyboardSequenceV1, SequenceAction, SequenceArmPolicy, TypingTiming,
-    LEGACY_WIRE_MAPPING, SEQUENCE_SCHEMA_V1,
+    compile_sequence, InputAction, InputArmPolicy, InputSequenceV1, KeyboardSequenceV1,
+    SequenceAction, SequenceArmPolicy, TypingTiming, INPUT_SEQUENCE_SCHEMA_V1, LEGACY_WIRE_MAPPING,
+    SEQUENCE_SCHEMA_V1,
 };
 use slint::ComponentHandle;
 use std::{
@@ -111,35 +112,11 @@ fn submit_once(
     let result = client.submit_sequence(id, request).map(Zeroizing::new);
     request.zeroize();
     // Never display a peer's message or parser error: they can contain reflected input.
-    let mut outcome = result
+    let outcome = result
         .ok()
         .filter(|response| response.device_id == id && response.command_id == command_id)
         .map(|response| response.outcome);
-    let limit = Instant::now() + Duration::from_secs(30);
-    let mut cancel_requested = false;
-    loop {
-        if cancelled.load(Ordering::Acquire) && !cancel_requested {
-            // The POST may have started even when its receipt was lost. Cancel that exact
-            // command once, independently of whether a receipt or outcome poll succeeded.
-            if !matches!(
-                outcome,
-                Some(CommandOutcome::Emitted | CommandOutcome::Rejected | CommandOutcome::Aborted)
-            ) {
-                cancel_requested = true;
-                let _ = client.cancel(id, Some(&command_id)).map(Zeroizing::new);
-            }
-        }
-        if outcome.is_some_and(CommandOutcome::is_terminal) || Instant::now() >= limit {
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-        outcome = client
-            .command_outcome(id, &command_id)
-            .map(Zeroizing::new)
-            .ok()
-            .filter(|response| response.device_id == id && response.command_id == command_id)
-            .map(|response| response.outcome);
-    }
+    let outcome = await_outcome(client, id, &command_id, outcome, cancelled, None);
     let result = match outcome {
         Some(CommandOutcome::Emitted) => {
             "EMITTED: HID input completed. Successful unlock is unverified."
@@ -151,6 +128,119 @@ fn submit_once(
         _ => "UNKNOWN: input may have started. Check the target before requesting again.",
     };
     format!("{result}\nCommand: {command_id}. No automatic retry.")
+}
+
+fn await_outcome(
+    client: &ApiClient,
+    id: &str,
+    command_id: &str,
+    mut outcome: Option<CommandOutcome>,
+    cancelled: &AtomicBool,
+    abort_at: Option<Instant>,
+) -> Option<CommandOutcome> {
+    let limit = Instant::now() + Duration::from_secs(30);
+    let mut cancel_requested = false;
+    loop {
+        if (cancelled.load(Ordering::Acquire)
+            || abort_at.is_some_and(|deadline| Instant::now() >= deadline))
+            && !cancel_requested
+        {
+            // The POST may have started even when its receipt was lost. Cancel that exact
+            // command once, independently of whether a receipt or outcome poll succeeded.
+            if !matches!(
+                outcome,
+                Some(CommandOutcome::Emitted | CommandOutcome::Rejected | CommandOutcome::Aborted)
+            ) {
+                cancel_requested = true;
+                let _ = client.cancel(id, Some(command_id)).map(Zeroizing::new);
+            }
+        }
+        if outcome.is_some_and(CommandOutcome::is_terminal) || Instant::now() >= limit {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+        outcome = client
+            .command_outcome(id, command_id)
+            .map(Zeroizing::new)
+            .ok()
+            .filter(|response| response.device_id == id && response.command_id == command_id)
+            .map(|response| response.outcome);
+    }
+    outcome
+}
+
+fn wake_sequence() -> InputSequenceV1 {
+    // This request contains no text. Keep secrets on the hardened keyboard-sequence path.
+    // The daemon selects V2 on extended firmware; absolute-only firmware rejects the move.
+    InputSequenceV1 {
+        schema: INPUT_SEQUENCE_SCHEMA_V1.into(),
+        command_id: uuid::Uuid::now_v7().to_string(),
+        keyboard_profile: None,
+        arm: InputArmPolicy::CommandScoped,
+        start_within_ms: 5000,
+        keyboard_timing: None,
+        actions: vec![
+            InputAction::MoveRelative {
+                dx_counts: 1,
+                dy_counts: 0,
+            },
+            InputAction::Wait { ms: 150 },
+            InputAction::MoveRelative {
+                dx_counts: -1,
+                dy_counts: 0,
+            },
+            InputAction::Wait { ms: 1000 },
+        ],
+    }
+}
+
+fn submit_with_wake(
+    client: &ApiClient,
+    id: &str,
+    request: &mut KeyboardSequenceV1,
+    wake: bool,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> String {
+    if wake {
+        if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
+            request.zeroize();
+            return "Request expired or cancelled. Nothing was sent.".into();
+        }
+        let route_ready = client.device(id).is_ok_and(|view| ready(&view, id));
+        if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) || !route_ready {
+            request.zeroize();
+            return "Route changed, cancelled, or request expired. Nothing was sent.".into();
+        }
+        let prelude = wake_sequence();
+        let outcome = client
+            .submit_input_sequence(id, &prelude)
+            .map(Zeroizing::new)
+            .ok()
+            .filter(|response| {
+                response.device_id == id && response.command_id == prelude.command_id
+            })
+            .map(|response| response.outcome);
+        if await_outcome(
+            client,
+            id,
+            &prelude.command_id,
+            outcome,
+            cancelled,
+            Some(deadline),
+        ) != Some(CommandOutcome::Emitted)
+        {
+            request.zeroize();
+            return "Wake movement failed or is unconfirmed. No text was sent. Check the target; relative mouse movement may be unsupported. No automatic retry.".into();
+        }
+    }
+    // Recheck readiness, expiry and cancellation after the nonsecret wake command.
+    let result = submit_once(client, id, request, deadline, cancelled);
+    if wake {
+        result.replace("Nothing was sent", "No text was sent")
+    } else {
+        result
+    }
 }
 
 pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -218,6 +308,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // Slint owns this shared allocation; dropping it does not prove that it was wiped.
         let secret = window.get_secret();
         let enter = window.get_append_enter();
+        let wake = window.get_wake_before_text();
         clear(&window);
         if Instant::now() >= deadline {
             window.set_status("Request expired. Nothing was sent.".into());
@@ -240,7 +331,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let id = device_id.clone();
         let cancelled = Arc::clone(&send_cancelled);
         thread::spawn(move || {
-            let message = submit_once(&client, &id, &mut request, deadline, &cancelled);
+            let message = submit_with_wake(&client, &id, &mut request, wake, deadline, &cancelled);
             finish(weak, message);
         });
     });
@@ -301,6 +392,152 @@ mod tests {
     };
 
     const DEVICE: &str = "019d1234-5678-7abc-8123-456789abcdef";
+
+    #[test]
+    fn optional_wake_gates_text_and_preserves_one_shot_cleanup() {
+        for scenario in [
+            "off",
+            "emitted",
+            "rejected",
+            "aborted",
+            "unknown",
+            "lost",
+            "mismatched",
+            "cancel-wake",
+            "cancel-text",
+            "expired",
+            "route-changed",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let client = ApiClient::new(
+                keyferry::api::Endpoint::from_url(&format!(
+                    "http://{}",
+                    listener.local_addr().unwrap()
+                ))
+                .unwrap(),
+                "test-token-123456",
+            )
+            .unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let owner_cancel = Arc::clone(&cancelled);
+            let done = Arc::new(AtomicBool::new(false));
+            let stop = Arc::clone(&done);
+            let server = thread::spawn(move || {
+                let mut wake_id = String::new();
+                let mut text_id = String::new();
+                let (mut gets, mut wake_posts, mut text_posts, mut cancels) = (0, 0, 0, 0);
+                let limit = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(stream) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            assert!(Instant::now() < limit, "{scenario}: client did not finish");
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut byte = [0];
+                    while !bytes.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        bytes.push(byte[0]);
+                    }
+                    let headers = String::from_utf8(bytes).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let response = if headers.starts_with(&format!("GET /v1/devices/{DEVICE} ")) {
+                        gets += 1;
+                        serde_json::json!({"id":DEVICE,"label":"test stick","transport":"tls","link":"authenticated","mode":"keyboard","armed":scenario == "route-changed" && gets == 2,"arm_policy":"command-scoped"})
+                    } else if headers.starts_with(&format!("POST /v1/devices/{DEVICE}/input-sequences ")) {
+                        wake_posts += 1;
+                        let prelude: InputSequenceV1 = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(prelude.actions, wake_sequence().actions);
+                        let compiled = keyferry_layouts::compile_input_sequence(&prelude).unwrap();
+                        assert!(!compiled.has_keyboard);
+                        assert!(compiled.has_pointer);
+                        assert!(!String::from_utf8_lossy(&body).contains("private-fixture"));
+                        wake_id = prelude.command_id;
+                        if scenario == "lost" { continue; }
+                        if scenario == "cancel-wake" { owner_cancel.store(true, Ordering::Release); }
+                        if scenario == "expired" { thread::sleep(Duration::from_millis(200)); }
+                        serde_json::json!({"device_id":DEVICE,"command_id":if scenario == "mismatched" { "different-command" } else { &wake_id },"outcome":match scenario {"rejected"=>"REJECTED", "aborted"=>"ABORTED", "unknown"=>"UNKNOWN", "cancel-wake"=>"ACCEPTED", _=>"EMITTED"},"message":"private-fixture"})
+                    } else if headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences ")) {
+                        text_posts += 1;
+                        assert!(matches!(scenario, "off" | "emitted" | "cancel-text"));
+                        let request: KeyboardSequenceV1 = serde_json::from_slice(&body).unwrap();
+                        assert!(matches!(&request.actions[0], SequenceAction::Text {value,..} if value == "private-fixture"));
+                        text_id = request.command_id;
+                        assert_ne!(text_id, wake_id);
+                        if scenario == "cancel-text" { owner_cancel.store(true, Ordering::Release); }
+                        serde_json::json!({"device_id":DEVICE,"command_id":text_id,"outcome":if scenario == "cancel-text" {"ACCEPTED"} else {"EMITTED"}})
+                    } else if headers.starts_with(&format!("POST /v1/devices/{DEVICE}/cancel ")) {
+                        cancels += 1;
+                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(value["command_id"].as_str(), Some(if scenario == "cancel-text" { text_id.as_str() } else { wake_id.as_str() }));
+                        serde_json::json!({"device_id":DEVICE,"command_id":value["command_id"],"outcome":"ABORTED"})
+                    } else {
+                        let active = if scenario == "cancel-text" { &text_id } else { &wake_id };
+                        assert!(headers.starts_with(&format!("GET /v1/devices/{DEVICE}/commands/{active} ")));
+                        serde_json::json!({"device_id":DEVICE,"command_id":active,"outcome":if scenario.starts_with("cancel-") {"ABORTED"} else {"UNKNOWN"}})
+                    }.to_string();
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",response.len()).unwrap();
+                }
+                assert_eq!(wake_posts, usize::from(scenario != "off"), "{scenario}");
+                assert_eq!(
+                    text_posts,
+                    usize::from(matches!(scenario, "off" | "emitted" | "cancel-text")),
+                    "{scenario}"
+                );
+                assert_eq!(
+                    cancels,
+                    usize::from(scenario.starts_with("cancel-")),
+                    "{scenario}"
+                );
+            });
+            let mut request = sequence("private-fixture", false).unwrap();
+            let result = submit_with_wake(
+                &client,
+                DEVICE,
+                &mut request,
+                scenario != "off",
+                Instant::now()
+                    + if scenario == "expired" {
+                        Duration::from_millis(100)
+                    } else {
+                        PROMPT_LIFETIME
+                    },
+                &cancelled,
+            );
+            done.store(true, Ordering::Release);
+            server.join().unwrap();
+            assert!(!result.contains("private-fixture"), "{scenario}");
+            assert!(
+                matches!(&request.actions[0], SequenceAction::Text {value,..} if value.is_empty())
+            );
+            if matches!(scenario, "off" | "emitted") {
+                assert!(result.starts_with("EMITTED:"));
+            } else if scenario == "cancel-text" {
+                assert!(result.starts_with("ABORTED:"));
+            } else {
+                assert!(result.contains("No text was sent"), "{scenario}: {result}");
+            }
+        }
+    }
 
     #[test]
     fn production_submission_posts_once_and_never_echoes_peer_messages_or_errors() {
@@ -525,26 +762,53 @@ mod tests {
             (Instant::now(), false),
             (Instant::now() + PROMPT_LIFETIME, true),
         ] {
-            let mut request = sequence("private-fixture", false).unwrap();
-            assert!(submit_once(
-                &client,
-                DEVICE,
-                &mut request,
-                deadline,
-                &AtomicBool::new(cancelled)
-            )
-            .contains("Nothing was sent"));
-            assert!(listener.accept().is_err());
+            for wake in [false, true] {
+                let mut request = sequence("private-fixture", false).unwrap();
+                assert!(submit_with_wake(
+                    &client,
+                    DEVICE,
+                    &mut request,
+                    wake,
+                    deadline,
+                    &AtomicBool::new(cancelled)
+                )
+                .contains("Nothing was sent"));
+                assert!(listener.accept().is_err());
+                assert!(
+                    matches!(&request.actions[0], SequenceAction::Text {value,..} if value.is_empty())
+                );
+            }
         }
     }
 
     #[test]
     fn editor_clears_and_is_destroyed_after_consumption() {
         slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
-            Default::default(),
+            i_slint_backend_testing::TestingBackendOptions {
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
         )))
         .unwrap();
         let window = ui::SecureTextWindow::new().unwrap();
+        assert!(!window.get_wake_before_text());
+        window.set_wake_before_text(true);
+        window.set_destination(
+            format!("Test stick\nStick: {DEVICE}\nRoute: wifi via local controller").into(),
+        );
+        window.set_status("Type the text, then press Enter to send or Esc to cancel. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
+        window.show().unwrap();
+        if let Some(directory) = std::env::var_os("KEYFERRY_UI_SNAPSHOT_DIR") {
+            let snapshot = window.window().take_snapshot().unwrap();
+            image::save_buffer(
+                std::path::Path::new(&directory).join("secure-wake.png"),
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
         window.set_secret("private-fixture".into());
         window.set_ready(true);
         clear(&window);

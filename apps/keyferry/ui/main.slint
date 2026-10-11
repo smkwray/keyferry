@@ -3,11 +3,12 @@ import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, TextEdit } f
 export component SecureTextWindow inherits Window {
     title: "Keyferry — secure text";
     width: 560px;
-    height: 480px;
+    height: 550px;
     background: Theme.app-background;
     in property <string> destination;
     in-out property <string> secret;
     in-out property <bool> append-enter: true;
+    in-out property <bool> wake-before-text: false;
     in-out property <bool> accepting: true;
     in-out property <bool> ready: false;
     in-out property <bool> sending: false;
@@ -58,6 +59,12 @@ export component SecureTextWindow inherits Window {
                 }
             }
             if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
+            if root.accepting: CheckBox { text: "Wake screen first (small mouse movement)"; checked <=> root.wake-before-text; }
+            if root.accepting && root.wake-before-text: Text {
+                text: "Moves the pointer slightly without clicking, then waits one second. Requires relative mouse support; waking and focus cannot be verified.";
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
             Text {
                 text: root.status;
                 color: Theme.text-secondary;

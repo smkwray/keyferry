@@ -757,6 +757,21 @@ impl ApiClient {
         self.request_encoded_json("POST", &device_path(device_id, "sequences")?, Some(&body))
     }
 
+    pub fn submit_input_sequence(
+        &self,
+        device_id: &str,
+        sequence: &keyferry_layouts::InputSequenceV1,
+    ) -> Result<CommandResponse, ApiError> {
+        let body = keyferry_layouts::serialize_zeroizing_json(sequence)
+            .map_err(|_| ApiError::new("input sequence serialization failed"))?;
+        self.verify_owner_route(device_id)?;
+        self.request_encoded_json(
+            "POST",
+            &device_path(device_id, "input-sequences")?,
+            Some(&body),
+        )
+    }
+
     pub fn command_outcome(
         &self,
         device_id: &str,
@@ -2610,6 +2625,56 @@ mod tests {
         let response = client.submit_sequence("device-1", &sequence).unwrap();
         worker.join().unwrap();
         assert_eq!(response.command_id, "019d1234-5678-7abc-8123-456789abcdef");
+        assert_eq!(response.outcome, CommandOutcome::Queued);
+    }
+
+    #[test]
+    fn input_sequence_submission_uses_the_canonical_daemon_route_and_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = test_client(&listener);
+        let sequence: keyferry_layouts::InputSequenceV1 =
+            serde_json::from_value(serde_json::json!({
+                "schema": "keyferry.input-sequence.v1",
+                "command_id": "019d1234-5678-7abc-8123-456789abcdef",
+                "arm": "command-scoped",
+                "start_within_ms": 5000,
+                "actions": [
+                    {"type": "move_relative", "dx_counts": 1, "dy_counts": 0},
+                    {"type": "move_relative", "dx_counts": -1, "dy_counts": 0},
+                    {"type": "wait", "ms": 1000}
+                ]
+            }))
+            .unwrap();
+        let expected_body = serde_json::to_value(&sequence).unwrap();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let headers = String::from_utf8(request).unwrap();
+            assert!(headers.starts_with("POST /v1/devices/device-1/input-sequences HTTP/1.1"));
+            let mut body = vec![0; http_content_length(&headers)];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                expected_body
+            );
+            let response = r#"{"command_id":"019d1234-5678-7abc-8123-456789abcdef","device_id":"device-1","outcome":"QUEUED","message":null}"#;
+            write!(
+                stream,
+                "HTTP/1.1 202 Accepted\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+        });
+        let response = client.submit_input_sequence("device-1", &sequence).unwrap();
+        worker.join().unwrap();
+        assert_eq!(response.command_id, sequence.command_id);
+        assert_eq!(response.device_id, "device-1");
         assert_eq!(response.outcome, CommandOutcome::Queued);
     }
 

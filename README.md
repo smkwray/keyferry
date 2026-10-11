@@ -78,6 +78,15 @@ enters text and presses Enter (or chooses **Send once**); Esc cancels, and a suc
 the dialog. **Press Enter after the text** is ticked by default; change that default under Typing. The command's
 `REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
 
+For a display that sleeps while entering text, optionally select **Wake screen first (small mouse
+movement)**. Immediately before typing, it sends a tiny relative movement out and back without
+clicking, then waits one second. It proceeds only after that command completes and the exact stick
+is ready again. A failed or uncertain wake sends no text; nothing is automatically retried. The
+option starts unchecked and is not saved. It requires relative mouse support (absolute-only
+firmware rejects it). Movement may affect hover or shift the pointer slightly; completion proves
+neither that the display woke nor that the intended field has focus. It works through ordinary
+HID input without a Mac-specific login sequence or changes to sleep settings.
+
 The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
 clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
 files. Use U.S./ABC input and Caps Lock off. Do not put the secret into chat, arguments or stdin,
