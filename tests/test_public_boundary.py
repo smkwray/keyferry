@@ -189,6 +189,64 @@ class PublicBoundaryTests(unittest.TestCase):
                              cwd=repo, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_private_storage_paths_fail_current_and_deleted_history_with_unknown_bytes(self):
+        repo, _ = self.push_repo("private-storage-paths")
+        patterns = SCAN.private_patterns(repo)
+        payload = b"unregistered-fixture-" + os.urandom(32)
+        self.assertIsNone(SCAN._content_failure(payload, patterns))
+        private_paths = (
+            ".env", ".env.local", "configs/.env.production", ".env.credentials/value.txt",
+            "data/unregistered.bin", "var/unregistered.bin", "outputs/unregistered.bin",
+            "dist/unregistered.bin", "tmp/unregistered.bin", "configs/controller.pem",
+            "configs/controller.key", "configs/controller.p12", "configs/controller.pfx",
+            "configs/controller.mobileprovision", "configs/UPPER.PEM",
+        )
+        public_paths = ("apps/product/data/schema.json", "protocol/fixtures/data/sample.bin",
+                        "apps/product/src/key.rs", "configs/.environment")
+        for relative in (*private_paths, *public_paths):
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        subprocess.run(["git", "add", "-f", "--", *private_paths, *public_paths], cwd=repo, check=True)
+        current = SCAN.current_tree_failures(repo, patterns)
+        self.assertEqual(len(current), len(private_paths))
+        for relative in private_paths:
+            self.assertTrue(any(relative in failure for failure in current), relative)
+        for relative in public_paths:
+            self.assertFalse(any(relative in failure for failure in current), relative)
+        subprocess.run(["git", "commit", "-qm", "add path fixtures"], cwd=repo, check=True)
+        for relative in private_paths:
+            (repo / relative).unlink()
+        subprocess.run(["git", "commit", "-qam", "delete private paths"], cwd=repo, check=True)
+        self.assertEqual(SCAN.current_tree_failures(repo, patterns), [])
+        self.assertEqual(SCAN.history_failures(patterns, repo),
+                         ["Git history contains a prohibited private path or filename"])
+
+    def test_pre_push_rejects_current_and_deleted_private_paths_with_unknown_bytes(self):
+        for index, relative in enumerate((".env.local", "data/unregistered.bin", "configs/private.key")):
+            with self.subTest(private_path=relative):
+                repo, remote = self.push_repo(f"push-private-storage-{index}")
+                payload = b"unregistered-fixture-" + os.urandom(32)
+                self.assertIsNone(SCAN._content_failure(payload, SCAN.private_patterns(repo)))
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+                subprocess.run(["git", "add", "-f", "--", relative], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "-qm", "add private path"], cwd=repo, check=True)
+                current_push = subprocess.run(["git", "push", str(remote), "main"],
+                                              cwd=repo, capture_output=True, text=True)
+                self.assertNotEqual(current_push.returncode, 0)
+                self.assertIn("is tracked", current_push.stdout)
+                path.unlink()
+                subprocess.run(["git", "commit", "-qam", "delete private path"], cwd=repo, check=True)
+                history_push = subprocess.run(["git", "push", str(remote), "main"],
+                                              cwd=repo, capture_output=True, text=True)
+                self.assertNotEqual(history_push.returncode, 0)
+                self.assertIn("Git history contains a prohibited private path or filename", history_push.stdout)
+                self.assertNotIn("reachable objects contain private identity material", history_push.stdout)
+                self.assertNotEqual(subprocess.run(["git", "show-ref"], cwd=remote,
+                                                  capture_output=True).returncode, 0)
+
     def test_packager_rejects_private_bytes_extra_grant_and_unsafe_names(self):
         inputs = self.windows_inputs(bytes.fromhex(self.uuid.replace("-", "")))
         with self.assertRaisesRegex(ValueError, "privacy scan failed"):

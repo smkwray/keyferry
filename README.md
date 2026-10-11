@@ -114,8 +114,8 @@ and recovery guidance.
 2. **Download and install Keyferry on the controller.** Get the Windows x64 or macOS Apple silicon
    package from [Releases](https://github.com/smkwray/keyferry/releases). The Windows ZIP contains
    `keyferry.exe` and its required helpers; the macOS ZIP contains `Keyferry.app`. Extract the whole
-   package and follow its `README.txt` to run `install.ps1` or `install.sh`. The installer sets up
-   Keyferry's background service but does not leave it running. By default the service listens for
+   package and follow its `README.txt` to run `install.ps1` or `install.sh`. The published preview
+   installer sets up Keyferry's background service but does not leave it running. By default the service listens for
    sticks on every active private home or office network (`--lan-interface auto`, never Tailscale or
    other point-to-point links); name an interface instead to restrict it. Installed services also
    acquire nearby sticks over Bluetooth by default; `--bluetooth off` makes a controller
@@ -142,9 +142,11 @@ The **Send** page shows the stick's status, a text box, and a hotkey field. Send
 stick, Keyferry uses it over Tailscale
 automatically when that controller is reachable.
 
-The background service runs only while Keyferry is open. Opening Keyferry starts it; closing
-Keyferry (including Cmd+Q on macOS) stops it. Nothing runs at login, and while Keyferry is closed
-this computer cannot control the stick.
+In the published [September 27 preview](https://github.com/smkwray/keyferry/releases/tag/preview-2026-09-27),
+the background service runs only while Keyferry is open: opening the app starts it, closing it stops
+it, and nothing starts at login. Current source instead installs a controller service that starts
+at user login and runs independently of the desktop app. Closing the app leaves that controller
+available; `keyctl` starts the installed service when needed without opening the desktop app.
 
 In USB keyboard mode, an unheld stick advertises its Bluetooth *control* link. Choose the stick
 under **Devices**; there is no manual controller selection. Bluetooth keyboard pairing with the
@@ -161,8 +163,8 @@ The status distinguishes a saved choice from a change the display has finished a
 
 ## Command line
 
-`keyctl` talks to the local daemon and opens the installed Keyferry app if its service is unavailable.
-It is installed next to the app:
+`keyctl` talks to the local daemon. In current source it starts the installed service if needed;
+the published September 27 preview opens the desktop app instead. It is installed next to the app:
 
 - Windows: `%LOCALAPPDATA%\Programs\Keyferry\keyctl.exe`
 - macOS: `~/Applications/Keyferry.app/Contents/MacOS/keyctl`

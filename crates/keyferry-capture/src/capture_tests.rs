@@ -202,6 +202,7 @@ fn frame_arguments_select_backend_and_only_pipe_output() {
 
 #[test]
 fn ms2130_streams_its_native_lossless_1080p_mode_and_others_negotiate() {
+    // Instance segments are synthetic; VID/PID and category remain public constants.
     let card = Device {
         name: "Hagibis".into(),
         id: r"@device_pnp_\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global".into(),
@@ -232,7 +233,8 @@ fn ms2130_streams_its_native_lossless_1080p_mode_and_others_negotiate() {
     assert!(input_mode(Backend::Avfoundation, &card).is_none());
     let other = Device {
         name: "Cam Link 4K".into(),
-        id: r"@device_pnp_\\?\usb#vid_0fd9&pid_0066&mi_00#synthetic-other-instance#{x}\global".into(),
+        id: r"@device_pnp_\\?\usb#vid_0fd9&pid_0066&mi_00#synthetic-other-instance#{x}\global"
+            .into(),
     };
     assert!(input_mode(Backend::Dshow, &other).is_none());
     let options = FrameOptions {

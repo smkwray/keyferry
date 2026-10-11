@@ -119,8 +119,8 @@ mod tests {
     use super::*;
     #[test]
     fn maps_driver_symbolic_link_to_unique_dshow_moniker() {
-        let link =
-            r"\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+        // The synthetic instance survives unchanged while the public category translates.
+        let link = r"\\?\usb#vid_345f&pid_2130&mi_00#synthetic-ms2130-instance#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
         let device = map_device("Hagibis".into(), link.into()).unwrap();
         assert_eq!(
             device.id,

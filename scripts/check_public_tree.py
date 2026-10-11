@@ -16,6 +16,7 @@ PRIVATE_PREFIXES = (
     ".claude/", ".codex/", ".cursor/", ".agents/", ".tools/", "build/", "do/",
     "docs/", "workorders/", ".worktrees/", "hardware/board-manifest.toml",
     "hardware/evidence/private/", "release/", "secrets/", "target/",
+    "data/", "var/", "outputs/", "dist/", "tmp/",
 )
 PRIVATE_ROOT_FILES = {"agents.md", "claude.md", "start_here.md", "seed_validation.md",
                       ".private-denylist", "project.local.toml"}
@@ -27,6 +28,7 @@ PRIVATE_FILENAMES = {
     "route-proof-secret.bin", "secret.bin",
 }
 PRIVATE_NAME_PARTS = ("credential", "installation", "owner-kit", "recovery", "secret")
+PRIVATE_CREDENTIAL_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".mobileprovision"}
 MAC_RE = re.compile(rb"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f])")
 SYNTHETIC_MAC_PREFIX = b"02:00:00:00:00:"
 # Absolute home paths name the person who built or wrote them, registered or not. Build paths leak
@@ -140,7 +142,12 @@ def _path_failure(relative: str) -> str | None:
     if any(folded == prefix.rstrip("/") or folded.startswith(prefix)
            for prefix in PRIVATE_PREFIXES):
         return "private path"
-    if PurePosixPath(normalized).name.casefold() in PRIVATE_FILENAMES:
+    pure = PurePosixPath(folded)
+    if any(part == ".env" or part.startswith(".env.") for part in pure.parts):
+        return "private environment path"
+    if pure.suffix in PRIVATE_CREDENTIAL_SUFFIXES:
+        return "private credential extension"
+    if pure.name in PRIVATE_FILENAMES:
         return "private credential filename"
     return None
 
@@ -231,6 +238,8 @@ def _member_path_failure(name: str) -> str | None:
         return "unsafe archive member path"
     if pure.name.casefold() in PRIVATE_FILENAMES:
         return "private credential filename"
+    if pure.suffix.casefold() in PRIVATE_CREDENTIAL_SUFFIXES:
+        return "private credential extension"
     folded = name.casefold()
     if any(part in folded for part in PRIVATE_NAME_PARTS):
         return "private-looking artifact filename"
