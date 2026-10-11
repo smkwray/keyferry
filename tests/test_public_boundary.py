@@ -90,6 +90,12 @@ class PublicBoundaryTests(unittest.TestCase):
 
     def test_pre_push_allows_public_branch_and_tag_and_deletion(self):
         repo, remote = self.push_repo("push-clean")
+        for relative in ("apps/product/data/value.txt", "protocol/fixtures/data/value.txt"):
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("shared public data fixture\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "public data directories"], cwd=repo, check=True)
         subprocess.run(["git", "tag", "preview"], cwd=repo, check=True)
         push = subprocess.run(["git", "push", str(remote), "main", "preview"],
                               cwd=repo, capture_output=True, text=True)
@@ -135,6 +141,26 @@ class PublicBoundaryTests(unittest.TestCase):
                 self.assertNotIn("private-machine-z9", push.stdout + push.stderr)
                 self.assertNotEqual(subprocess.run(["git", "show-ref"], cwd=remote,
                                                   capture_output=True).returncode, 0)
+
+    def test_pre_push_rejects_private_tree_tags(self):
+        repo, remote = self.push_repo("push-private-tree-tag")
+        payload = b"unregistered-fixture-" + os.urandom(32)
+        self.assertIsNone(SCAN._content_failure(payload, SCAN.private_patterns(repo)))
+        for name in ("a.txt", "z.key"):
+            (repo / name).write_bytes(payload)
+        subprocess.run(["git", "add", "-f", "--", "a.txt", "z.key"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "private tree fixture"], cwd=repo, check=True)
+        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "tag", "-a", "tree-preview", tree, "-m", "tree fixture"], cwd=repo, check=True)
+        for name in ("a.txt", "z.key"):
+            (repo / name).unlink()
+        subprocess.run(["git", "commit", "-qam", "delete tree fixtures"], cwd=repo, check=True)
+        for source in (tree, "tree-preview"):
+            push = subprocess.run(["git", "push", str(remote), source + ":refs/tags/tree-preview"],
+                                  cwd=repo, capture_output=True, text=True)
+            self.assertNotEqual(push.returncode, 0)
+            self.assertIn("Git history contains a prohibited private path or filename", push.stdout)
 
     def test_pre_push_rejects_incomplete_or_malformed_input(self):
         repo, _ = self.push_repo("push-input")
@@ -244,6 +270,34 @@ class PublicBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(history_push.returncode, 0)
                 self.assertIn("Git history contains a prohibited private path or filename", history_push.stdout)
                 self.assertNotIn("reachable objects contain private identity material", history_push.stdout)
+                self.assertNotEqual(subprocess.run(["git", "show-ref"], cwd=remote,
+                                                  capture_output=True).returncode, 0)
+
+    def test_pre_push_rejects_deleted_private_aliases_of_public_objects(self):
+        for index, (public_name, private_name) in enumerate((
+            ("a.txt", "z.key"),
+            ("a-public-directory/value.txt", "hardware/evidence/private/value.txt"),
+        )):
+            with self.subTest(alias=index):
+                repo, remote = self.push_repo(f"push-private-alias-{index}")
+                payload = b"unregistered-fixture-" + os.urandom(32)
+                patterns = SCAN.private_patterns(repo)
+                self.assertIsNone(SCAN._content_failure(payload, patterns))
+                for relative in (public_name, private_name):
+                    path = repo / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(payload)
+                subprocess.run(["git", "add", "-f", "--", public_name, private_name], cwd=repo, check=True)
+                subprocess.run(["git", "commit", "-qm", "add aliased fixtures"], cwd=repo, check=True)
+                for relative in (public_name, private_name):
+                    (repo / relative).unlink()
+                subprocess.run(["git", "commit", "-qam", "delete aliased fixtures"], cwd=repo, check=True)
+                self.assertEqual(SCAN.current_tree_failures(repo, patterns), [])
+                push = subprocess.run(["git", "push", str(remote), "main"],
+                                      cwd=repo, capture_output=True, text=True)
+                self.assertNotEqual(push.returncode, 0)
+                self.assertIn("Git history contains a prohibited private path or filename", push.stdout)
+                self.assertNotIn("reachable objects contain private identity material", push.stdout)
                 self.assertNotEqual(subprocess.run(["git", "show-ref"], cwd=remote,
                                                   capture_output=True).returncode, 0)
 

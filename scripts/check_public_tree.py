@@ -132,15 +132,15 @@ def _content_failure(data: bytes, patterns: list[PrivatePattern]) -> str | None:
     return None
 
 
-def _path_failure(relative: str) -> str | None:
+def _path_failure(relative: str, *, rooted: bool = True) -> str | None:
     normalized = relative.replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
     folded = normalized.casefold()
-    if folded in PRIVATE_ROOT_FILES:
+    if rooted and folded in PRIVATE_ROOT_FILES:
         return "private root control file"
-    if any(folded == prefix.rstrip("/") or folded.startswith(prefix)
-           for prefix in PRIVATE_PREFIXES):
+    if rooted and any(folded == prefix.rstrip("/") or folded.startswith(prefix)
+                      for prefix in PRIVATE_PREFIXES):
         return "private path"
     pure = PurePosixPath(folded)
     if any(part == ".env" or part.startswith(".env.") for part in pure.parts):
@@ -169,6 +169,47 @@ def current_tree_failures(root: Path, patterns: list[PrivatePattern]) -> list[st
     return failures
 
 
+def _tree_entries(data: bytes, oid_bytes: int) -> list[tuple[str, bytes, bool]]:
+    entries: list[tuple[str, bytes, bool]] = []
+    offset = 0
+    while offset < len(data):
+        end = data.find(b"\0", offset)
+        if end < 0 or end + 1 + oid_bytes > len(data):
+            raise RuntimeError("malformed Git tree object")
+        mode, separator, name = data[offset:end].partition(b" ")
+        if not separator or not mode or not name or any(value not in b"01234567" for value in mode):
+            raise RuntimeError("malformed Git tree entry")
+        child = data[end + 1:end + 1 + oid_bytes].hex().encode("ascii")
+        entries.append((name.decode("utf-8", errors="replace"), child, int(mode, 8) == 0o40000))
+        offset = end + 1 + oid_bytes
+    return entries
+
+
+def _tree_path_failure(trees: dict[bytes, list[tuple[str, bytes, bool]]], roots: set[bytes]) -> bool:
+    # Shared blobs/subtrees have multiple names; rev-list prints only one representative path.
+    # Retain root-prefix context only while it can match a private rule. All other directories
+    # share one context, so each unique tree is checked a bounded number of times.
+    pending: list[tuple[bytes, str | None]] = [(oid, "") for oid in roots]
+    seen: set[tuple[bytes, str | None]] = set()
+    while pending:
+        oid, prefix = pending.pop()
+        if (oid, prefix) in seen:
+            continue
+        seen.add((oid, prefix))
+        if oid not in trees:
+            raise RuntimeError("Git history references a missing tree")
+        for name, child, directory in trees[oid]:
+            relative = (prefix or "") + name
+            if _path_failure(relative, rooted=prefix is not None):
+                return True
+            if directory:
+                next_prefix = relative.replace("\\", "/").casefold() + "/"
+                context = (next_prefix if prefix is not None
+                           and any(rule.startswith(next_prefix) for rule in PRIVATE_PREFIXES) else None)
+                pending.append((child, context))
+    return False
+
+
 def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
                      refs: tuple[str, ...] = ("HEAD",)) -> list[str]:
     """Scan the nominated publication refs, including deleted files and tag metadata.
@@ -180,6 +221,9 @@ def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
         raise ValueError("at least one valid publication ref is required")
     failures: list[str] = []
     object_ids: list[bytes] = []
+    trees: dict[bytes, list[tuple[str, bytes, bool]]] = {}
+    root_trees: set[bytes] = set()
+    publication_ids = set(_run_git(root, "rev-parse", *refs).splitlines())
     names = _run_git(root, "rev-parse", "--symbolic-full-name", *refs)
     if _content_failure(names, patterns):
         failures.append("Git publication ref name contains private identity material")
@@ -204,6 +248,14 @@ def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
             data = process.stdout.read(size)
             if len(data) != size or process.stdout.read(1) != b"\n":
                 raise RuntimeError("truncated git cat-file response")
+            if parts[1] == b"tree":
+                trees[oid] = _tree_entries(data, len(oid) // 2)
+                if oid in publication_ids:
+                    root_trees.add(oid)
+            elif parts[1] == b"commit":
+                root_trees.add(data.partition(b"\n")[0].removeprefix(b"tree "))
+            elif parts[1] == b"tag" and data.split(b"\n", 2)[1] == b"type tree":
+                root_trees.add(data.partition(b"\n")[0].removeprefix(b"object "))
             if _content_failure(data, patterns):
                 matched += 1
         process.stdin.close()
@@ -215,6 +267,8 @@ def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
         process.stdout.close()
         if process.wait() != 0:
             raise RuntimeError("git cat-file failed")
+    if _tree_path_failure(trees, root_trees):
+        failures.append("Git history contains a prohibited private path or filename")
     return list(dict.fromkeys(failures))
 
 
