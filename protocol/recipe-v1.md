@@ -148,7 +148,7 @@ receipts say `EMITTED` only for the entire correlated command; individual step c
 observable after partial failure. Failure stops immediately with step indices and command evidence,
 without payloads or replay. A change check uses the pre-input capture baseline, so a fast transition
 is not missed. OCR queries/results/frames stay in memory; receipts contain counts and frame IDs.
-A final screenshot is returned once; capture failure preserves prior input receipts.
+A final screenshot is returned only when requested; capture failure preserves prior input receipts.
 
 `secure_text` returns `REQUESTED`, not `EMITTED`, and opens the same masked, expiring owner dialog as
 `keyctl secure-text`. A trailing request (or skipped optional desktop marker) returns
@@ -156,8 +156,8 @@ A final screenshot is returned once; capture failure preserves prior input recei
 this on the human's logged-in controller desktop; it cannot route a dialog to an unattended desktop.
 A checkpoint failure never requests the dialog again or replays preceding clicks/input.
 
-The shared layer is `KEYFERRY_ROUTINE_DIR`, set by the synced skill's launcher to its sibling
-`routines` directory. Direct CLI calls also discover the installed `.codex`/`.agents` keyferry skill.
+Set `KEYFERRY_ROUTINE_DIR` to a directory of shared reusable routines. If it is unset, direct CLI
+calls can discover a `routines` directory in an installed `.codex`/`.agents` Keyferry skill.
 The existing per-user `recipes` library (or `KEYFERRY_RECIPE_DIR`) overrides shared entries by name.
 A malformed local override is reported and never falls back. Missing shared storage and invalid
 entries are explicit statuses/counts. `recipe list/inspect/validate/import/run` handles this same

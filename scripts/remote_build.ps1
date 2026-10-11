@@ -1,12 +1,16 @@
-# Run one governed build on a remote Windows builder (D-20261010-07) and bring back its receipt.
+# Run one governed build on a remote Windows builder and bring back its receipt.
 # remrun reconciles this checkout, uncommitted edits included, to the same path on the device. The
 # build runs over SSH because remrun's runner Job Object forbids the governor's breakaway, so the
 # host-wide cap and slots still come from that device's project.toml budget. remrun excludes *.lock,
 # so the tracked lock files are copied separately. Every returned file is checked against the remote SHA256.
-#   pwsh -NoProfile -File scripts/remote_build.ps1 -Name deploy -Command 'cargo build --locked --profile deploy -p keyctl'
+#   pwsh -NoProfile -File scripts/remote_build.ps1 -Device buildhost -SshUser builder -Name deploy -Command 'cargo build --locked --profile deploy -p keyctl'
 param(
+    [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9-]+$')]
-    [string]$Device = 'example-host',
+    [string]$Device,
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$SshUser,
     [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
     [string]$Name,
@@ -20,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $root = Split-Path -Parent $PSScriptRoot
-$ssh = "example-host@$($Device.ToLowerInvariant())"
+$ssh = "$SshUser@$($Device.ToLowerInvariant())"
 $local = Join-Path $root "build/remote/$Device"
 function Quote([string]$Text) { "'" + $Text.Replace("'", "''") + "'" }
 function Invoke-Remote([string]$Script) {
@@ -38,7 +42,8 @@ function Copy-Verified([string]$Relative, [string]$LocalPath, [switch]$Receive) 
 }
 
 $env:REMRUN_ALLOW_WORKTREE = '1'
-& 'C:\sync\malus\remrun\bin\remrun.cmd' run $Device -- python -c pass
+$remrun = (Get-Command remrun -CommandType Application -ErrorAction Stop).Source
+& $remrun run $Device -- python -c pass
 if ($LASTEXITCODE) { throw "remrun could not reconcile this checkout to $Device." }
 # Cargo.lock and the ESP-IDF dependencies.lock files pin the build; without them the device
 # resolves newer crates or components and the output diverges.

@@ -132,10 +132,11 @@ class PublicBoundaryTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
         private_paths = (
             "workorders/one.md", "docs/plan.md", ".claude/settings.json",
-            ".codex/config.toml", ".cursor/rules.md", ".tools/task.md",
+            ".codex/config.toml", ".cursor/rules.md", ".agents/SKILL.md", ".tools/task.md",
             ".worktrees/agent/private.md",
             "do/state.md", "AGENTS.md", "CLAUDE.md", "START_HERE.md",
             "SEED_VALIDATION.md",
+            ".private-denylist", "project.local.toml",
         )
         public_path = "apps/agent/prompts/default.md"
         for relative in (*private_paths, public_path):
@@ -164,6 +165,34 @@ class PublicBoundaryTests(unittest.TestCase):
         self.assertEqual(SCAN._path_failure("./.worktrees/agent/private.md"), "private path")
         self.assertIsNone(SCAN._path_failure("apps/agent/prompts/default.md"))
         self.assertIsNone(SCAN._path_failure("apps/agent/AGENTS.md"))
+
+    def test_publication_refs_include_private_tag_messages_and_names(self):
+        repo = self.root / "publication-refs"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "source.txt").write_text("public fixture\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "public source"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-qb", "maintenance"], cwd=repo, check=True)
+        (repo / "source.txt").write_text(self.uuid)
+        subprocess.run(["git", "commit", "-qam", "private maintenance"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "tag", "-a", "preview", "-m", self.uuid], cwd=repo, check=True)
+        subprocess.run(["git", "tag", "private-machine-z9"], cwd=repo, check=True)
+        patterns = SCAN.private_patterns(repo, self.registry)
+        self.assertEqual(SCAN.history_failures(patterns, repo), [])
+        for ref in ("maintenance", "preview", "private-machine-z9"):
+            self.assertTrue(SCAN.history_failures(patterns, repo, ("HEAD", ref)), ref)
+
+    def test_private_identity_in_tracked_filename_is_rejected(self):
+        repo = self.root / "private-filename"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "private-machine-z9.txt").write_text("public fixture\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        self.assertTrue(SCAN.current_tree_failures(repo, SCAN.private_patterns(repo, self.registry)))
 
     def test_current_binary_blob_is_scanned_instead_of_skipped(self):
         repo = self.root / "current"

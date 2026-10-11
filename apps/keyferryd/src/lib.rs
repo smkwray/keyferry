@@ -11081,7 +11081,7 @@ mod tests {
             br#"{
                 "schema_version": 1,
                 "tls_bind": "192.0.2.10:7443",
-                "tls_device_id": "00112233-4455-4677-8899-aabbccddeeff",
+                "tls_device_id": "00000000-0000-4000-8000-000000000004",
                 "tls_secret_dir": "secrets"
             }"#,
         )
@@ -11096,7 +11096,7 @@ mod tests {
             br#"{
                 "schema_version": 1,
                 "tls_bind": "192.0.2.10:7443",
-                "tls_device_id": "00112233-4455-4677-8899-aabbccddeeff",
+                "tls_device_id": "00000000-0000-4000-8000-000000000004",
                 "tls_secret_dir": "secrets",
                 "discovery_netmask": "255.255.255.0"
             }"#,
@@ -11113,7 +11113,7 @@ mod tests {
             br#"{
                 "schema_version": 1,
                 "tls_bind": "192.0.2.10:7443",
-                "tls_device_id": "00112233-4455-4677-8899-aabbccddeeff",
+                "tls_device_id": "00000000-0000-4000-8000-000000000004",
                 "tls_secret_dir": "secrets",
                 "discovery_netmask": "255.0.255.0"
             }"#,
@@ -11126,7 +11126,7 @@ mod tests {
             br#"{
                 "schema_version": 1,
                 "tls_bind": "192.0.2.10:7443",
-                "tls_device_id": "00112233-4455-4677-8899-aabbccddeeff",
+                "tls_device_id": "00000000-0000-4000-8000-000000000004",
                 "tls_secret_dir": "../escape"
             }"#,
         )

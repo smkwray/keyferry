@@ -3,7 +3,7 @@
 - Date: 2026-09-01
 - Method: read-only observation only. No write, no flash, no bootloader entry, no serial port opened.
   (A 1200-baud open of the CDC port triggers a Caterina bootloader reset, so COM7 was NOT opened.)
-- Device label: "example-device-dongle" (provisional, from the broadcast SSID).
+- Device: legacy Cactus WHID unit; its broadcast identity is retained privately.
 
 ## A. Wi-Fi side (controller host: `netsh wlan show interfaces`)
 
@@ -11,7 +11,7 @@ Unit is powered and running STOCK firmware in access-point mode:
 
 | Field | Value |
 | --- | --- |
-| SSID | `example-device` |
+| SSID | Redacted; retained in private evidence |
 | Band / channel | 2.4 GHz / 6 |
 | Radio type | 802.11g |
 | Authentication | WPA2-Personal |
@@ -29,13 +29,13 @@ recorded (secret). keyferry's own design has NO auto-AP, so this AP is the firmw
 | VID:PID (application mode) | `1B4F:9208` |
 | bcdDevice | `REV_0100` |
 | USB product string | **`LilyPad USB`** |
-| Serial string | `example-serial` |
+| Serial string | Redacted; retained in private evidence |
 | Device class | Composite (`usbccgp`), `DevClass_00` |
 | Interface MI_00 | CDC ACM (`Class_02 SubClass_02 Prot_01`) -> **COM7** via `usbser` |
 | Interface MI_02 | HID (`Class_03 SubClass_00 Prot_00`), two collections |
 | MI_02 Col01 | HID-compliant **mouse** |
 | MI_02 Col02 | HID **keyboard** (active in `Win32_Keyboard`) |
-| Attached via | hub `05E3:0610`, Port_#0001.Hub_#0005 |
+| Attached via | hub `05E3:0610` |
 
 VID `1B4F` is SparkFun; `1B4F:9208` with product string "LilyPad USB" is the ATmega32U4 LilyPad USB
 application profile. This **confirms by measurement** the ATmega32U4 assumption and the seed's
@@ -76,10 +76,12 @@ Read over the Caterina bootloader with avrdude v7.1 (`-c avr109 -p atmega32u4 -b
   CONFIRMS the MCU by direct silicon read, not inference from the USB product string.
 - Full non-destructive backup of THIS unit captured (READ only, no write):
 
-| Dump | Size (Intel HEX) | SHA-256 | Location |
-| --- | --- | --- | --- |
-| 32u4 flash | 92,153 B | `[private-unit-digest]` | `hardware/evidence/private/32u4-flash-backup.hex` (gitignored) |
-| 32u4 eeprom | 2,893 B | `[private-unit-digest]` | `hardware/evidence/private/32u4-eeprom-backup.hex` (gitignored) |
+| Dump | Size (Intel HEX) | Private location |
+| --- | --- | --- |
+| 32u4 flash | 92,153 B | `hardware/evidence/private/32u4-flash-backup.hex` (gitignored) |
+| 32u4 eeprom | 2,893 B | `hardware/evidence/private/32u4-eeprom-backup.hex` (gitignored) |
+
+Backup SHA-256 values are retained with the exact-unit private recovery records.
 
 Tool: avrdude 7.1 (mariusgreuel Windows build). Command (bootloader COM number varies per entry):
 `avrdude -c avr109 -p atmega32u4 -P <bootloaderCOM> -b 57600 -U flash:r:...:i -U eeprom:r:...:i`.
@@ -123,7 +125,7 @@ authorizes a write.
 - arduino-cli 1.5.1 + `arduino:avr` core; board `arduino:avr:LilyPadUSB`.
 - Harmless recovery-test image compiled from `harmless-test-image.ino` (this folder): empty sketch,
   3454 B program, CDC-only, NO HID. Compiled `harmless.ino.hex` sha256 prefix `6a7b01a1`.
-- Backup restore image: `private/32u4-flash-backup.hex` (sha256 in section F).
+- Backup restore image: `private/32u4-flash-backup.hex` (hash retained privately).
 
 Planned recovery demonstration (each step gated on owner-present monitoring; NOT yet run):
 1. flash harmless image (write) -> confirm CDC-only, no keyboard/mouse;

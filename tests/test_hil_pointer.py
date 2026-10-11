@@ -52,7 +52,7 @@ class AtomPointerDescriptorTests(unittest.TestCase):
                     pointer.descriptor(bytes(bad))
 
     def test_pointer6_descriptor_that_broke_macos_drag_is_rejected(self):
-        # Exact IF2 descriptor example-host's ioreg read from 0.3.0-pointer.6: its RelativePointer
+        # Exact IF2 descriptor read by ioreg from 0.3.0-pointer.6: its RelativePointer
         # element group held report 4's buttons, so every held absolute move released.
         live = bytes.fromhex(
             "05010902a10185010901a1000509190129051500250175019505810275039501810305010930"

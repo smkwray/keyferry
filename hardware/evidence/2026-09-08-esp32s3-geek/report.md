@@ -14,10 +14,9 @@ independently read back the entire owner image exactly. Cycle B erased only the 
 physical BOOT with no application cooperation, and again restored and independently read back the
 entire owner image exactly. Before/after/final eFuse inventories matched byte-for-byte.
 
-Factory-image SHA-256: `[private-unit-digest]`.
-The raw dump, device identifier, full transcripts, and eFuse inventory remain in ignored private
-evidence. The backup was captured after one initial normal factory boot and is therefore the
-authoritative as-received recovery baseline, not a pristine manufacturing image.
+The factory-image SHA-256, raw dump, device identifier, full transcripts and eFuse inventory remain
+in ignored private evidence. The backup was captured after one initial normal factory boot and is
+therefore the authoritative as-received recovery baseline, not a pristine manufacturing image.
 
 Recovery qualification does not promote LCD, touch, TF-card, or other optional board peripherals.
 It also does not qualify production HID/network firmware or eFuse-backed security changes.

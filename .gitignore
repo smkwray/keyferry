@@ -12,6 +12,8 @@ Thumbs.db
 /release/
 /dist/
 /secrets/
+/.private-denylist
+/project.local.toml
 *.pem
 *.key
 *.p12
@@ -28,6 +30,7 @@ hardware/evidence/private/
 /.claude/
 /.codex/
 /.cursor/
+/.agents/
 do/
 CLAUDE.md
 AGENTS.md

@@ -19,20 +19,32 @@ PERCENT, CEILING = budget()
 
 
 class BudgetTests(unittest.TestCase):
-    BUILD = {"cpu_percent": 50, "hosts": {"example-host": {"cpu_percent": 75}}}
+    BUILD = {"cpu_percent": 50, "hosts": {"buildhost": {"cpu_percent": 75}}}
 
     def test_default_and_host_override(self):
-        self.assertEqual(budget(self.BUILD, "example-host", 20), (50, 10))
-        self.assertEqual(budget(self.BUILD, "example-host", 32), (75, 24))
-        self.assertEqual(budget(self.BUILD, "example-host.local", 32), (75, 24))
-        self.assertEqual(budget({"cpu_percent": 50}, "example-host", 1), (50, 1))
+        self.assertEqual(budget(self.BUILD, "default-host", 20), (50, 10))
+        self.assertEqual(budget(self.BUILD, "buildhost", 32), (75, 24))
+        self.assertEqual(budget(self.BUILD, "buildhost.local", 32), (75, 24))
+        self.assertEqual(budget({"cpu_percent": 50}, "buildhost", 1), (50, 1))
 
     def test_invalid_percent_fails_closed(self):
         for value in (0, 101, "75", 75.0, True):
             with self.assertRaises(ValueError):
-                budget({"cpu_percent": 50, "hosts": {"example-host": {"cpu_percent": value}}}, "example-host", 32)
+                budget({"cpu_percent": 50, "hosts": {"buildhost": {"cpu_percent": value}}}, "buildhost", 32)
         with self.assertRaises(KeyError):
-            budget({"cpu_percent": 50, "hosts": {"example-host": {}}}, "example-host", 32)
+            budget({"cpu_percent": 50, "hosts": {"buildhost": {}}}, "buildhost", 32)
+
+    def test_ignored_local_host_override_uses_production_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "project.toml").write_text("[build]\ncpu_percent = 50\n")
+            local = root / "project.local.toml"
+            local.write_text("[build.hosts.buildhost]\ncpu_percent = 75\n")
+            self.assertEqual(budget(host="buildhost.local", cpus=32, root=root), (75, 24))
+            self.assertEqual(budget(host="other-host", cpus=20, root=root), (50, 10))
+            local.write_text("[build]\ncpu_percent = 100\n")
+            with self.assertRaises(ValueError):
+                budget(host="buildhost", cpus=32, root=root)
 
     def test_project_budget_has_one_reader(self):
         # Every build entry point asks the governor; none parses project.toml itself.

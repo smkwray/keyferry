@@ -272,12 +272,12 @@ listener and never opens/restarts the controller app. Start the installed contro
 input uses its existing token and sole daemon command writer. Install FFmpeg on the controllers
 with capture cards and grant Camera permission on macOS.
 
-Register through the synced **keyferry skill's `keyferry-mcp` launcher and `/relink`**. The launcher
-resolves the installed CLI on the current computer and runs `keyctl mcp` with no arguments;
-explicit extra arguments pass through. For discovering, running and saving routine tasks, see the
-synced **keyferry skill, Routines** section and [recipe format](protocol/recipe-v1.md). Registration needs no device UUID, capture card name or
-per-device executable path. Rebuild and reinstall the updated packages on every controller,
-then run `/relink` to synchronize agent registration. Keep any explicit overrides private.
+Configure your MCP client to launch the installed `keyctl` executable with `["mcp"]` as its
+arguments, using the platform installation path listed above. The server uses stdio; no network
+listener or per-device executable is needed. Registration needs no device UUID or capture source;
+select those through the tools when discovery is ambiguous. Keep explicit device/source overrides
+private. Rebuild and reinstall updated packages on each controller before starting a new MCP session.
+For reusable routines and their storage configuration, see the [recipe format](protocol/recipe-v1.md).
 
 With no `--device`, the server selects the single authenticated authorized stick, including one
 held by another owner controller over the tailnet. A unique authenticated `POINTER_EXTENDED_V1`
@@ -493,8 +493,9 @@ cleared or the power or controller session is lost; the target may save its own 
 - On macOS the background service writes a connection log (link events and errors, no content) to
   `~/Library/Application Support/keyferry/logs/`.
 - Saved sequences are the exception to not persisting: `keyctl recipe import` stores the recipe as
-  written (owner-only on macOS) until you delete it. Put secrets in a parameter supplied at run
-  time instead of literal recipe text. Runs and parameter values are never saved.
+  written (owner-only on macOS) until you delete it. Use parameters for ordinary task-specific
+  values; send secrets through the owner-only secure-text dialog, never recipe parameters or agent
+  arguments. Runs and parameter values are never saved by Keyferry.
 - Choosing a file with **Send a file…** may add its name to the operating system's recent-files
   list; pasting the path instead avoids that.
 
@@ -502,6 +503,15 @@ cleared or the power or controller session is lost; the target may save its own 
 
 Requires Rust (pinned in `rust-toolchain.toml`), Python 3.11 or newer, and a C++17 compiler for the
 strict checks. Firmware builds additionally require ESP-IDF v6.0.3.
+
+Build runners read the CPU budget from `project.toml`. For a machine-specific override, create an
+ignored `project.local.toml` with the following entry, replacing `example-builder` with the local
+hostname. Keep machine names and local overrides out of the tracked configuration.
+
+```toml
+[build.hosts.example-builder]
+cpu_percent = 75
+```
 
 ```text
 cargo fetch --locked              # populate dependencies for the offline checks

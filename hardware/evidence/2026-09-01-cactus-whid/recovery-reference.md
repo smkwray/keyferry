@@ -1,8 +1,9 @@
 # Recovery route — UPSTREAM REFERENCE (unverified), not evidence, not manifest
 
 Purpose: plan the two-way recovery exercise before any write. Everything here is from public
-upstream docs for the Cactus WHID / ESPloit family. Per `docs/recovery.md`, NONE of it may enter
-an ignored exact-unit manifest until this physical unit confirms it. Cross-checked where possible against
+upstream docs for the Cactus WHID / ESPloit family. None of it may enter an exact-unit manifest
+until physical measurement confirms it. See [hardware/README.md](../../README.md) for the evidence
+boundary. Cross-checked where possible against
 the read-only USB measurement in `report.md`.
 
 ## What the measurement already confirms (see report.md section B)
@@ -36,7 +37,7 @@ the read-only USB measurement in `report.md`.
 
 Note: a true backup of THIS unit's current flash requires the bridge sketch (a write) to read the ESP
 over the bridge, and the 32u4 application cannot be assumed backed up unless read-protection behavior
-proves it (`docs/recovery.md`). Upstream public images are candidate RESTORE targets, not a dump of
+proves it. Upstream public images are candidate RESTORE targets, not a dump of
 this unit.
 
 ## Images worth preserving once the version is known (candidate restore targets)

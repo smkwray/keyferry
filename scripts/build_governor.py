@@ -24,10 +24,16 @@ JOB_NAME = "Global\\KeyferryBuildCpuV1"
 
 
 def budget(build: dict | None = None, host: str | None = None,
-           cpus: int | None = None) -> tuple[int, int]:
-    """(cpu_percent, job ceiling): [build.hosts.<HOST>] overrides the [build] default."""
+           cpus: int | None = None, *, root: Path = ROOT) -> tuple[int, int]:
+    """(cpu_percent, job ceiling), with optional ignored project.local.toml host overrides."""
     if build is None:
-        build = tomllib.loads((ROOT / "project.toml").read_text())["build"]
+        build = tomllib.loads((root / "project.toml").read_text())["build"]
+        local = root / "project.local.toml"
+        if local.exists():
+            override = tomllib.loads(local.read_text())["build"]
+            if set(override) != {"hosts"}:
+                raise ValueError("project.local.toml [build] requires only a hosts table")
+            build["hosts"] = {**build.get("hosts", {}), **override["hosts"]}
     host = (host or socket.gethostname()).split(".")[0].upper()
     hosts = {name.upper(): value for name, value in build.get("hosts", {}).items()}
     percent = hosts.get(host, build)["cpu_percent"]

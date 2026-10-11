@@ -283,7 +283,7 @@ pub fn input_actions(
         Step::Scroll { x, y, dx, dy } => {
             let mut actions = glide_to(cursor, point(*x, *y)?);
             // One report per detent, like a wheel: macOS scrolls ~1 px for one 60-detent report
-            // but ~2 lines per detent for separate +-1 reports (example-host, 2026-10-10).
+            // but ~2 lines per detent for separate +-1 reports.
             let detents = dx.unsigned_abs().max(dy.unsigned_abs());
             for i in 0..detents {
                 let part = |v: i64| if i < v.unsigned_abs() { v.signum() } else { 0 };

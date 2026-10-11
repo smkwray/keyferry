@@ -8,21 +8,17 @@ any of it to an ESP32-S3 board.
 ## Preserved inputs
 
 - Measured device and bootloader evidence:
-  `hardware/evidence/2026-09-01-example-device-dongle/report.md`.
+  `hardware/evidence/2026-09-01-cactus-whid/report.md`.
 - Upstream ESPloit recovery references:
-  `hardware/evidence/2026-09-01-example-device-dongle/recovery-reference.md`.
+  `hardware/evidence/2026-09-01-cactus-whid/recovery-reference.md`.
 - Private, gitignored recovery images:
   `hardware/evidence/private/32u4-flash-backup.hex`,
   `32u4-eeprom-backup.hex`, and `32u4-app-restore.hex`.
 - Purpose-built helpers: `scripts/whid_restore_watch.ps1`, `scripts/reset_cue.ps1`,
   `scripts/usb_event_log.ps1`, and `scripts/split_flash_image.py`.
 
-Recorded SHA-256 values for the original reads:
-
-| File | SHA-256 |
-| --- | --- |
-| `32u4-flash-backup.hex` | `[private-unit-digest]` |
-| `32u4-eeprom-backup.hex` | `[private-unit-digest]` |
+The SHA-256 values for the original flash and EEPROM reads are retained with the private
+recovery records. Verify those exact-unit digests before using a backup.
 
 The application-only restore image is derived from the full flash backup by retaining addresses
 below `0x7000`. Never ask Caterina to overwrite its own boot section.

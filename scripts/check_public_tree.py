@@ -13,11 +13,12 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_PREFIXES = (
-    ".claude/", ".codex/", ".cursor/", ".tools/", "build/", "do/",
+    ".claude/", ".codex/", ".cursor/", ".agents/", ".tools/", "build/", "do/",
     "docs/", "workorders/", ".worktrees/", "hardware/board-manifest.toml",
     "hardware/evidence/private/", "release/", "secrets/", "target/",
 )
-PRIVATE_ROOT_FILES = {"agents.md", "claude.md", "start_here.md", "seed_validation.md"}
+PRIVATE_ROOT_FILES = {"agents.md", "claude.md", "start_here.md", "seed_validation.md",
+                      ".private-denylist", "project.local.toml"}
 PRIVATE_FILENAMES = {
     "board-manifest.toml", "desktop-client-cert.der", "desktop-server-cert.der",
     "device-grant.json", "device-id.bin", "device-link-secret.bin",
@@ -144,7 +145,7 @@ def _path_failure(relative: str) -> str | None:
 def current_tree_failures(root: Path, patterns: list[PrivatePattern]) -> list[str]:
     failures: list[str] = []
     for relative in tracked_paths(root):
-        reason = _path_failure(relative)
+        reason = _path_failure(relative) or _content_failure(relative.encode("utf-8"), patterns)
         if reason:
             failures.append(f"{relative}: {reason} is tracked")
             continue
@@ -156,13 +157,25 @@ def current_tree_failures(root: Path, patterns: list[PrivatePattern]) -> list[st
     return failures
 
 
-def history_failures(patterns: list[PrivatePattern], root: Path = ROOT) -> list[str]:
+def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
+                     refs: tuple[str, ...] = ("HEAD",)) -> list[str]:
+    """Scan the nominated publication refs, including deleted files and tag metadata.
+
+    Local maintenance branches and application checkpoints are private storage;
+    callers publishing extra branches or tags must nominate each one explicitly.
+    """
+    if not refs or any(ref.startswith("-") for ref in refs):
+        raise ValueError("at least one valid publication ref is required")
     failures: list[str] = []
     object_ids: list[bytes] = []
-    for line in _run_git(root, "rev-list", "--objects", "--all").splitlines():
+    names = _run_git(root, "rev-parse", "--symbolic-full-name", *refs)
+    if _content_failure(names, patterns):
+        failures.append("Git publication ref name contains private identity material")
+    for line in _run_git(root, "rev-list", "--objects", *refs).splitlines():
         oid, _, raw_path = line.partition(b" ")
         object_ids.append(oid)
-        if raw_path and _path_failure(raw_path.decode("utf-8", errors="replace")):
+        if raw_path and (_path_failure(raw_path.decode("utf-8", errors="replace"))
+                         or _content_failure(raw_path, patterns)):
             failures.append("Git history contains a prohibited private path or filename")
     process = subprocess.Popen(["git", "cat-file", "--batch"], cwd=root,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -312,17 +325,21 @@ def artifact_failures(artifact: Path, patterns: list[PrivatePattern], platform: 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--history", action="store_true")
+    parser.add_argument("--history-ref", action="append",
+                        help="publication branch or tag to scan; repeat for each (default HEAD)")
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--private-identifiers", type=Path)
     parser.add_argument("--require-private-registry", action="store_true")
     args = parser.parse_args()
+    if args.history_ref and not args.history:
+        parser.error("--history-ref requires --history")
     registry = args.private_identifiers.resolve() if args.private_identifiers else None
     patterns = private_patterns(ROOT, registry)
     failures = current_tree_failures(ROOT, patterns)
     if args.require_private_registry and not patterns:
         failures.append("a populated private identity registry is required")
     if args.history:
-        failures.extend(history_failures(patterns, ROOT))
+        failures.extend(history_failures(patterns, ROOT, tuple(args.history_ref or ["HEAD"])))
     if args.artifact:
         failures.extend(artifact_failures(args.artifact.resolve(), patterns))
     if failures:
@@ -331,7 +348,7 @@ def main() -> int:
         return 1
     scopes = ["current tree"]
     if args.history:
-        scopes.append("all reachable Git objects")
+        scopes.append("all objects reachable from publication refs")
     if args.artifact:
         scopes.append("final archive")
     print(f"public privacy boundary: ok ({', '.join(scopes)}; {len(patterns)} private patterns)")

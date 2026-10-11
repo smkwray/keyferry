@@ -1,8 +1,8 @@
-# Input Sequence v2: F1-W pointer slice and ADR 0016 amendment
+# Input Sequence v2: extended pointer
 
-Status: off-device implementation; physical Windows/macOS qualification OPEN.
-This narrow amendment follows the owner's 2026-10-09 pointer-slice instruction.
-Consumer/system, keyboard LEDs, BOOT latch, wake and BLE mouse are separate lanes.
+This defines the pointer protocol and USB descriptor contract. Physical qualification is specific
+to the exact firmware, board and target operating system. Consumer/system reports, keyboard LEDs,
+BOOT latch, wake and BLE mouse are outside this contract.
 
 ## USB personality
 
@@ -22,10 +22,10 @@ Digitizer Stylus (0x0D/0x20) logical collection; its wheel and pan stay outside.
 This relative+absolute personality is the Windows image (pointer.9 bytes,
 bcdDevice 0x0104). It cannot drive macOS: macOS 26 binds IF2 to DriverKit
 `IOUserHIDEventDriver`, which dispatches any Digitizer collection as digitizer
-events that never move the cursor (pointer.9 on example-host), and without that
+events that never move the cursor (pointer.9 on a macOS test target), and without that
 collection gives every Button element to the relative pointer whenever the
 interface declares relative X/Y, so absolute events carry no buttons and each
-absolute move releases a drag (pointer.6 on example-host).
+absolute move releases a drag (pointer.6 on a macOS test target).
 
 Opt-in `KEYFERRY_POINTER_ABSOLUTE_ONLY=ON` (build switch `-PointerAbsoluteOnly`,
 implies the extended pointer) is the macOS personality: IF2 declares report 4
@@ -154,8 +154,8 @@ map/static RAM/partition reserve, source commit, pinned locks, config and app-on
 installer Plan. Build-time static RAM is not measured runtime free heap; obtain
 runtime heap/internal-RAM observations during owner-authorized qualification.
 
-The parent combines the Wi-Fi diagnostic lane and rebuilds before any reserved
-write. An exact-unit app-only Plan, retained rollback image and new approval
-are prerequisites. Physical gates stay OPEN until the same final image passes
-Windows/macOS corners/centre, right/middle clicks, wheel/pan, drag and disconnect
-release on an owner-approved idle target. No hardware contact belongs to this lane.
+Before hardware qualification, build and freeze the exact image. An exact-unit app-only Plan,
+a retained rollback image and explicit authorization are prerequisites for a write. Each supported
+firmware/target-OS combination must pass corners/centre, right/middle clicks, wheel/pan, drag and
+disconnect release on an approved idle target. Source checks and compilation alone do not close
+these physical gates.
