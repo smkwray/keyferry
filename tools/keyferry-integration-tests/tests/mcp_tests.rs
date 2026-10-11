@@ -1003,7 +1003,7 @@ async fn device_switch_never_reuses_another_sticks_pointer() {
         at: Instant::now(),
         path: Vec::new(),
     }));
-    let sent: Arc<Mutex<Vec<(String, [f64; 2])>>> = Arc::default();
+    let sent = Arc::new(Mutex::new(Vec::new()));
     let (observed, log) = (visual.clone(), sent.clone());
     let app = daemon.router().layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
