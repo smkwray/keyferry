@@ -2,8 +2,8 @@ import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, TextEdit } f
 
 export component SecureTextWindow inherits Window {
     title: "Keyferry — secure text";
-    width: 560px;
-    height: 550px;
+    width: 460px;
+    height: 280px;
     background: Theme.app-background;
     in property <string> destination;
     in-out property <string> secret;
@@ -29,15 +29,9 @@ export component SecureTextWindow inherits Window {
             return reject;
         }
         VerticalLayout {
-            padding: 24px;
-            spacing: 14px;
-            Text { text: "Send secure text once"; color: Theme.text-primary; font-size: 21px; font-weight: 600; }
+            padding: 16px;
+            spacing: 10px;
             Text { text: root.destination; color: Theme.text-secondary; wrap: word-wrap; }
-            Text {
-                text: "Before sending, make sure the stick is plugged into the intended computer and its password field has focus. Use U.S./ABC input with Caps Lock off. Keyferry cannot verify focus or successful unlock.";
-                color: Theme.text-secondary;
-                wrap: word-wrap;
-            }
             if root.accepting: Rectangle {
                 height: 42px;
                 background: Theme.inset-background;
@@ -58,20 +52,13 @@ export component SecureTextWindow inherits Window {
                     accepted => { if (root.secret != "") { root.send(); } }
                 }
             }
-            if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
-            if root.accepting: ComboBox {
-                model: ["No wake", "Mouse movement", "Mac login screen (Shift)"];
-                current-index <=> root.wake-mode;
-            }
-            if root.accepting && root.wake-mode == 1: Text {
-                text: "Moves the pointer slightly without clicking, then waits one second. Requires relative mouse support; waking and focus cannot be verified.";
-                color: Theme.text-secondary;
-                wrap: word-wrap;
-            }
-            if root.accepting && root.wake-mode == 2: Text {
-                text: "For a Mac login screen: taps Shift, then waits two seconds. It can reveal the password field; waking and focus cannot be verified.";
-                color: Theme.text-secondary;
-                wrap: word-wrap;
+            if root.accepting: HorizontalLayout {
+                spacing: 12px;
+                CheckBox { text: "Enter after text"; checked <=> root.append-enter; }
+                ComboBox {
+                    model: ["No wake", "Mouse movement", "Mac login screen (Shift)"];
+                    current-index <=> root.wake-mode;
+                }
             }
             Text {
                 text: root.status;

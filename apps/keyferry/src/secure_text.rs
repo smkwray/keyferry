@@ -303,13 +303,9 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
                 if let Some(device) = view.filter(|device| ready(device, &id)) {
-                    let route = device.link_path.as_deref().unwrap_or("unknown");
-                    let via = device.via.as_deref().unwrap_or("local controller");
-                    window.set_destination(
-                        format!("{}\nStick: {id}\nRoute: {route} via {via}", device.label).into(),
-                    );
+                    window.set_destination(format!("{} · {id}", device.label).into());
                     window.set_ready(true);
-                    window.set_status("Type the text, then press Enter to send or Esc to cancel. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
+                    window.set_status("Ready".into());
                 } else {
                     clear(&window);
                     finish(window.as_weak(), "The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());
@@ -862,10 +858,8 @@ mod tests {
         let window = ui::SecureTextWindow::new().unwrap();
         assert_eq!(window.get_wake_mode(), 0);
         window.set_wake_mode(2);
-        window.set_destination(
-            format!("Test stick\nStick: {DEVICE}\nRoute: wifi via local controller").into(),
-        );
-        window.set_status("Type the text, then press Enter to send or Esc to cancel. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
+        window.set_destination(format!("Test stick · {DEVICE}").into());
+        window.set_status("Ready".into());
         window.show().unwrap();
         if let Some(directory) = std::env::var_os("KEYFERRY_UI_SNAPSHOT_DIR") {
             let snapshot = window.window().take_snapshot().unwrap();
