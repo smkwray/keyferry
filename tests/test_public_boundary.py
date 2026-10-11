@@ -1,6 +1,8 @@
 import importlib.util
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -63,6 +65,129 @@ class PublicBoundaryTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(relative.encode())
         return app
+
+    def push_repo(self, name: str) -> tuple[Path, Path]:
+        repo = self.root / name
+        remote = self.root / (name + "-remote.git")
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        for relative in (".gitattributes", ".githooks/pre-push", "scripts/check_public_tree.py"):
+            destination = repo / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        (repo / ".githooks/pre-push").chmod(0o755)
+        (repo / ".gitignore").write_text("secrets/\n")
+        (repo / "source.txt").write_text("public fixture\n")
+        (repo / "secrets").mkdir()
+        (repo / "secrets/private-identifiers.txt").write_text("private-machine-z9\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "public fixture"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=repo, check=True)
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        return repo, remote
+
+    def test_pre_push_allows_public_branch_and_tag_and_deletion(self):
+        repo, remote = self.push_repo("push-clean")
+        subprocess.run(["git", "tag", "preview"], cwd=repo, check=True)
+        push = subprocess.run(["git", "push", str(remote), "main", "preview"],
+                              cwd=repo, capture_output=True, text=True)
+        self.assertEqual(push.returncode, 0, push.stderr)
+        refs = subprocess.run(["git", "show-ref"], cwd=remote, check=True,
+                              capture_output=True, text=True).stdout
+        self.assertIn("refs/heads/main", refs)
+        self.assertIn("refs/tags/preview", refs)
+        deletion = subprocess.run(["git", "push", str(remote), ":refs/tags/preview"],
+                                  cwd=repo, capture_output=True, text=True)
+        self.assertEqual(deletion.returncode, 0, deletion.stderr)
+
+    def test_pre_push_rejects_deleted_private_history(self):
+        repo, remote = self.push_repo("push-history")
+        private = repo / "innocent.bin"
+        private.write_bytes(b"prefix\0private-machine-z9\0suffix")
+        subprocess.run(["git", "add", "innocent.bin"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "add fixture"], cwd=repo, check=True)
+        private.unlink()
+        subprocess.run(["git", "commit", "-qam", "delete fixture"], cwd=repo, check=True)
+        self.assertEqual(SCAN.current_tree_failures(repo, SCAN.private_patterns(repo)), [])
+        push = subprocess.run(["git", "push", str(remote), "main"],
+                              cwd=repo, capture_output=True, text=True)
+        self.assertNotEqual(push.returncode, 0)
+        self.assertIn("reachable objects contain private identity material", push.stdout)
+        self.assertNotIn("private-machine-z9", push.stdout + push.stderr)
+        self.assertNotEqual(subprocess.run(["git", "show-ref", "--verify", "refs/heads/main"],
+                                          cwd=remote, capture_output=True).returncode, 0)
+
+    def test_pre_push_rejects_private_and_reserved_destination_refs(self):
+        repo, remote = self.push_repo("push-destinations")
+        for destination, reason in (
+            ("refs/heads/private-machine-z9", "publication ref name contains private identity material"),
+            ("refs/tags/private-machine-z9", "publication ref name contains private identity material"),
+            ("refs/t3/checkpoint", "Only branch and tag destination namespaces"),
+            ("refs/private/backup", "Only branch and tag destination namespaces"),
+        ):
+            with self.subTest(destination=destination):
+                push = subprocess.run(["git", "push", str(remote), "main", "main:" + destination],
+                                      cwd=repo, capture_output=True, text=True)
+                self.assertNotEqual(push.returncode, 0)
+                self.assertIn(reason, push.stdout + push.stderr)
+                self.assertNotIn("private-machine-z9", push.stdout + push.stderr)
+                self.assertNotEqual(subprocess.run(["git", "show-ref"], cwd=remote,
+                                                  capture_output=True).returncode, 0)
+
+    def test_pre_push_rejects_incomplete_or_malformed_input(self):
+        repo, _ = self.push_repo("push-input")
+        oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                             capture_output=True, text=True).stdout.strip()
+        valid = f"refs/heads/main {oid} refs/heads/main {'0' * 40}"
+        supplied = self.root / "push-input.txt"
+        for content, reason in (
+            (valid, "Incomplete push input"),
+            (valid + " extra\n", "Malformed push input"),
+            ("refs/heads/main bad refs/heads/main bad\n", "Malformed push object hash"),
+            ("\n", "Malformed push input"),
+            (valid + "\nmissing fields\n", "Malformed push input"),
+        ):
+            with self.subTest(reason=reason, content=content):
+                supplied.write_bytes(content.encode("ascii"))
+                run = subprocess.run(["git", "hook", "run", "--to-stdin=" + str(supplied),
+                                      "pre-push"], cwd=repo, capture_output=True, text=True)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn(reason, run.stderr)
+
+    def test_pre_push_rejects_missing_private_registry(self):
+        repo, remote = self.push_repo("push-missing-registry")
+        (repo / "secrets/private-cert.der").write_bytes(self.der)
+        (repo / "secrets/private-identifiers.txt").unlink()
+        push = subprocess.run(["git", "push", str(remote), "main"],
+                              cwd=repo, capture_output=True, text=True)
+        self.assertNotEqual(push.returncode, 0)
+        self.assertIn("a populated readable private identity registry is required", push.stdout)
+
+    def test_cli_requires_active_registry_despite_existing_secret_files(self):
+        repo, _ = self.push_repo("registry-source")
+        (repo / "secrets/private-cert.der").write_bytes(self.der)
+        (repo / "secrets/secret.bin").write_bytes(self.secret)
+        registry = repo / "secrets/private-identifiers.txt"
+        for content in (None, "", "# empty registry\n\n", "x\n"):
+            with self.subTest(registry_content=content):
+                if content is None:
+                    registry.unlink()
+                else:
+                    registry.write_text(content)
+                self.assertTrue(SCAN.private_patterns(repo))
+                run = subprocess.run([sys.executable, "scripts/check_public_tree.py",
+                                      "--require-private-registry"],
+                                     cwd=repo, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 1)
+                self.assertIn("a populated readable private identity registry is required", run.stdout)
+                self.assertNotIn("private-der-value", run.stdout + run.stderr)
+        registry.write_text("private-machine-z9\n")
+        run = subprocess.run([sys.executable, "scripts/check_public_tree.py",
+                              "--require-private-registry"],
+                             cwd=repo, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_packager_rejects_private_bytes_extra_grant_and_unsafe_names(self):
         inputs = self.windows_inputs(bytes.fromhex(self.uuid.replace("-", "")))
@@ -192,7 +317,10 @@ class PublicBoundaryTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         (repo / "private-machine-z9.txt").write_text("public fixture\n")
         subprocess.run(["git", "add", "."], cwd=repo, check=True)
-        self.assertTrue(SCAN.current_tree_failures(repo, SCAN.private_patterns(repo, self.registry)))
+        failures = SCAN.current_tree_failures(repo, SCAN.private_patterns(repo, self.registry))
+        self.assertTrue(failures)
+        self.assertNotIn("private-machine-z9", "\n".join(failures))
+        self.assertIn("[private filename]", "\n".join(failures))
 
     def test_current_binary_blob_is_scanned_instead_of_skipped(self):
         repo = self.root / "current"

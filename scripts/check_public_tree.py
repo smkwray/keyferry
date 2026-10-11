@@ -86,7 +86,8 @@ def _add_secret_encodings(patterns: set[PrivatePattern], value: bytes) -> None:
         _add_pattern(patterns, base64.b64encode(value))
 
 
-def private_patterns(root: Path = ROOT, registry_path: Path | None = None) -> list[PrivatePattern]:
+def private_patterns(root: Path = ROOT, registry_path: Path | None = None,
+                     *, require_registry: bool = False) -> list[PrivatePattern]:
     registry = registry_path or root / "secrets" / "private-identifiers.txt"
     patterns: set[PrivatePattern] = set()
     if registry.is_file():
@@ -103,6 +104,8 @@ def private_patterns(root: Path = ROOT, registry_path: Path | None = None) -> li
                 _add_pattern(patterns, compact.encode("ascii"), True)
             elif HEX_RE.fullmatch(token) and len(token) % 2 == 0:
                 _add_secret_encodings(patterns, bytes.fromhex(token))
+    if require_registry and not patterns:
+        raise ValueError("a populated private identity registry is required")
     secret_root = root / "secrets"
     if secret_root.is_dir():
         for path in secret_root.rglob("*"):
@@ -145,9 +148,11 @@ def _path_failure(relative: str) -> str | None:
 def current_tree_failures(root: Path, patterns: list[PrivatePattern]) -> list[str]:
     failures: list[str] = []
     for relative in tracked_paths(root):
-        reason = _path_failure(relative) or _content_failure(relative.encode("utf-8"), patterns)
+        name_reason = _content_failure(relative.encode("utf-8"), patterns)
+        reason = _path_failure(relative) or name_reason
         if reason:
-            failures.append(f"{relative}: {reason} is tracked")
+            label = "[private filename]" if name_reason else relative
+            failures.append(f"{label}: {reason} is tracked")
             continue
         path = root / relative
         if path.is_file():
@@ -327,19 +332,27 @@ def main() -> int:
     parser.add_argument("--history", action="store_true")
     parser.add_argument("--history-ref", action="append",
                         help="publication branch or tag to scan; repeat for each (default HEAD)")
+    parser.add_argument("--publication-name",
+                        help="destination Git ref name to check against private identity material")
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--private-identifiers", type=Path)
     parser.add_argument("--require-private-registry", action="store_true")
     args = parser.parse_args()
     if args.history_ref and not args.history:
         parser.error("--history-ref requires --history")
+    if args.publication_name and not args.history:
+        parser.error("--publication-name requires --history")
     registry = args.private_identifiers.resolve() if args.private_identifiers else None
-    patterns = private_patterns(ROOT, registry)
+    try:
+        patterns = private_patterns(ROOT, registry, require_registry=args.require_private_registry)
+    except (ValueError, OSError):
+        print("private-boundary error: a populated readable private identity registry is required")
+        return 1
     failures = current_tree_failures(ROOT, patterns)
-    if args.require_private_registry and not patterns:
-        failures.append("a populated private identity registry is required")
     if args.history:
         failures.extend(history_failures(patterns, ROOT, tuple(args.history_ref or ["HEAD"])))
+        if args.publication_name and _content_failure(args.publication_name.encode("utf-8"), patterns):
+            failures.append("Git publication ref name contains private identity material")
     if args.artifact:
         failures.extend(artifact_failures(args.artifact.resolve(), patterns))
     if failures:

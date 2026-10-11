@@ -1,7 +1,7 @@
 import copy
+import hashlib
 import importlib.util
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,18 +13,45 @@ SPEC.loader.exec_module(boards)
 BOARDS = ROOT / "firmware/esp32s3/boards"
 
 class BoardProfileTests(unittest.TestCase):
-    def test_existing_generated_headers_match_base(self):
-        # Frozen producer, not a mirror of the new implementation.
-        original = subprocess.check_output(["git", "show", "71104ff:scripts/gen_board_profile.py"], cwd=ROOT).decode()
-        old = {}
-        exec(compile(original, "baseline_generator", "exec"), old)
-        for name in ("lilygo_t_dongle_s3", "waveshare_geek_v1_1_reference"):
+    def test_existing_generated_headers_match_golden(self):
+        # Frozen public outputs from scripts/gen_board_profile.py before displayless profiles.
+        # These digests preserve the baseline without requiring an old Git object in a clone.
+        golden = {
+            "lilygo_t_dongle_s3": (
+                "33c15094b6bfde15c14a378cc9e9b0e55b4bdf670419afde636e19fa47a1427c",
+                "a411f522cf2726b072a1034a55d6ca34aff8dd9ce9a4db327f4f9997203f800d",
+            ),
+            "waveshare_geek_v1_1_reference": (
+                "6482360cf8c88b41a31239f476386557deab8f0a4ef612246ce655a0e518f869",
+                "f21261fb5f62c18215a08fee3dc711a733f4fa4696615abff42e690e621310e8",
+            ),
+        }
+        for name, (header_sha256, manifest_sha256) in golden.items():
             path = BOARDS / name / "board.json"
-            self.assertEqual(boards.render(boards.load_profile(path), path),
-                             old["render"](old["load_profile"](path), path))
-            for filename in ("board.json", "sdkconfig.defaults"):
-                expected = subprocess.check_output(["git", "show", f"71104ff:firmware/esp32s3/boards/{name}/{filename}"], cwd=ROOT)
-                self.assertEqual((BOARDS/name/filename).read_bytes().replace(b"\r\n",b"\n"), expected)
+            with self.subTest(board=name):
+                rendered = boards.render(boards.load_profile(path), path).encode("utf-8")
+                self.assertEqual(hashlib.sha256(rendered).hexdigest(), header_sha256)
+                manifest = path.read_bytes().replace(b"\r\n", b"\n")
+                self.assertEqual(hashlib.sha256(manifest).hexdigest(), manifest_sha256)
+
+    def test_board_sdkconfig_defaults_match_flash_and_keep_assertions_fatal(self):
+        # CMake loads these hand-maintained overrides; the header generator does not emit them.
+        for path in sorted(BOARDS.glob("*/board.json")):
+            profile = boards.load_profile(path)
+            settings = (path.parent / "sdkconfig.defaults").read_text().splitlines()
+            with self.subTest(board=profile["id"]):
+                flash = [line for line in settings
+                         if line.startswith("CONFIG_ESPTOOLPY_FLASHSIZE_") and line.endswith("=y")]
+                self.assertEqual(flash, [f"CONFIG_ESPTOOLPY_FLASHSIZE_{profile['flash']['size_mb']}MB=y"])
+                assertions = [line for line in settings
+                              if line.startswith("CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_")
+                              and line.endswith("=y")]
+                self.assertLessEqual(len(assertions), 1)
+                for setting in assertions:
+                    self.assertIn(setting, ("CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y",
+                                            "CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y"))
+                if profile["id"] == "lilygo_t_dongle_s3":
+                    self.assertEqual(assertions, ["CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y"])
 
     def test_atoms3_pins_and_flash(self):
         p = boards.load_profile(BOARDS / "m5stack_atoms3_lite/board.json")
