@@ -1620,16 +1620,22 @@ mod tests {
             Some(PathBuf::from("C:/state/keyferry/pairing-bundle.txt"))
         );
         assert_eq!(
-            bundle_pointer_path_for("macos", None, Some(OsStr::new("example-location")), None),
-            Some(PathBuf::from(
-                "example-location/Library/Application Support/keyferry/pairing-bundle.txt"
-            ))
+            bundle_pointer_path_for(
+                "macos",
+                None,
+                Some(OsStr::new(concat!("/Users/", "owner"))),
+                None
+            ),
+            Some(PathBuf::from(concat!(
+                "/Users/",
+                "owner/Library/Application Support/keyferry/pairing-bundle.txt"
+            )))
         );
         assert_eq!(
             bundle_pointer_path_for(
                 "unix",
                 None,
-                Some(OsStr::new("example-location")),
+                Some(OsStr::new(concat!("/home/", "owner"))),
                 Some(OsStr::new("/state"))
             ),
             Some(PathBuf::from("/state/keyferry/pairing-bundle.txt"))

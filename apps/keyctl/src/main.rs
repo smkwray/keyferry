@@ -3413,7 +3413,7 @@ mod tests {
         for rejected in [
             "https://127.0.0.1:8042",
             "http://localhost:8042",
-            "http://100.64.0.20:8042",
+            "http://100.64.0.22:8042",
             "http://127.0.0.1:0",
         ] {
             assert!(parse_endpoint(rejected).is_err(), "accepted {rejected}");

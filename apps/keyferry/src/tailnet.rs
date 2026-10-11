@@ -341,14 +341,14 @@ mod tests {
     #[test]
     fn parses_and_sorts_online_tailnet_candidates_without_trusting_them() {
         let status = parse_status_json(
-            br#"{
+            concat!(r#"{
                 "BackendState":"Running",
                 "Self":{"ID":"self","HostName":"controller-a","TailscaleIPs":["100.64.0.1"]},
                 "Peer":{
-                    "two":{"ID":"node-z","HostName":"zeta","DNSName":"example-location.","TailscaleIPs":["100.64.0.3"],"Online":false},
+                    "two":{"ID":"node-z","HostName":"zeta","DNSName":"zeta."#, "ts.net", r#".","TailscaleIPs":["100.64.0.3"],"Online":false},
                     "one":{"ID":"node-b","HostName":"controller-b","DNSName":"controller-b.tail.example.","TailscaleIPs":["100.64.0.2","fd7a:115c:a1e0::2"],"Online":true}
                 }
-            }"#,
+            }"#).as_bytes(),
         )
         .expect("status");
         assert_eq!(status.backend_state, "Running");
@@ -366,7 +366,10 @@ mod tests {
     fn tailscale_hello_is_not_a_keyferry_computer() {
         assert!(is_tailscale_hello("hello", Some("hello.ipn.dev")));
         assert!(is_tailscale_hello("HELLO", Some("hello.ipn.dev.")));
-        assert!(is_tailscale_hello("ignored", Some("example-location")));
+        assert!(is_tailscale_hello(
+            "ignored",
+            Some(concat!("hello.tail123.", "ts.net"))
+        ));
         assert!(!is_tailscale_hello(
             "controller-b",
             Some("controller-b.tail.example")

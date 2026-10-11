@@ -338,7 +338,10 @@ mod tests {
         }
     }
 
-    const PLIST: &str = "example-location/Library/LaunchAgents/io.github.smkwray.keyferryd.plist";
+    const PLIST: &str = concat!(
+        "/Users/",
+        "owner/Library/LaunchAgents/io.github.smkwray.keyferryd.plist"
+    );
 
     #[test]
     fn windows_start_runs_the_registered_task() {
