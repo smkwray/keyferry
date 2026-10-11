@@ -82,9 +82,16 @@ The prompt expires after two minutes, rejects non-printable/non-ASCII text witho
 clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
 files. Use U.S./ABC input and Caps Lock off. Do not put the secret into chat, arguments or stdin,
 and do not let an agent inspect the dialog while entering it. Cleanup guards overwrite owned text,
-request bodies and keyboard buffers after use, including errors. Shared library, toolkit and OS
-memory can retain copies; explicit clipboard operations or native selection behavior can also
-retain text outside Keyferry. An uncertain send is never automatically retried.
+request bodies and keyboard buffers after use, including errors. Finished daemon command records
+discard the value derived from their keystrokes and retain only receipt/control metadata. Active
+commands still need their input and comparison data. An uncertain send is never automatically retried.
+
+These protections assume a trusted controller and operating system. The editor and networking
+libraries make temporary RAM copies, and freeing memory does not guarantee overwriting it. The
+editor can also keep an input-method copy until the separate prompt window/process is destroyed;
+failed or uncertain results stay open until closed. This is not deliberate password-history storage.
+OS paging/crash files and explicit clipboard operations or Linux primary selection can retain text
+outside Keyferry. Complete memory erasure is not promised.
 
 An agent can also use `keyctl screen-power DEVICE_UUID off` (or `on`). Current source forwards
 that exact setting through the authenticated holder when needed. It requires capable firmware and

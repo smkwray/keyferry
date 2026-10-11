@@ -109,6 +109,8 @@ currently top-level only. Resource limits, UUIDv7, command-scoped arm, start
 expiry and never-resubmit policy retain V1 semantics. V2 fingerprints wrap the
 unchanged canonical V1 fingerprint in SHA256 over
 `keyferry.input-sequence.v2\0pointer-extended-v1\0 || v1_fingerprint`.
+As in V1, daemon comparison data is kept only while active and wiped before a terminal outcome;
+retained terminal IDs reject further submissions with HTTP 409 and use GET for reconciliation.
 
 ## Wire and safety
 

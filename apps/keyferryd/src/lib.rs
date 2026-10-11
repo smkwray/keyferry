@@ -1880,14 +1880,25 @@ impl SimulatorTransport {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 enum CommandFingerprint {
     Keyboard(u64),
     Input([u8; 32]),
 }
 
+impl Zeroize for CommandFingerprint {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Keyboard(value) => value.zeroize(),
+            Self::Input(value) => value.zeroize(),
+        }
+    }
+}
+
 struct CommandMeta {
-    fingerprint: CommandFingerprint,
+    // Comparison data exists only while input is active. Terminal IDs retain
+    // receipts without retaining a verifier for guesses of the erased input.
+    fingerprint: Option<Zeroizing<CommandFingerprint>>,
     response: watch::Sender<CommandOutcome>,
     started_at: Option<Instant>,
     event: Option<EventRecord>,
@@ -3712,13 +3723,13 @@ impl Daemon {
         };
         let compiled = compile_sequence(&sequence).map_err(sequence_error)?;
         let chunks = plan_chunks(compiled.steps).map_err(ApiError::bad_request)?;
-        let fingerprint = CommandFingerprint::Keyboard(fingerprint(
+        let fingerprint = Zeroizing::new(CommandFingerprint::Keyboard(fingerprint(
             &sequence.profile,
             &chunks,
             compiled.text_characters,
             sequence.start_within_ms,
             true,
-        ));
+        )));
         let command = PlannedCommand {
             command_id,
             chunks,
@@ -3881,7 +3892,8 @@ impl Daemon {
         let mut compiled = compile_input_sequence(&request)
             .map_err(|error| ApiError::bad_request(error.code()))?;
         // Dedupe identifies caller semantics, independent of the selected USB backend.
-        let fingerprint = CommandFingerprint::Input(compiled.fingerprint);
+        let fingerprint = Zeroizing::new(CommandFingerprint::Input(compiled.fingerprint));
+        compiled.fingerprint.zeroize();
         let extended = self
             .lookup(id)?
             .0
@@ -3894,6 +3906,9 @@ impl Daemon {
             wire_request.schema = keyferry_layouts::INPUT_SEQUENCE_SCHEMA_V2.to_owned();
             compiled = compile_input_sequence(&wire_request)
                 .map_err(|error| ApiError::bad_request(error.code()))?;
+            // Backend-specific compilation must not carry a second verifier
+            // into the work queue or transport after the command is admitted.
+            compiled.fingerprint.zeroize();
         }
         let command = PlannedCommand {
             command_id,
@@ -3939,13 +3954,13 @@ impl Daemon {
         }
         let chunks = plan_chunks(steps).map_err(ApiError::bad_request)?;
         let action_count = chunks.iter().map(|chunk| chunk.steps.len()).sum();
-        let fingerprint = CommandFingerprint::Keyboard(fingerprint(
+        let fingerprint = Zeroizing::new(CommandFingerprint::Keyboard(fingerprint(
             &profile,
             &chunks,
             char_count,
             expiry,
             arm_before_first,
-        ));
+        )));
         let command = PlannedCommand {
             command_id,
             chunks,
@@ -3964,7 +3979,7 @@ impl Daemon {
         id: &str,
         caller: String,
         command: PlannedCommand,
-        fingerprint: CommandFingerprint,
+        fingerprint: Zeroizing<CommandFingerprint>,
         stream: Option<StreamChildMeta>,
     ) -> Result<CommandResponse, ApiError> {
         let handle = self.lookup(id)?;
@@ -3979,7 +3994,18 @@ impl Daemon {
             prune_text_stream_records(&mut device);
             if let Some(existing) = device.commands.get(&command_id) {
                 let outcome = *existing.response.borrow();
-                if existing.fingerprint == fingerprint && existing.stream == stream {
+                if outcome.is_terminal() {
+                    return Err(ApiError {
+                        command_id: Some(command_id.to_string()),
+                        outcome,
+                        ..ApiError::conflict(
+                            "command_id already terminal; retrieve existing outcome",
+                        )
+                    });
+                }
+                if existing.fingerprint.as_deref() == Some(&*fingerprint)
+                    && existing.stream == stream
+                {
                     return Ok(command_response_with_diagnostic(
                         command_id,
                         id,
@@ -4070,7 +4096,7 @@ impl Daemon {
             device.commands.insert(
                 command_id,
                 CommandMeta {
-                    fingerprint,
+                    fingerprint: Some(fingerprint),
                     response: response.clone(),
                     started_at: None,
                     event: event.clone(),
@@ -6921,6 +6947,12 @@ fn finish_command_transition(
     started_at: Option<Instant>,
 ) -> Option<EventRecord> {
     let meta = device.commands.get_mut(&command_id)?;
+    // Wipe while the slot is still in place, before taking it out of the
+    // record and before a subscriber can observe a terminal result.
+    if let Some(fingerprint) = meta.fingerprint.as_mut() {
+        fingerprint.zeroize();
+    }
+    meta.fingerprint = None;
     meta.response.send_replace(next);
     meta.terminal_at = Some(Instant::now());
     meta.event.as_mut().map(|record| {
@@ -7690,6 +7722,13 @@ mod tests {
 
     fn daemon() -> Daemon {
         Daemon::new(MemoryTokenStore::new("test-token-123456")).expect("daemon")
+    }
+
+    fn hold_command_work(daemon: &Daemon) -> (mpsc::Sender<WorkItem>, mpsc::Receiver<WorkItem>) {
+        let runtime = daemon.lookup(SIMULATOR_DEVICE_ID).unwrap().0;
+        let (held_tx, held_rx) = mpsc::channel(1);
+        let worker_tx = std::mem::replace(&mut runtime.lock().unwrap().work_tx, held_tx);
+        (worker_tx, held_rx)
     }
 
     struct FileSetProbeTransport {
@@ -8604,6 +8643,7 @@ mod tests {
             transport.clone(),
         )
         .expect("daemon");
+        let (worker_tx, mut held_work) = hold_command_work(&daemon);
         let mut router = daemon.router();
         let uri = format!("/v1/devices/{SIMULATOR_DEVICE_ID}/sequences");
         let sequence = |command_id: Uuid, chord: &[&str], ordered: &[&str]| {
@@ -8623,13 +8663,7 @@ mod tests {
         let alias = sequence(command_id, &["COMMAND", "OPT", "ESCAPE"], &["CMD", "SPACE"]);
         let (status, _) = call_json(&mut router, "POST", uri.clone(), Some(alias)).await;
         assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(
-            daemon.wait_for_terminal(command_id).await,
-            Some(CommandOutcome::Emitted)
-        );
-
-        // The canonical spelling of the same command is the same plan: a duplicate, not a
-        // conflict, and nothing runs twice.
+        // While active, the canonical spelling identifies the same plan.
         let canonical = sequence(
             command_id,
             &["LEFT_GUI", "LEFT_ALT", "ESCAPE"],
@@ -8642,8 +8676,6 @@ mod tests {
             duplicate["message"],
             "duplicate command returned existing outcome"
         );
-        assert_eq!(transport.execution_count(command_id), 1);
-
         // A different side is a different plan under the same id.
         let changed = sequence(
             command_id,
@@ -8652,6 +8684,15 @@ mod tests {
         );
         let (status, _) = call_json(&mut router, "POST", uri.clone(), Some(changed)).await;
         assert_eq!(status, StatusCode::CONFLICT);
+        worker_tx
+            .send(held_work.recv().await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Emitted)
+        );
+        assert_eq!(transport.execution_count(command_id), 1);
 
         // An alias and its canonical name are one key inside a chord or an ordered chord.
         for (chord, ordered) in [
@@ -8875,6 +8916,32 @@ mod tests {
             call_json(&mut router, "GET", format!("{streams}/{job_id}"), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(receipt["outcome"], "EMITTED");
+        assert!(!daemon
+            .lookup(SIMULATOR_DEVICE_ID)
+            .unwrap()
+            .0
+            .lock()
+            .unwrap()
+            .commands
+            .contains_key(&child_id));
+        let (status, _) = call_json(
+            &mut router,
+            "POST",
+            format!("{streams}/{job_id}/parts/0"),
+            Some(serde_json::json!({
+                "epoch": daemon.0.epoch.to_string(),
+                "child_command_id": child_id.to_string(),
+                "source_start": {"bytes": "0", "scalars": "0"},
+                "text": "secret",
+                "end_of_input": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, reconciled) =
+            call_json(&mut router, "GET", format!("{streams}/{job_id}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reconciled, receipt);
         assert_eq!(state_dir_entries(&dir), ["token"]);
 
         // A restarted daemon has no record of the job; clients must treat it as unknown.
@@ -9230,23 +9297,19 @@ mod tests {
             transport.clone(),
         )
         .expect("daemon");
+        let (worker_tx, mut held_work) = hold_command_work(&daemon);
         let command_id = Uuid::now_v7();
         let request = pointer_input_request(command_id);
         let first = daemon
             .submit_input_sequence(SIMULATOR_DEVICE_ID, "test".to_owned(), request.clone())
             .await
             .expect("first submission");
-        assert_eq!(
-            daemon.wait_for_terminal(command_id).await,
-            Some(CommandOutcome::Emitted)
-        );
         let duplicate = daemon
             .submit_input_sequence(SIMULATOR_DEVICE_ID, "test".to_owned(), request.clone())
             .await
             .expect("identical duplicate");
         assert_eq!(duplicate.command_id, first.command_id);
-        assert_eq!(duplicate.outcome, CommandOutcome::Emitted);
-        assert_eq!(transport.execution_count(command_id), 1);
+        assert!(!duplicate.outcome.is_terminal());
 
         let mut changed = request;
         changed.actions = vec![keyferry_layouts::InputAction::MoveRelative {
@@ -9258,7 +9321,175 @@ mod tests {
             .await
             .expect_err("same id with changed plan must conflict");
         assert_eq!(error.status, StatusCode::CONFLICT);
+        let work = held_work.recv().await.unwrap();
+        assert_eq!(work.command.input.as_ref().unwrap().fingerprint, [0; 32]);
+        worker_tx.send(work).await.unwrap();
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Emitted)
+        );
         assert_eq!(transport.execution_count(command_id), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_commands_forget_comparison_data_and_reconcile_without_resubmission() {
+        for input in [false, true] {
+            for fault in [
+                SimulationFault::None,
+                SimulationFault::BeforeAccept,
+                SimulationFault::AcceptedButLost,
+                SimulationFault::CancelBeforeStart,
+                SimulationFault::LostAfterStart,
+                SimulationFault::CancelAfterStart,
+            ] {
+                let transport = Arc::new(SimulatorTransport::new([fault]).with_input_sequence());
+                let daemon = Daemon::with_transport(
+                    MemoryTokenStore::new("test-token-123456"),
+                    transport.clone(),
+                )
+                .expect("daemon");
+                arm(&daemon).await;
+                let command_id = Uuid::now_v7();
+                let text = TypeRequest {
+                    text: "synthetic-input".to_owned(),
+                    profile: default_profile(),
+                    timing: default_timing(),
+                    expires_in_ms: None,
+                    command_id: Some(command_id),
+                };
+                let pointer = pointer_input_request(command_id);
+                if input {
+                    daemon
+                        .submit_input_sequence(
+                            SIMULATOR_DEVICE_ID,
+                            "test".to_owned(),
+                            pointer.clone(),
+                        )
+                        .await
+                        .unwrap();
+                } else {
+                    daemon
+                        .submit_text(SIMULATOR_DEVICE_ID, "test".to_owned(), text.clone())
+                        .await
+                        .unwrap();
+                }
+                let outcome = daemon.wait_for_terminal(command_id).await.unwrap();
+                assert!(outcome.is_terminal());
+                let runtime = daemon.lookup(SIMULATOR_DEVICE_ID).unwrap().0;
+                assert!(runtime.lock().unwrap().commands[&command_id]
+                    .fingerprint
+                    .is_none());
+                let receipt = daemon
+                    .command_outcome(SIMULATOR_DEVICE_ID, command_id)
+                    .unwrap();
+                let executions = transport.execution_count(command_id);
+                let controls = transport.control_request_counts();
+                for changed in [false, true] {
+                    let error = if input {
+                        let mut request = pointer.clone();
+                        if changed {
+                            request.actions = vec![keyferry_layouts::InputAction::MoveRelative {
+                                dx_counts: 11,
+                                dy_counts: -5,
+                            }];
+                        }
+                        daemon
+                            .submit_input_sequence(SIMULATOR_DEVICE_ID, "test".to_owned(), request)
+                            .await
+                            .unwrap_err()
+                    } else {
+                        let mut request = text.clone();
+                        if changed {
+                            request.text = "different-synthetic-input".to_owned();
+                        }
+                        daemon
+                            .submit_text(SIMULATOR_DEVICE_ID, "test".to_owned(), request)
+                            .await
+                            .unwrap_err()
+                    };
+                    assert_eq!(error.status, StatusCode::CONFLICT);
+                    assert_eq!(error.command_id, Some(command_id.to_string()));
+                    assert_eq!(error.outcome, receipt.outcome);
+                    assert_eq!(
+                        error.message,
+                        "command_id already terminal; retrieve existing outcome"
+                    );
+                    let response = error.into_response();
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(body["command_id"], command_id.to_string());
+                    assert_eq!(body["outcome"], serde_json::to_value(outcome).unwrap());
+                }
+                assert_eq!(transport.execution_count(command_id), executions);
+                assert_eq!(transport.control_request_counts(), controls);
+                assert_eq!(
+                    daemon
+                        .command_outcome(SIMULATOR_DEVICE_ID, command_id)
+                        .unwrap(),
+                    receipt
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_loss_forgets_comparison_data_and_preserves_terminal_id_on_reconnect() {
+        let transport = Arc::new(UnknownOnCancelTransport::default());
+        let daemon = Daemon::with_transport(
+            MemoryTokenStore::new("test-token-123456"),
+            transport.clone(),
+        )
+        .unwrap();
+        arm(&daemon).await;
+        let command_id = Uuid::now_v7();
+        let request = TypeRequest {
+            text: "synthetic".to_owned(),
+            profile: default_profile(),
+            timing: default_timing(),
+            expires_in_ms: None,
+            command_id: Some(command_id),
+        };
+        let started = transport.started.notified();
+        daemon
+            .submit_text(SIMULATOR_DEVICE_ID, "test".to_owned(), request.clone())
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), started).await.unwrap();
+        assert_eq!(
+            daemon
+                .command_outcome(SIMULATOR_DEVICE_ID, command_id)
+                .unwrap()
+                .outcome,
+            CommandOutcome::Started
+        );
+        let runtime = daemon.lookup(SIMULATOR_DEVICE_ID).unwrap().0;
+        daemon.mark_transport_disconnected(&runtime);
+        assert_eq!(
+            daemon.wait_for_terminal(command_id).await,
+            Some(CommandOutcome::Unknown)
+        );
+        {
+            let mut device = runtime.lock().unwrap();
+            assert!(device.commands[&command_id].fingerprint.is_none());
+            device.state.set_link_authenticated();
+        }
+        let receipt = daemon
+            .command_outcome(SIMULATOR_DEVICE_ID, command_id)
+            .unwrap();
+        let error = daemon
+            .submit_text(SIMULATOR_DEVICE_ID, "test".to_owned(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.command_id, Some(command_id.to_string()));
+        assert_eq!(error.outcome, CommandOutcome::Unknown);
+        assert_eq!(
+            daemon
+                .command_outcome(SIMULATOR_DEVICE_ID, command_id)
+                .unwrap(),
+            receipt
+        );
     }
 
     #[tokio::test]

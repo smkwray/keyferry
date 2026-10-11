@@ -102,7 +102,12 @@ The normalized plan fingerprint is SHA-256 over:
 || each(body_length:u16LE || complete_chunk_body)
 ```
 
-Command ID and timestamps are excluded. The daemon deduplicates retained IDs before mutation. The
+Command ID and timestamps are excluded. The daemon compares fingerprints only for retained active
+IDs, before mutation. It wipes this comparison data at terminal transition. A valid POST reaching
+admission for a retained terminal ID returns HTTP 409 with the existing command ID/outcome,
+regardless of submitted content; validation errors still precede command admission.
+GET retrieves the existing receipt without replay. Receipts have bounded lifetime, not permanent
+ID retention; clients never resubmit uncertain input. The
 endpoint additionally retains the 64 most recently admitted public IDs per authenticated epoch and
 requires exact next chunk index/count/profile. Admitting a new ID ends every earlier one, so the
 oldest (closed) ID makes room and admission never fails for capacity: a session outlives any number

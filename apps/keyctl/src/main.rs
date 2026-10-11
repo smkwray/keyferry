@@ -2611,6 +2611,29 @@ fn submit_prepared_with_interrupt(
                 return 25;
             }
         },
+        Ok(response)
+            if response.status == 409
+                && serde_json::from_str::<Value>(&response.body)
+                    .ok()
+                    .is_some_and(|body| body["command_id"] == command_id) =>
+        {
+            // This ID already belongs to a command. Reconcile its original result once,
+            // including with --detach; never treat rejection of this POST as proof that
+            // the original input was rejected, and never submit it again.
+            if let Some(outcome) =
+                reconcile_retained_command(client, device, command_id, &response.body)
+            {
+                emit(daemon_sequence_result_json(device, command_id, &outcome));
+                return outcome_exit_code(outcome.outcome);
+            }
+            emit(sequence_result_json(
+                device,
+                Some(command_id),
+                SequenceOutcome::Unknown,
+                Some("command.outcome_unknown"),
+            ));
+            return 12;
+        }
         Ok(response) => {
             let code = http_exit_code(response.status);
             emit(sequence_result_json(
@@ -2701,6 +2724,34 @@ fn submit_prepared_with_interrupt(
             }
         }
     }
+}
+
+fn reconcile_retained_command(
+    client: &Client,
+    device: &str,
+    command_id: &str,
+    conflict: &str,
+) -> Option<DaemonCommandResponse> {
+    #[derive(Deserialize)]
+    struct TerminalConflict {
+        command_id: String,
+        outcome: SequenceOutcome,
+    }
+    let conflict: TerminalConflict = serde_json::from_str(conflict).ok()?;
+    if conflict.command_id != command_id || !conflict.outcome.is_terminal() {
+        return None;
+    }
+    let path = format!("/v1/devices/{device}/commands/{command_id}");
+    let response = client.request_raw("GET", &path, None).ok()?;
+    if response.status != 200 {
+        return None;
+    }
+    let identity: Value = serde_json::from_str(&response.body).ok()?;
+    if identity["command_id"] != command_id || identity["device_id"] != device {
+        return None;
+    }
+    let outcome = parse_daemon_outcome(&response.body).ok()?;
+    (outcome.terminal && outcome.outcome == conflict.outcome).then_some(outcome)
 }
 
 fn parse_daemon_outcome(body: &str) -> Result<DaemonCommandResponse, ()> {
@@ -3683,6 +3734,174 @@ mod tests {
             r#"{"outcome":"UNKNOWN","terminal":true,"possible_start":true,"terminal_zero_confirmed":false,"diagnostic_code":"cancel.payload.text"}"#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn terminal_id_conflicts_reconcile_once_without_replaying() {
+        const ID: &str = "019d1234-5678-7abc-8123-456789abcdef";
+        fn run(
+            conflict: &str,
+            get: bool,
+            receipt: Option<(u16, &str)>,
+            detach: bool,
+        ) -> (u8, Value) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let conflict = conflict.to_owned();
+            let receipt = receipt.map(|(status, body)| (status, body.to_owned()));
+            let server = std::thread::spawn(move || {
+                for operation in 0..if get { 2 } else { 1 } {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(std::time::Instant::now() < deadline, "missing request");
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(error) => panic!("accept failed: {error}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut headers = Vec::new();
+                    let mut byte = [0];
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        headers.push(byte[0]);
+                    }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Content-Length: ")?.parse::<usize>().ok()
+                        })
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let response = if operation == 0 {
+                        assert!(headers.starts_with("POST /v1/devices/device-1/sequences HTTP/1.1"));
+                        assert_eq!(body, b"synthetic-input");
+                        Some((409, conflict.as_str()))
+                    } else {
+                        assert!(headers.starts_with(&format!(
+                            "GET /v1/devices/device-1/commands/{ID} HTTP/1.1"
+                        )));
+                        assert!(body.is_empty());
+                        receipt
+                            .as_ref()
+                            .map(|(status, body)| (*status, body.as_str()))
+                    };
+                    if let Some((status, body)) = response {
+                        write!(stream, "HTTP/1.1 {status} result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                }
+                listener
+            });
+            let client = Client {
+                endpoint: Endpoint {
+                    host: "127.0.0.1".into(),
+                    port,
+                },
+                token: "test-token".into(),
+            };
+            let mut emitted = Vec::new();
+            let code = submit_prepared_with_interrupt(
+                &client,
+                "device-1",
+                detach,
+                "/sequences",
+                ID,
+                "synthetic-input",
+                &AtomicBool::new(false),
+                |result| emitted.push(result),
+            );
+            let listener = server.join().unwrap();
+            assert!(listener.accept().is_err(), "no resend or extra request");
+            assert_eq!(emitted.len(), 1);
+            (code, serde_json::from_str(&emitted[0]).unwrap())
+        }
+        let conflict = |outcome: &str| {
+            serde_json::json!({
+                "error": "command_id already terminal; retrieve existing outcome",
+                "command_id": ID, "outcome": outcome,
+            })
+            .to_string()
+        };
+        let receipt = |outcome: &str| {
+            serde_json::json!({
+                "command_id": ID, "device_id": "device-1", "outcome": outcome,
+                "terminal": true, "possible_start": outcome != "REJECTED",
+                "terminal_zero_confirmed": false,
+                "terminal_release_completed": outcome != "UNKNOWN",
+                "output_transport": "ble-hid",
+            })
+        };
+        for detach in [false, true] {
+            for (outcome, code) in [
+                ("EMITTED", 0),
+                ("UNKNOWN", 12),
+                ("ABORTED", 11),
+                ("REJECTED", 10),
+            ] {
+                let (actual_code, result) = run(
+                    &conflict(outcome),
+                    true,
+                    Some((200, &receipt(outcome).to_string())),
+                    detach,
+                );
+                assert_eq!(actual_code, code);
+                assert_eq!(result["outcome"], outcome);
+                assert_eq!(result["command_id"], ID);
+                assert_eq!(result["output_transport"], "ble-hid");
+                assert_eq!(result["terminal_zero_confirmed"], false);
+                assert_eq!(result["terminal_release_completed"], outcome != "UNKNOWN");
+            }
+        }
+        let mut invalid_receipts = vec!["{}".to_owned(), "invalid-json".to_owned()];
+        for (field, value) in [
+            ("command_id", serde_json::json!("another-command")),
+            ("device_id", serde_json::json!("another-device")),
+            ("outcome", serde_json::json!("UNKNOWN")),
+            ("terminal", serde_json::json!(false)),
+        ] {
+            let mut body = receipt("EMITTED");
+            body[field] = value;
+            invalid_receipts.push(body.to_string());
+        }
+        let mut missing_device = receipt("EMITTED");
+        missing_device.as_object_mut().unwrap().remove("device_id");
+        invalid_receipts.push(missing_device.to_string());
+        for body in &invalid_receipts {
+            let (code, result) = run(&conflict("EMITTED"), true, Some((200, body)), false);
+            assert_eq!(code, 12);
+            assert_eq!(result["outcome"], "UNKNOWN");
+        }
+        for failed_get in [None, Some((500, "{}"))] {
+            let (code, result) = run(&conflict("EMITTED"), true, failed_get, true);
+            assert_eq!(code, 12);
+            assert_eq!(result["outcome"], "UNKNOWN");
+        }
+        for body in [
+            serde_json::json!({"command_id": ID}).to_string(),
+            conflict("INVALID"),
+            conflict("STARTED"),
+        ] {
+            let (code, result) = run(&body, false, None, false);
+            assert_eq!(code, 12);
+            assert_eq!(result["outcome"], "UNKNOWN");
+        }
+        for body in [
+            "invalid-json".to_owned(),
+            "{}".to_owned(),
+            serde_json::json!({"command_id": "other-command", "outcome": "UNKNOWN"}).to_string(),
+        ] {
+            let (code, result) = run(&body, false, None, false);
+            assert_eq!(code, http_exit_code(409));
+            assert_eq!(result["outcome"], "REJECTED");
+        }
     }
 
     #[test]

@@ -3145,8 +3145,18 @@ mod tests {
         let outcome = wait_for_outcome(forwarder, &command_id.to_string()).await;
         assert_eq!(outcome["outcome"], "EMITTED");
         let (status, duplicate) = call(forwarder, "POST", &uri, Some(sequence(command_id))).await;
-        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(duplicate["command_id"], command_id.to_string());
         assert_eq!(duplicate["outcome"], "EMITTED");
+        let (status, retained) = call(
+            forwarder,
+            "GET",
+            &format!("/v1/devices/{device}/commands/{command_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retained["outcome"], "EMITTED");
         assert_eq!(harness.holder_device.execution_count(command_id), 1);
 
         // Compatibility text without a command ID gets one bound before it leaves this computer.

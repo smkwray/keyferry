@@ -213,7 +213,10 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if send_consumed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let secret = Zeroizing::new(window.get_secret().to_string());
+        // SharedString::clone shares the editor allocation. Borrow it directly for validation
+        // and the guarded request instead of allocating another whole-password String.
+        // Slint owns this shared allocation; dropping it does not prove that it was wiped.
+        let secret = window.get_secret();
         let enter = window.get_append_enter();
         clear(&window);
         if Instant::now() >= deadline {

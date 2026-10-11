@@ -285,9 +285,22 @@ buffers and terminal command storage, including session loss and USB faults. The
 undo state are discarded on send, close, cancellation, or expiry. No prompt body, recipe, file,
 transcript, or disk receipt is created by this flow. Keyferry does not deliberately copy the secret
 to a clipboard; explicit editor operations and native toolkit selection behavior may do so. The
-secret accessibility value is blank. Shared HTTP/library allocations, the UI toolkit, TLS and OS
-may retain copies; this is not a guarantee against process-memory inspection, swap, OS crash dumps,
-or a compromised authorized controller.
+secret accessibility value is blank. The sender borrows the editor's shared text when constructing
+its guarded request, avoiding another whole-password allocation. This does not make the editor's
+allocation wipeable. Slint editing temporaries and undo strings are ordinary RAM allocations;
+discarding the editor releases them without guaranteeing erasure. A window input-method snapshot
+can retain plaintext until the window/process is destroyed. Successful prompts close after three
+seconds; failed or uncertain results remain visible until the owner closes them. These paths do
+not deliberately write a password history. Shared HTTP/parser/TLS storage can retain other copies.
+
+The memory protections assume a trusted controller and OS and reduce accidental persistence and
+unnecessary retention after use. They do not defend against an authorized process inspecting live
+memory, a compromised controller, or copies in OS swap, hibernation or crash files.
+The daemon wipes command comparison fingerprints before publishing a terminal outcome. While the
+terminal ID is retained, a valid submission reaching admission with that ID returns HTTP 409 with
+the existing outcome; clients reconcile through GET instead of submitting input again. Active commands retain
+comparison data alongside the input needed to execute. Existing bounded receipt retention, stream
+index guards and restart behavior remain unchanged; this is not permanent storage of consumed IDs.
 The standard editor allows a human's explicit clipboard operations; users should type secrets when
 clipboard history/synchronization is a concern. Masking alone is not a memory-security boundary.
 
