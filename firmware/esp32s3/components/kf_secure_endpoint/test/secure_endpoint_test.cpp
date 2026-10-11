@@ -11,6 +11,18 @@
 #include <string>
 #include "keyferry/command_executor.h"
 
+namespace keyferry::endpoint {
+struct EndpointSessionTestPeer {
+  static bool ReceiveCleared(const EndpointSession& session) {
+    return session.wire_length_ == 0 &&
+           std::all_of(session.wire_.begin(), session.wire_.end(),
+                       [](std::uint8_t byte) { return byte == 0; }) &&
+           std::all_of(session.decoded_.begin(), session.decoded_.end(),
+                       [](std::uint8_t byte) { return byte == 0; });
+  }
+};
+}  // namespace keyferry::endpoint
+
 namespace {
 
 #undef assert
@@ -334,7 +346,9 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   const std::vector<std::uint8_t> challenge_wire = Frame(MessageType::kAuthChallenge, 0, challenge);
   const std::size_t split = challenge_wire.size() / 2;
   assert(session.ConsumeTls(challenge_wire.data(), split));
+  assert(!keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(session.ConsumeTls(challenge_wire.data() + split, challenge_wire.size() - split));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
 
   assert(effects.captured_host == std::vector<std::uint8_t>(challenge.begin(),
                                                             challenge.begin() + 16));
@@ -378,6 +392,7 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   WriteLe32(ready.data() + 30, 500);
   const std::vector<std::uint8_t> ready_wire = Frame(MessageType::kSessionReady, 1, ready);
   assert(session.ConsumeTls(ready_wire.data(), ready_wire.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(session.authenticated() && effects.authenticated_count == 1 && !effects.armed);
   DecodedFrame identity_response = Decode(effects.sent, scratch);
   assert(identity_response.message_type ==
@@ -412,6 +427,7 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   const auto route_wire =
       Frame(MessageType::kRouteProofRequest, 2, route_request);
   assert(session.ConsumeTls(route_wire.data(), route_wire.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   DecodedFrame route_response = Decode(effects.sent, scratch);
   assert(route_response.message_type ==
          static_cast<std::uint8_t>(MessageType::kRouteProofResponse));
@@ -429,6 +445,7 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   const std::vector<std::uint8_t> bad_arm_payload{0x02, 1, 0, 0, 0};
   const std::vector<std::uint8_t> bad_arm = Frame(MessageType::kArm, 3, bad_arm_payload);
   assert(session.ConsumeTls(bad_arm.data(), bad_arm.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   DecodedFrame error = Decode(effects.sent, scratch);
   assert(error.message_type == static_cast<std::uint8_t>(MessageType::kError));
   assert(error.sequence == 3 && error.payload_length == 2);
@@ -495,8 +512,9 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   assert(Decode(effects.sent, scratch).message_type ==
          static_cast<std::uint8_t>(MessageType::kError));
   assert(effects.forwarded_count == 0);
-  const std::vector<std::uint8_t> command = Frame(MessageType::kCommand, 9, {});
+  const std::vector<std::uint8_t> command = Frame(MessageType::kCommand, 9, {0x31, 0x53, 0x71, 0x92});
   assert(session.ConsumeTls(command.data(), command.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(effects.forwarded_count == 1 &&
          effects.last_forwarded_type == static_cast<std::uint8_t>(MessageType::kCommand));
 
@@ -514,6 +532,7 @@ void TestHandshakeAndControlBoundary(std::uint32_t board_id = 1) {
   const auto faulted = Frame(MessageType::kCommand, 11, {});
   const std::uint64_t authenticated_epoch = session.epoch();
   assert(!session.ConsumeTls(faulted.data(), faulted.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(!session.authenticated() && !effects.armed);
   assert(session.epoch() == authenticated_epoch + 1);
   const auto failed_epoch = session.epoch();
@@ -537,6 +556,7 @@ void TestMalformedAndOversizeFailClosed() {
   assert(session.BeginTls(policy, tls));
   const std::uint8_t empty_frame = 0;
   assert(!session.ConsumeTls(&empty_frame, 1));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(session.reject_diagnostic().site == 3);
   assert(session.reject_diagnostic().message_type == 0);
   assert(session.reject_diagnostic().sequence == 0);
@@ -547,6 +567,7 @@ void TestMalformedAndOversizeFailClosed() {
   std::array<std::uint8_t, keyferry::endpoint::kMaxWireFrame + 1> oversized{};
   oversized.fill(1);
   assert(!session.ConsumeTls(oversized.data(), oversized.size()));
+  assert(keyferry::endpoint::EndpointSessionTestPeer::ReceiveCleared(session));
   assert(session.epoch() == malformed_epoch + 2);
 }
 

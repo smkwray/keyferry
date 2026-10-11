@@ -160,6 +160,7 @@ class EndpointSession {
   EndpointRejectDiagnostic reject_diagnostic() const { return reject_diagnostic_; }
 
  private:
+  friend struct EndpointSessionTestPeer;
   enum class State : std::uint8_t {
     kOffline,
     kAwaitChallenge,

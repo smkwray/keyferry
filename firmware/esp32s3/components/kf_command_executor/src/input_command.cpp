@@ -1,4 +1,5 @@
 #include "keyferry/input_command.h"
+#include "secure_memory.h"
 
 #include <algorithm>
 #include <cstring>
@@ -112,6 +113,7 @@ bool ParseInputChunk(const std::uint8_t* body, const std::size_t length,
         return false;
     }
     ParsedInputChunk parsed{};
+    const SecureClearOnExit clear_parsed(&parsed, sizeof(parsed));
     parsed.index = ReadU16(body);
     parsed.count = ReadU16(body + 2);
     if (parsed.count == 0 || parsed.count > kMaximumInputChunks || parsed.index >= parsed.count) {

@@ -1,4 +1,5 @@
 #include "keyferry/command_executor.h"
+#include "secure_memory.h"
 
 #include <algorithm>
 #include <cstring>
@@ -127,7 +128,8 @@ void CommandExecutor::EndSession() {
     phase_ = Phase::kIdle;
     action_count_ = 0;
     action_index_ = 0;
-    input_chunk_ = {};
+    SecureClear(actions_.data(), sizeof(actions_));
+    SecureClear(&input_chunk_, sizeof(input_chunk_));
     movement_part_index_ = 0;
     movement_token_ = 0;
     input_effect_flags_ = 0;
@@ -247,6 +249,7 @@ bool CommandExecutor::HandleAuthenticated(const std::uint64_t epoch,
         }
 
         ParsedInputChunk parsed{};
+        const SecureClearOnExit clear_parsed(&parsed, sizeof(parsed));
         if (!ParseInputChunk(body, body_length, &parsed, extended)) {
             if (active_) { BeginTerminal(protocol::ResultCode::kAborted, protocol::ErrorCode::kMalformed); }
             RejectInput(command_id, frame.sequence, protocol::ErrorCode::kMalformed, clear_arm);
@@ -569,6 +572,10 @@ void CommandExecutor::UsbFault() {
     late_input_cancel_pending_ = false;
     late_input_cancel_sequence_ = 0;
     input_effect_flags_ = 0;
+    SecureClear(actions_.data(), sizeof(actions_));
+    SecureClear(&input_chunk_, sizeof(input_chunk_));
+    action_count_ = 0;
+    action_index_ = 0;
     phase_ = Phase::kIdle;
     command_arm_available_ = false;
     hid_.fault();
@@ -639,6 +646,7 @@ bool CommandExecutor::ParseActions(const std::uint8_t* body, const std::size_t l
         return false;
     }
     std::array<Action, kMaximumActions> parsed{};
+    const SecureClearOnExit clear_parsed(parsed.data(), sizeof(parsed));
     std::size_t count = 0;
     std::size_t offset = 0;
     std::uint32_t duration_ms = 0;
@@ -894,7 +902,8 @@ void CommandExecutor::FinishTerminal() {
     phase_ = Phase::kIdle;
     action_count_ = 0;
     action_index_ = 0;
-    input_chunk_ = {};
+    SecureClear(actions_.data(), sizeof(actions_));
+    SecureClear(&input_chunk_, sizeof(input_chunk_));
     movement_part_index_ = 0;
     input_effect_flags_ = 0;
     terminal_reason_ = kNoInputError;

@@ -66,6 +66,7 @@ class CommandExecutor final {
     [[nodiscard]] std::uint64_t epoch() const noexcept;
 
   private:
+    friend struct CommandExecutorTestPeer;
     enum class ActionKind : std::uint8_t { kReport, kWait, kRelease, kTap };
     struct Action {
         ActionKind kind{};

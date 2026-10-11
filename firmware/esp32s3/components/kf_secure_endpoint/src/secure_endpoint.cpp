@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "keyferry_protocol_generated.h"
+#include "secure_memory.h"
 
 namespace keyferry::endpoint {
 
@@ -109,13 +110,6 @@ bool ValidFileSetRequest(const protocol::DecodedFrame& frame) {
     case 3: case 4: return frame.payload_length == 1;
     case 5: return frame.payload_length == 2;
     default: return false;
-  }
-}
-
-void SecureClear(std::uint8_t* data, std::size_t length) {
-  volatile std::uint8_t* output = data;
-  while (length-- != 0) {
-    *output++ = 0;
   }
 }
 
@@ -224,6 +218,8 @@ bool EndpointSession::ConsumeTls(const std::uint8_t* data, std::size_t length) {
     if (frame.major != protocol::kMajor || frame.minor != protocol::kMinor)
       return Reject(4, &frame);
     if (!HandleFrame(frame)) return state_ == State::kOffline ? false : Reject(5, &frame);
+    // Effects must copy anything they need during HandleFrame; its view ends here.
+    ResetReceive();
   }
   return true;
 }

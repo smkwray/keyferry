@@ -1,5 +1,7 @@
 #include "keyferry/command_executor.h"
+#include "secure_memory.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -13,6 +15,19 @@ using keyferry::protocol::ErrorCode;
 using keyferry::protocol::MessageType;
 using keyferry::protocol::ReportAction;
 using keyferry::protocol::ResultCode;
+
+namespace keyferry::command {
+struct CommandExecutorTestPeer {
+    static bool PayloadCleared(const CommandExecutor& executor) {
+        const auto zero = [](const void* data, std::size_t size) {
+            const auto* bytes = static_cast<const std::uint8_t*>(data);
+            return std::all_of(bytes, bytes + size, [](std::uint8_t byte) { return byte == 0; });
+        };
+        return zero(executor.actions_.data(), sizeof(executor.actions_)) &&
+               zero(&executor.input_chunk_, sizeof(executor.input_chunk_));
+    }
+};
+}  // namespace keyferry::command
 
 namespace {
 
@@ -197,6 +212,7 @@ void Executes_with_exact_results_and_terminal_zero() {
     assert(fixture.results.events.size() == 1);
     assert(fixture.results.events[0].result == ResultCode::kAccepted);
     assert(fixture.hid.desired_report() == KeyA());
+    assert(!keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
 
     fixture.executor.UsbReportAccepted(KeyA(), 11);
     assert(fixture.results.events.size() == 2);
@@ -215,6 +231,7 @@ void Executes_with_exact_results_and_terminal_zero() {
     assert(fixture.results.events.size() == 3);
     assert(fixture.results.events[2].result == ResultCode::kEmitted);
     assert(fixture.watchdog.cancel_count == 1);
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
 }
 
 void Enforces_arm_binding_expiry_busy_and_arm_consumption() {
@@ -248,6 +265,7 @@ void Enforces_arm_binding_expiry_busy_and_arm_consumption() {
     assert(fixture.executor.HandleAuthenticated(7, Frame(7, wrong_profile), 170));
     assert(fixture.results.events.back().result == ResultCode::kRejected);
     assert(!fixture.executor.HandleAuthenticated(7, Frame(8, {}), 171));
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
 }
 
 void Cancellation_aborts_after_release() {
@@ -262,6 +280,7 @@ void Cancellation_aborts_after_release() {
     fixture.executor.UsbReportAccepted({}, 13);
     assert(fixture.results.events.back().result == ResultCode::kAborted);
     assert(!fixture.executor.active());
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
 }
 
 void Independent_watchdog_forces_zero_disarm_and_unknown_without_poll() {
@@ -303,6 +322,7 @@ void Session_loss_classifies_started_as_unknown_and_prestart_as_aborted() {
     assert(before.executor.HandleAuthenticated(7, Frame(2, waiting), 0));
     before.executor.EndSession();
     assert(before.results.events.back().result == ResultCode::kAborted);
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(before.executor));
 
     Fixture after;
     after.Arm();
@@ -311,6 +331,52 @@ void Session_loss_classifies_started_as_unknown_and_prestart_as_aborted() {
     after.executor.UsbReportAccepted(KeyA(), 1);
     after.executor.EndSession();
     assert(after.results.events.back().result == ResultCode::kUnknown);
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(after.executor));
+}
+
+void Stack_payload_cleanup_survives_early_return() {
+    std::array<std::uint8_t, 32> bytes{};
+    const auto reject = [&]() {
+        const keyferry::SecureClearOnExit cleanup(bytes.data(), bytes.size());
+        bytes.fill(0x91);
+        return false;
+    };
+    assert(!reject());
+    assert(std::all_of(bytes.begin(), bytes.end(), [](std::uint8_t byte) { return byte == 0; }));
+}
+
+void Usb_fault_clears_queued_and_started_payloads() {
+    for (const bool started : {false, true}) {
+        Fixture fixture;
+        fixture.Arm();
+        const auto payload = Envelope(Id(90), 5000, 1, Actions());
+        assert(fixture.executor.HandleAuthenticated(7, Frame(2, payload), 10));
+        if (started) {
+            fixture.executor.UsbReportAccepted(KeyA(), 11);
+        }
+        assert(!keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
+        fixture.executor.UsbFault();
+        assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
+        assert(!fixture.executor.active());
+        assert(!fixture.hid.armed());
+        assert(fixture.results.events.back().result ==
+               (started ? ResultCode::kUnknown : ResultCode::kAborted));
+
+        MixedFixture mixed;
+        mixed.Arm();
+        const auto input = Envelope(Id(91), 5000, 4, InputActions());
+        assert(mixed.executor.HandleAuthenticated(7, Frame(2, input), 10));
+        if (started) {
+            mixed.executor.UsbMouseReportAccepted(
+                mixed.hid.desired_mouse_report(), mixed.hid.desired_mouse_logical_token(), 11);
+        }
+        assert(!keyferry::command::CommandExecutorTestPeer::PayloadCleared(mixed.executor));
+        mixed.executor.UsbFault();
+        assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(mixed.executor));
+        assert(!mixed.executor.active());
+        assert(!mixed.hid.armed());
+        assert(mixed.results.input_events.back().evidence.result == ResultCode::kUnknown);
+    }
 }
 
 void Release_follows_the_session_sequence_after_frames_the_executor_never_sees() {
@@ -381,6 +447,7 @@ void Mixed_input_preserves_order_and_requires_both_terminal_neutrals() {
     fixture.executor.UsbMouseReportAccepted({}, 0, 118);
     assert(!fixture.executor.active());
     const auto& terminal = fixture.results.input_events.back().evidence;
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
     assert(terminal.result == ResultCode::kEmitted);
     assert(terminal.neutral_mask ==
            (keyferry::hid::kKeyboardNeutral | keyferry::hid::kMouseNeutral));
@@ -405,6 +472,7 @@ void Mixed_cancellation_neutralizes_and_duplicate_chunks_do_not_reexecute() {
     fixture.executor.UsbMouseReportAccepted({}, 0, 14);
     const auto& aborted = fixture.results.input_events.back().evidence;
     assert(aborted.result == ResultCode::kAborted);
+    assert(keyferry::command::CommandExecutorTestPeer::PayloadCleared(fixture.executor));
     assert(aborted.reason == ErrorCode::kCancelled);
     assert(aborted.neutral_mask ==
            (keyferry::hid::kKeyboardNeutral | keyferry::hid::kMouseNeutral));
@@ -911,6 +979,8 @@ int main() {
     Extended_pointer_faults_release_every_report_role(false);
     Extended_pointer_faults_release_every_report_role(true);
     Executes_with_exact_results_and_terminal_zero();
+    Stack_payload_cleanup_survives_early_return();
+    Usb_fault_clears_queued_and_started_payloads();
     Enforces_arm_binding_expiry_busy_and_arm_consumption();
     Cancellation_aborts_after_release();
     Independent_watchdog_forces_zero_disarm_and_unknown_without_poll();
