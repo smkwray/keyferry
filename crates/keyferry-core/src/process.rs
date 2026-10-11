@@ -1,6 +1,34 @@
 //! All background subprocesses inherit the same platform policy.
 use std::{ffi::OsStr, process::Command};
 
+/// Nonsecret, editable preselection for the separately launched owner prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum SecureTextWake {
+    None = 0,
+    Mouse = 1,
+    MacLogin = 2,
+}
+
+impl SecureTextWake {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "mouse" => Some(Self::Mouse),
+            "mac-login" => Some(Self::MacLogin),
+            _ => None,
+        }
+    }
+
+    pub fn argument(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Mouse => "mouse",
+            Self::MacLogin => "mac-login",
+        }
+    }
+}
+
 /// Build a command that never allocates a console on Windows.
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let command = Command::new(program);

@@ -275,7 +275,8 @@ assumes a trusted controller and OS; this flow does not authenticate the daemon'
 The requesting agent must never inspect the dialog's secret property, memory, keyboard events, or
 clipboard, or ask the human to enter the secret in chat, stdin, or arguments.
 
-Only a deliberate human confirmation and Send once can submit one command-scoped keyboard sequence.
+Only a deliberate human confirmation and Send once can submit the entered text as one
+command-scoped keyboard sequence.
 The destination cannot be changed inside the prompt. The exact device must report an authenticated,
 idle, disarmed keyboard route initially and immediately before submission. Text is restricted to
 1–256 printable ASCII bytes with no normalization; optional Enter follows the saved owner setting
@@ -283,13 +284,18 @@ and is on unless disabled. Expiry and
 pre-submission cancellation clear the editor without a POST. After submission, cancellation uses the
 existing exact-command route once; uncertain results are UNKNOWN and the sequence is never replayed.
 Responses are reduced to correlated IDs and fixed outcome text; reflected peer messages/errors
-never enter the dialog. An optional, unchecked wake setting submits a separate pointer-only command
-before the keyboard sequence. It contains no secret, clicks or keyboard actions; the secret remains
+never enter the dialog. The unsaved wake selector defaults to No wake. A request's metadata-only
+`--wake none|mouse|mac-login` can preselect the visible, editable choice without sending input.
+Mouse movement submits a
+separate pointer-only command without clicks; Mac login screen (Shift) submits a keyboard-only
+Shift tap followed by a two-second wait. Neither prelude contains text; the secret remains
 in its guarded keyboard request. Only a correlated EMITTED wake result followed by fresh device,
 expiry and cancellation checks permits text submission. Failure or uncertainty clears the text
 without submitting it. Cancellation targets the current stage's exact command ID. No wake fallback,
 keep-awake loop or persisted preference is added. Relative movement is not available on absolute-only
-firmware, can affect hover/position, and does not prove wake, focus or unlock. Independent commands
+firmware and can affect hover/position. The Mac option does not require mouse capability. Neither
+option proves wake, focus or unlock. All terminal results stay visible for 30 seconds or until
+closed, bounding the remaining prompt-library/IME RAM lifetime. Independent commands
 do not reserve the target between stages; normal daemon admission still applies.
 Cleanup guards overwrite owned text, serialized request bodies, compiled
 keyboard reports and outgoing frames on completion or error; firmware clears completed receive

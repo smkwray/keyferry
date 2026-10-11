@@ -1,6 +1,7 @@
 //! An agent requests a local human prompt, never supplies or receives its text.
 use super::ui;
 use keyferry::api::{ApiClient, CommandOutcome, DeviceView};
+use keyferry_core::process::SecureTextWake as WakeMode;
 use keyferry_layouts::{
     compile_sequence, InputAction, InputArmPolicy, InputSequenceV1, KeyboardSequenceV1,
     SequenceAction, SequenceArmPolicy, TypingTiming, INPUT_SEQUENCE_SCHEMA_V1, LEGACY_WIRE_MAPPING,
@@ -18,7 +19,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 const PROMPT_LIFETIME: Duration = Duration::from_secs(120);
-const SUCCESS_CLOSE_DELAY: Duration = Duration::from_secs(3);
+const RESULT_LIFETIME: Duration = Duration::from_secs(30);
 const MAX_SECRET_BYTES: usize = 256;
 
 fn sequence(text: &str, enter: bool) -> Result<Zeroizing<KeyboardSequenceV1>, &'static str> {
@@ -77,17 +78,14 @@ fn finish(weak: slint::Weak<ui::SecureTextWindow>, message: String) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(window) = weak.upgrade() {
             window.set_sending(false);
-            let emitted = message.starts_with("EMITTED:");
-            window.set_status(message.into());
-            // A clean result needs no further reading; failures and UNKNOWN stay until closed.
-            if emitted {
-                let weak = window.as_weak();
-                slint::Timer::single_shot(SUCCESS_CLOSE_DELAY, move || {
-                    if let Some(window) = weak.upgrade() {
-                        let _ = window.hide();
-                    }
-                });
-            }
+            window.set_status(format!("{message}\nCloses in 30 seconds.").into());
+            // Give the owner time to read the receipt, then end the separate prompt process.
+            let weak = window.as_weak();
+            slint::Timer::single_shot(RESULT_LIFETIME, move || {
+                if let Some(window) = weak.upgrade() {
+                    let _ = window.hide();
+                }
+            });
         }
     });
 }
@@ -194,15 +192,33 @@ fn wake_sequence() -> InputSequenceV1 {
     }
 }
 
+fn mac_login_wake_sequence() -> Zeroizing<KeyboardSequenceV1> {
+    Zeroizing::new(KeyboardSequenceV1 {
+        schema: SEQUENCE_SCHEMA_V1.into(),
+        command_id: uuid::Uuid::now_v7().to_string(),
+        profile: LEGACY_WIRE_MAPPING.into(),
+        arm: SequenceArmPolicy::CommandScoped,
+        start_within_ms: 5000,
+        timing: Some(TypingTiming::COMPATIBILITY),
+        actions: vec![
+            SequenceAction::Tap {
+                key: "SHIFT".into(),
+                timing: None,
+            },
+            SequenceAction::Wait { ms: 2000 },
+        ],
+    })
+}
+
 fn submit_with_wake(
     client: &ApiClient,
     id: &str,
     request: &mut KeyboardSequenceV1,
-    wake: bool,
+    wake: WakeMode,
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> String {
-    if wake {
+    if wake != WakeMode::None {
         if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
             request.zeroize();
             return "Request expired or cancelled. Nothing was sent.".into();
@@ -212,45 +228,56 @@ fn submit_with_wake(
             request.zeroize();
             return "Route changed, cancelled, or request expired. Nothing was sent.".into();
         }
-        let prelude = wake_sequence();
-        let outcome = client
-            .submit_input_sequence(id, &prelude)
+        let (prelude_id, result) = match wake {
+            WakeMode::Mouse => {
+                let prelude = wake_sequence();
+                let result = client.submit_input_sequence(id, &prelude);
+                (prelude.command_id, result)
+            }
+            WakeMode::MacLogin => {
+                let prelude = mac_login_wake_sequence();
+                let result = client.submit_sequence(id, &prelude);
+                (prelude.command_id.clone(), result)
+            }
+            WakeMode::None => unreachable!(),
+        };
+        let outcome = result
             .map(Zeroizing::new)
             .ok()
-            .filter(|response| {
-                response.device_id == id && response.command_id == prelude.command_id
-            })
+            .filter(|response| response.device_id == id && response.command_id == prelude_id)
             .map(|response| response.outcome);
-        if await_outcome(
-            client,
-            id,
-            &prelude.command_id,
-            outcome,
-            cancelled,
-            Some(deadline),
-        ) != Some(CommandOutcome::Emitted)
+        if await_outcome(client, id, &prelude_id, outcome, cancelled, Some(deadline))
+            != Some(CommandOutcome::Emitted)
         {
             request.zeroize();
-            return "Wake movement failed or is unconfirmed. No text was sent. Check the target; relative mouse movement may be unsupported. No automatic retry.".into();
+            return "Wake command failed or is unconfirmed. No text was sent. Check the target. No automatic retry.".into();
         }
     }
     // Recheck readiness, expiry and cancellation after the nonsecret wake command.
     let result = submit_once(client, id, request, deadline, cancelled);
-    if wake {
+    if wake != WakeMode::None {
         result.replace("Nothing was sent", "No text was sent")
     } else {
         result
     }
 }
 
+fn prompt_arguments(arguments: &[String]) -> Result<(uuid::Uuid, WakeMode), &'static str> {
+    let (device, wake) = match arguments {
+        [flag, device] if flag == "--secure-text" => (device, WakeMode::None),
+        [flag, device, option, value] if flag == "--secure-text" && option == "--wake" => {
+            let wake = WakeMode::parse(value).ok_or("Invalid wake selection.")?;
+            (device, wake)
+        }
+        _ => return Err("usage: keyferry --secure-text DEVICE_UUID [--wake none|mouse|mac-login]"),
+    };
+    let device = uuid::Uuid::parse_str(device).map_err(|_| "Invalid device UUID.")?;
+    Ok((device, wake))
+}
+
 pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if arguments.len() != 2
-        || arguments[0] != "--secure-text"
-        || uuid::Uuid::parse_str(&arguments[1]).is_err()
-    {
-        return Err("usage: keyferry --secure-text DEVICE_UUID".into());
-    }
-    let device_id = uuid::Uuid::parse_str(&arguments[1])?.to_string();
+    let (device, wake) = prompt_arguments(arguments)?;
+    let device_id = device.to_string();
     let client = ApiClient::from_environment().map_err(|_| "Local controller is unavailable")?;
     // This prompt does not own or stop the main app's daemon or BLE helper.
     slint::BackendSelector::new()
@@ -260,6 +287,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let window = ui::SecureTextWindow::new()?;
     window.set_destination(format!("Stick: {device_id}").into());
     window.set_append_enter(keyferry::api::secure_text_enter_default());
+    window.set_wake_mode(wake as i32);
     let consumed = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + PROMPT_LIFETIME;
@@ -284,7 +312,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     window.set_status("Type the text, then press Enter to send or Esc to cancel. It is never shown to an agent, logged, or saved. This window expires after two minutes.".into());
                 } else {
                     clear(&window);
-                    window.set_status("The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());
+                    finish(window.as_weak(), "The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());
                 }
             }
         });
@@ -308,16 +336,31 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // Slint owns this shared allocation; dropping it does not prove that it was wiped.
         let secret = window.get_secret();
         let enter = window.get_append_enter();
-        let wake = window.get_wake_before_text();
+        let wake = match window.get_wake_mode() {
+            0 => WakeMode::None,
+            1 => WakeMode::Mouse,
+            2 => WakeMode::MacLogin,
+            _ => {
+                clear(&window);
+                finish(
+                    window.as_weak(),
+                    "Invalid wake selection. Nothing was sent.".into(),
+                );
+                return;
+            }
+        };
         clear(&window);
         if Instant::now() >= deadline {
-            window.set_status("Request expired. Nothing was sent.".into());
+            finish(
+                window.as_weak(),
+                "Request expired. Nothing was sent.".into(),
+            );
             return;
         }
         let mut request = match sequence(&secret, enter) {
             Ok(request) => request,
             Err(message) => {
-                window.set_status(message.into());
+                finish(window.as_weak(), message.into());
                 return;
             }
         };
@@ -374,7 +417,10 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if !consumed.swap(true, Ordering::AcqRel) {
             if let Some(window) = weak.upgrade() {
                 clear(&window);
-                window.set_status("Request expired. Nothing was sent.".into());
+                finish(
+                    window.as_weak(),
+                    "Request expired. Nothing was sent.".into(),
+                );
             }
         }
     });
@@ -395,6 +441,15 @@ mod tests {
 
     #[test]
     fn optional_wake_gates_text_and_preserves_one_shot_cleanup() {
+        check_wake_gates_text(WakeMode::Mouse);
+    }
+
+    #[test]
+    fn mac_login_wake_gates_text_and_preserves_one_shot_cleanup() {
+        check_wake_gates_text(WakeMode::MacLogin);
+    }
+
+    fn check_wake_gates_text(wake_mode: WakeMode) {
         for scenario in [
             "off",
             "emitted",
@@ -463,15 +518,25 @@ mod tests {
                     let response = if headers.starts_with(&format!("GET /v1/devices/{DEVICE} ")) {
                         gets += 1;
                         serde_json::json!({"id":DEVICE,"label":"test stick","transport":"tls","link":"authenticated","mode":"keyboard","armed":scenario == "route-changed" && gets == 2,"arm_policy":"command-scoped"})
-                    } else if headers.starts_with(&format!("POST /v1/devices/{DEVICE}/input-sequences ")) {
+                    } else if headers.starts_with(&format!("POST /v1/devices/{DEVICE}/input-sequences "))
+                        || (wake_mode == WakeMode::MacLogin && scenario != "off" && wake_id.is_empty()
+                            && headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences "))) {
                         wake_posts += 1;
-                        let prelude: InputSequenceV1 = serde_json::from_slice(&body).unwrap();
-                        assert_eq!(prelude.actions, wake_sequence().actions);
-                        let compiled = keyferry_layouts::compile_input_sequence(&prelude).unwrap();
-                        assert!(!compiled.has_keyboard);
-                        assert!(compiled.has_pointer);
+                        if wake_mode == WakeMode::Mouse {
+                            let prelude: InputSequenceV1 = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(prelude.actions, wake_sequence().actions);
+                            let compiled = keyferry_layouts::compile_input_sequence(&prelude).unwrap();
+                            assert!(!compiled.has_keyboard);
+                            assert!(compiled.has_pointer);
+                            wake_id = prelude.command_id;
+                        } else {
+                            assert!(headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences ")));
+                            let prelude: KeyboardSequenceV1 = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(prelude.actions, mac_login_wake_sequence().actions);
+                            assert_eq!(compile_sequence(&prelude).unwrap().text_characters, 0);
+                            wake_id = prelude.command_id;
+                        }
                         assert!(!String::from_utf8_lossy(&body).contains("private-fixture"));
-                        wake_id = prelude.command_id;
                         if scenario == "lost" { continue; }
                         if scenario == "cancel-wake" { owner_cancel.store(true, Ordering::Release); }
                         if scenario == "expired" { thread::sleep(Duration::from_millis(200)); }
@@ -514,7 +579,11 @@ mod tests {
                 &client,
                 DEVICE,
                 &mut request,
-                scenario != "off",
+                if scenario == "off" {
+                    WakeMode::None
+                } else {
+                    wake_mode
+                },
                 Instant::now()
                     + if scenario == "expired" {
                         Duration::from_millis(100)
@@ -762,7 +831,7 @@ mod tests {
             (Instant::now(), false),
             (Instant::now() + PROMPT_LIFETIME, true),
         ] {
-            for wake in [false, true] {
+            for wake in [WakeMode::None, WakeMode::Mouse, WakeMode::MacLogin] {
                 let mut request = sequence("private-fixture", false).unwrap();
                 assert!(submit_with_wake(
                     &client,
@@ -791,8 +860,8 @@ mod tests {
         )))
         .unwrap();
         let window = ui::SecureTextWindow::new().unwrap();
-        assert!(!window.get_wake_before_text());
-        window.set_wake_before_text(true);
+        assert_eq!(window.get_wake_mode(), 0);
+        window.set_wake_mode(2);
         window.set_destination(
             format!("Test stick\nStick: {DEVICE}\nRoute: wifi via local controller").into(),
         );
@@ -818,6 +887,33 @@ mod tests {
     }
 
     #[test]
+    fn mac_login_wake_contains_only_shift_and_wait() {
+        let request = mac_login_wake_sequence();
+        assert_eq!(request.arm, SequenceArmPolicy::CommandScoped);
+        assert_eq!(request.start_within_ms, 5000);
+        assert_eq!(request.timing, Some(TypingTiming::COMPATIBILITY));
+        assert!(matches!(&request.actions[0], SequenceAction::Tap { key, .. } if key == "SHIFT"));
+        assert!(matches!(
+            &request.actions[1],
+            SequenceAction::Wait { ms: 2000 }
+        ));
+        let compiled = Zeroizing::new(compile_sequence(&request).unwrap());
+        assert_eq!(compiled.text_characters, 0);
+        let mut saw_shift = false;
+        for step in &compiled.steps {
+            if let keyferry_layouts::ReportStep::Report(report) = step {
+                assert!(report.keys.iter().all(|usage| *usage == 0));
+                assert!(matches!(
+                    report.modifiers,
+                    0 | keyferry_layouts::MOD_LEFT_SHIFT
+                ));
+                saw_shift |= report.modifiers == keyferry_layouts::MOD_LEFT_SHIFT;
+            }
+        }
+        assert!(saw_shift);
+    }
+
+    #[test]
     fn secure_text_is_strict_and_enter_requires_selection() {
         for text in ["", "pássword", "a\nb", "a\rb", "a\tb", "\0"] {
             assert!(sequence(text, false).is_err());
@@ -838,6 +934,39 @@ mod tests {
             SequenceAction::Wait { ms: 400 }
         ));
         assert!(matches!(&request.actions[2], SequenceAction::Tap { key, .. } if key == "ENTER"));
+    }
+
+    #[test]
+    fn wake_preselection_is_metadata_only_and_strict() {
+        for (arguments, expected) in [
+            (vec!["--secure-text", DEVICE], WakeMode::None),
+            (
+                vec!["--secure-text", DEVICE, "--wake", "none"],
+                WakeMode::None,
+            ),
+            (
+                vec!["--secure-text", DEVICE, "--wake", "mouse"],
+                WakeMode::Mouse,
+            ),
+            (
+                vec!["--secure-text", DEVICE, "--wake", "mac-login"],
+                WakeMode::MacLogin,
+            ),
+        ] {
+            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            let (device, wake) = prompt_arguments(&arguments).unwrap();
+            assert_eq!(device.to_string(), DEVICE);
+            assert_eq!(wake, expected);
+        }
+        for arguments in [
+            vec!["--secure-text", DEVICE, "--wake"],
+            vec!["--secure-text", DEVICE, "--wake", "unsupported"],
+            vec!["--secure-text", DEVICE, "--wake", "mouse", "extra"],
+            vec!["--secure-text", DEVICE, "--secret", "private-fixture"],
+        ] {
+            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(prompt_arguments(&arguments).is_err());
+        }
     }
 
     #[test]

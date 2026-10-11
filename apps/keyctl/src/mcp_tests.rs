@@ -17,7 +17,10 @@ fn secure_prompt_blocks_ocr_click_and_stability_does_not_resume_input() {
     ] {
         let mut s = server();
         s.pointer = Some([0.5, 0.5]);
-        s.secure_prompt = |_, _, _| Ok(json!({"outcome":"REQUESTED","input_sent":false}));
+        s.secure_prompt = |_, _, _, wake| {
+            assert_eq!(wake, None);
+            Ok(json!({"outcome":"REQUESTED","input_sent":false}))
+        };
         let mut steps = vec![json!({"type":"secure_text"})];
         steps.extend(following.as_array().unwrap().iter().cloned());
         let definition = json!({

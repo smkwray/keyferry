@@ -144,10 +144,12 @@ fn run_tests() {
     routines_use_the_shared_recipe_library_offline();
     recipe_run_posts_once_to_the_expanded_route();
     direct_sequences_pass_key_aliases_to_the_daemon();
-    secure_text_launch_contains_only_the_destination_and_discards_stdin();
+    for wake in [None, Some("none"), Some("mouse"), Some("mac-login")] {
+        secure_text_launch_contains_only_metadata_and_discards_stdin(wake);
+    }
 }
 
-fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
+fn secure_text_launch_contains_only_metadata_and_discards_stdin(wake: Option<&str>) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tmp")
         .join(format!("secure-text-cli-{}", uuid::Uuid::now_v7()));
@@ -170,15 +172,19 @@ fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let mut child = Command::new(&program)
-        .args([
-            "--url",
-            &url,
-            "--token-file",
-            token.to_str().unwrap(),
-            "secure-text",
-            DEVICE,
-        ])
+    let mut command = Command::new(&program);
+    command.args([
+        "--url",
+        &url,
+        "--token-file",
+        token.to_str().unwrap(),
+        "secure-text",
+        DEVICE,
+    ]);
+    if let Some(wake) = wake {
+        command.args(["--wake", wake]);
+    }
+    let mut child = command
         .env("KEYCTL_TEST_CAPTURE", &capture)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -199,6 +205,7 @@ fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["outcome"], "REQUESTED");
     assert_eq!(response["input_sent"], false);
+    assert_eq!(response["wake"], wake.unwrap_or("none"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(PASSWORD.trim()));
     let limit = Instant::now() + Duration::from_secs(5);
     while !capture.exists() {
@@ -207,7 +214,11 @@ fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
     }
     let record: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&capture).unwrap()).unwrap();
-    assert_eq!(record["args"], serde_json::json!(["--secure-text", DEVICE]));
+    let mut expected_args = vec!["--secure-text", DEVICE];
+    if let Some(wake) = wake {
+        expected_args.extend(["--wake", wake]);
+    }
+    assert_eq!(record["args"], serde_json::json!(expected_args));
     assert_eq!(record["stdin_empty"], true);
     assert_eq!(record["url"], url);
     assert_eq!(record["token_file"], token.to_str().unwrap());
@@ -215,6 +226,9 @@ fn secure_text_launch_contains_only_the_destination_and_discards_stdin() {
         vec!["secure-text"],
         vec!["secure-text", "invalid"],
         vec!["secure-text", DEVICE, "--text", "private-fixture"],
+        vec!["secure-text", DEVICE, "--wake"],
+        vec!["secure-text", DEVICE, "--wake", "private-fixture"],
+        vec!["secure-text", DEVICE, "--wake", "mac-login", "extra"],
     ] {
         let output = Command::new(&program).args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(20));

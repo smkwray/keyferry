@@ -71,21 +71,22 @@ owner's encrypted owner kit, so one computer can be revoked without affecting th
 
 For passwords, use **Secure text…** on the Send page instead of the plain text box: it opens the
 same masked dialog for the selected stick. An agent can request that dialog with
-`keyctl secure-text DEVICE_UUID`. Run it on the computer where the human will
+`keyctl secure-text DEVICE_UUID [--wake none|mouse|mac-login]`. The optional argument preselects a
+visible, editable wake choice; requesting the dialog sends no input. Run it on the computer where the human will
 enter the text, in its logged-in desktop session with the local controller running. It opens a
 separate masked dialog for that exact stick. With the target's password field focused, the human
-enters text and presses Enter (or chooses **Send once**); Esc cancels, and a successful send closes
-the dialog. **Press Enter after the text** is ticked by default; change that default under Typing. The command's
+enters text and presses Enter (or chooses **Send once**); Esc cancels. Results remain visible for
+30 seconds or until closed. **Press Enter after the text** is ticked by default; change that default under Typing. The command's
 `REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
 
-For a display that sleeps while entering text, optionally select **Wake screen first (small mouse
-movement)**. Immediately before typing, it sends a tiny relative movement out and back without
-clicking, then waits one second. It proceeds only after that command completes and the exact stick
-is ready again. A failed or uncertain wake sends no text; nothing is automatically retried. The
-option starts unchecked and is not saved. It requires relative mouse support (absolute-only
-firmware rejects it). Movement may affect hover or shift the pointer slightly; completion proves
-neither that the display woke nor that the intended field has focus. It works through ordinary
-HID input without a Mac-specific login sequence or changes to sleep settings.
+The wake selector starts at **No wake** and is not saved. **Mouse movement** sends a tiny relative
+movement out and back without clicking, then waits one second; it requires relative mouse support
+(absolute-only firmware rejects it) and may affect hover or shift the pointer slightly.
+For a Mac login screen, **Mac login screen (Shift)** taps Shift and waits two seconds; it requires
+keyboard input and does not require mouse capability. Both options proceed only after the separate nonsecret
+command completes and the exact stick is ready again. A failed or uncertain wake sends no text;
+nothing is automatically retried. Completion proves neither that the display woke nor that the
+intended field has focus. These options do not change the target's sleep settings.
 
 The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
 clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
@@ -98,7 +99,7 @@ commands still need their input and comparison data. An uncertain send is never 
 These protections assume a trusted controller and operating system. The editor and networking
 libraries make temporary RAM copies, and freeing memory does not guarantee overwriting it. The
 editor can also keep an input-method copy until the separate prompt window/process is destroyed;
-failed or uncertain results stay open until closed. This is not deliberate password-history storage.
+all results close after 30 seconds to bound this remaining RAM lifetime. This is not deliberate password-history storage.
 OS paging/crash files and explicit clipboard operations or Linux primary selection can retain text
 outside Keyferry. Complete memory erasure is not promised.
 

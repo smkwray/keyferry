@@ -491,7 +491,12 @@ fn validate(value: &Value, schema: &Value) -> bool {
 
 struct Server<F: FrameSource, O: Ocr> {
     library: super::recipe::Library,
-    secure_prompt: fn(&str, &str, &Path) -> Result<Value, &'static str>,
+    secure_prompt: fn(
+        &str,
+        &str,
+        &Path,
+        Option<keyferry_core::process::SecureTextWake>,
+    ) -> Result<Value, &'static str>,
     device: String,
     device_choice: &'static str,
     source: Option<String>,
@@ -1631,7 +1636,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                         Ok(json!({"check":check,"command":command}))
                     }
                     Step::SecureText { .. } => {
-                        (self.secure_prompt)(&self.device, &self.url, &self.token)
+                        (self.secure_prompt)(&self.device, &self.url, &self.token, None)
                             .map_err(failure)
                             .inspect(|_| {
                                 awaiting_owner = true;

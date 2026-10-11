@@ -8,7 +8,7 @@ export component SecureTextWindow inherits Window {
     in property <string> destination;
     in-out property <string> secret;
     in-out property <bool> append-enter: true;
-    in-out property <bool> wake-before-text: false;
+    in-out property <int> wake-mode: 0;
     in-out property <bool> accepting: true;
     in-out property <bool> ready: false;
     in-out property <bool> sending: false;
@@ -59,9 +59,17 @@ export component SecureTextWindow inherits Window {
                 }
             }
             if root.accepting: CheckBox { text: "Press Enter after the text"; checked <=> root.append-enter; }
-            if root.accepting: CheckBox { text: "Wake screen first (small mouse movement)"; checked <=> root.wake-before-text; }
-            if root.accepting && root.wake-before-text: Text {
+            if root.accepting: ComboBox {
+                model: ["No wake", "Mouse movement", "Mac login screen (Shift)"];
+                current-index <=> root.wake-mode;
+            }
+            if root.accepting && root.wake-mode == 1: Text {
                 text: "Moves the pointer slightly without clicking, then waits one second. Requires relative mouse support; waking and focus cannot be verified.";
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+            if root.accepting && root.wake-mode == 2: Text {
+                text: "For a Mac login screen: taps Shift, then waits two seconds. It can reveal the password field; waking and focus cannot be verified.";
                 color: Theme.text-secondary;
                 wrap: word-wrap;
             }
