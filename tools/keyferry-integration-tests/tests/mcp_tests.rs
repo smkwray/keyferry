@@ -341,12 +341,21 @@ async fn delayed_animated_capture_calibrates_and_settles_every_mcp_action() {
         ] {
             let start = Instant::now();
             let response = s.dispatch(json!({"jsonrpc":"2.0","id":name,"method":"tools/call","params":{"name":name,"arguments":arguments}}), &c).unwrap();
+            let completed = Instant::now();
             assert_eq!(response["result"]["isError"], false, "{response}");
             let result = &response["result"]["structuredContent"];
             assert_eq!(result["settled"], true, "{name}: {result}");
             let latency = result["latency_ms"].as_u64().unwrap();
-            assert!((1400..=2600).contains(&latency), "{name}: {latency}");
-            assert!(start.elapsed() >= Duration::from_millis(1400));
+            assert!((1..=2600).contains(&latency), "{name}: {latency}");
+            assert!(completed.duration_since(start) >= s.frames.delay);
+            {
+                // The fixture delay starts at POST admission, but reported latency starts
+                // after execution. Verify observation before another screenshot advances it.
+                let requested = s.frames.pointer.as_ref().unwrap().lock().unwrap();
+                assert!(completed.duration_since(requested.at) >= s.frames.delay);
+                assert_eq!(s.frames.visible.pointer, requested.pointer);
+                assert_eq!(s.frames.visible.revision, requested.revision);
+            }
             assert_eq!(response["result"]["content"][0]["type"], "text");
             assert_eq!(response["result"]["content"].as_array().unwrap().len(), 1);
             assert!(result.get("image_bytes").is_none());
@@ -357,10 +366,6 @@ async fn delayed_animated_capture_calibrates_and_settles_every_mcp_action() {
             assert!(!transport.is_remotely_armed());
             let shot = s.call("screenshot", &json!({}), &c).unwrap();
             assert!(shot["structuredContent"]["frame_id"].as_u64().unwrap() >= result["frame_id"].as_u64().unwrap());
-            let visible = &s.frames.visible;
-            let requested = s.frames.pointer.as_ref().unwrap().lock().unwrap();
-            assert_eq!(visible.pointer, requested.pointer);
-            assert_eq!(visible.revision, requested.revision);
         }
     }).await.unwrap();
     task.abort();
