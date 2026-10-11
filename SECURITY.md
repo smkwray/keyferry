@@ -268,6 +268,10 @@ session. The command carries only the exact destination and requests a separate,
 prompt; its `REQUESTED` receipt proves process creation only. The dialog does not own the normal
 app's service lifecycle. A local process that can run the command already operates within the
 existing loopback-controller trust boundary; no remote popup endpoint or new listener is added.
+The loopback bearer authenticates callers to the daemon, not the listener to clients. A malicious
+local process that binds the configured port before the daemon starts can impersonate it, receive
+the bearer and submitted secure text, and forge device/status replies. Secure text therefore
+assumes a trusted controller and OS; this flow does not authenticate the daemon's process identity.
 The requesting agent must never inspect the dialog's secret property, memory, keyboard events, or
 clipboard, or ask the human to enter the secret in chat, stdin, or arguments.
 
