@@ -40,6 +40,7 @@ use tokio::{
 };
 use tokio_rustls::{server::TlsStream, TlsAcceptor, TlsConnector};
 use x509_parser::parse_x509_certificate;
+use zeroize::Zeroizing;
 
 pub const TLS_MAX_FRAGMENT_SIZE: usize = 512;
 pub const AUTH_DOMAIN: &[u8] = b"hidbridge-auth-v1";
@@ -2666,8 +2667,10 @@ pub(crate) async fn send_frame<IO>(stream: &mut IO, frame: Frame) -> Result<(), 
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
-    let wire =
-        encode_wire(&frame).map_err(|error| TlsTransportError::Protocol(error.to_string()))?;
+    let frame = Zeroizing::new(frame);
+    let wire = Zeroizing::new(
+        encode_wire(&frame).map_err(|error| TlsTransportError::Protocol(error.to_string()))?,
+    );
     if wire.len() > MAX_WIRE_FRAME {
         return Err(TlsTransportError::Protocol(
             "encoded frame exceeds bounded wire buffer".to_owned(),
@@ -2857,8 +2860,10 @@ impl ProducesTickets for NoTickets {
     }
 }
 
-fn encode_report_body(chunk: &super::PlannedChunk) -> Result<Vec<u8>, TlsTransportError> {
-    let mut body = Vec::new();
+fn encode_report_body(
+    chunk: &super::PlannedChunk,
+) -> Result<Zeroizing<Vec<u8>>, TlsTransportError> {
+    let mut body = Zeroizing::new(Vec::with_capacity(super::MAX_NETWORK_COMMAND_BODY));
     for step in &chunk.steps {
         match step {
             ReportStep::Report(report) if report.is_released() => {
@@ -2895,12 +2900,16 @@ fn send_command<'a, IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin + 'a,
 {
-    let payload = command_payload(command, kind, body, valid_for_ms);
+    let payload = command_payload(command, kind, body, valid_for_ms).map(Zeroizing::new);
     async move {
-        let payload = payload?;
+        let mut payload = payload?;
         send_frame(
             stream,
-            Frame::v1(keyferry_protocol::message::COMMAND, sequence, payload),
+            Frame::v1(
+                keyferry_protocol::message::COMMAND,
+                sequence,
+                std::mem::take(&mut *payload),
+            ),
         )
         .await
     }
@@ -3471,7 +3480,7 @@ fn command_payload(
     let mut profile_hash = Sha256::new();
     profile_hash.update(command.profile.as_bytes());
     let profile_hash = profile_hash.finalize();
-    let mut payload = Vec::with_capacity(16 + 4 + 32 + 1 + 2 + body.len());
+    let mut payload = Zeroizing::new(Vec::with_capacity(16 + 4 + 32 + 1 + 2 + body.len()));
     payload.extend_from_slice(command.command_id.as_bytes());
     payload.extend_from_slice(&valid_for_ms.to_le_bytes());
     payload.extend_from_slice(&profile_hash);
@@ -3483,7 +3492,7 @@ fn command_payload(
             "command envelope exceeds protocol payload limit".to_owned(),
         ));
     }
-    Ok(payload)
+    Ok(std::mem::take(&mut *payload))
 }
 
 fn remaining_start_validity(command: &super::PlannedCommand) -> u32 {

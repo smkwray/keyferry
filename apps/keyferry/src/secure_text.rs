@@ -20,14 +20,14 @@ const PROMPT_LIFETIME: Duration = Duration::from_secs(120);
 const SUCCESS_CLOSE_DELAY: Duration = Duration::from_secs(3);
 const MAX_SECRET_BYTES: usize = 256;
 
-fn sequence(text: &str, enter: bool) -> Result<KeyboardSequenceV1, &'static str> {
+fn sequence(text: &str, enter: bool) -> Result<Zeroizing<KeyboardSequenceV1>, &'static str> {
     if text.is_empty() || text.len() > MAX_SECRET_BYTES {
         return Err("Use 1–256 printable ASCII characters.");
     }
     if !text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
         return Err("Unsupported text: only printable ASCII is accepted; nothing was sent.");
     }
-    let mut request = KeyboardSequenceV1 {
+    let mut request = Zeroizing::new(KeyboardSequenceV1 {
         schema: SEQUENCE_SCHEMA_V1.into(),
         command_id: uuid::Uuid::now_v7().to_string(),
         profile: LEGACY_WIRE_MAPPING.into(),
@@ -38,7 +38,7 @@ fn sequence(text: &str, enter: bool) -> Result<KeyboardSequenceV1, &'static str>
             value: text.into(),
             timing: None,
         }],
-    };
+    });
     if enter {
         // macOS password fields (e.g. the lock screen) drop an Enter that arrives immediately
         // after the last character; give the target a moment to accept the text first.
@@ -48,19 +48,12 @@ fn sequence(text: &str, enter: bool) -> Result<KeyboardSequenceV1, &'static str>
             timing: None,
         });
     }
-    if compile_sequence(&request).is_err() {
-        wipe_sequence(&mut request);
-        return Err("Text exceeds the one-shot command limits; nothing was sent.");
-    }
+    // Validation creates reversible HID reports too; wipe those when this scope exits.
+    let _compiled = Zeroizing::new(
+        compile_sequence(&request)
+            .map_err(|_| "Text exceeds the one-shot command limits; nothing was sent.")?,
+    );
     Ok(request)
-}
-
-fn wipe_sequence(request: &mut KeyboardSequenceV1) {
-    for action in &mut request.actions {
-        if let SequenceAction::Text { value, .. } = action {
-            value.zeroize();
-        }
-    }
 }
 
 fn ready(device: &DeviceView, id: &str) -> bool {
@@ -106,17 +99,17 @@ fn submit_once(
     cancelled: &AtomicBool,
 ) -> String {
     if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
-        wipe_sequence(request);
+        request.zeroize();
         return "Request expired or cancelled. Nothing was sent.".into();
     }
     let route_ready = client.device(id).is_ok_and(|view| ready(&view, id));
     if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) || !route_ready {
-        wipe_sequence(request);
+        request.zeroize();
         return "Route changed, cancelled, or request expired. Nothing was sent.".into();
     }
     let command_id = request.command_id.clone();
-    let result = client.submit_sequence(id, request);
-    wipe_sequence(request);
+    let result = client.submit_sequence(id, request).map(Zeroizing::new);
+    request.zeroize();
     // Never display a peer's message or parser error: they can contain reflected input.
     let mut outcome = result
         .ok()
@@ -124,14 +117,25 @@ fn submit_once(
         .map(|response| response.outcome);
     let limit = Instant::now() + Duration::from_secs(30);
     let mut cancel_requested = false;
-    while outcome.is_some_and(|outcome| !outcome.is_terminal()) && Instant::now() < limit {
+    loop {
         if cancelled.load(Ordering::Acquire) && !cancel_requested {
-            cancel_requested = true;
-            let _ = client.cancel(id, Some(&command_id));
+            // The POST may have started even when its receipt was lost. Cancel that exact
+            // command once, independently of whether a receipt or outcome poll succeeded.
+            if !matches!(
+                outcome,
+                Some(CommandOutcome::Emitted | CommandOutcome::Rejected | CommandOutcome::Aborted)
+            ) {
+                cancel_requested = true;
+                let _ = client.cancel(id, Some(&command_id)).map(Zeroizing::new);
+            }
+        }
+        if outcome.is_some_and(CommandOutcome::is_terminal) || Instant::now() >= limit {
+            break;
         }
         thread::sleep(Duration::from_millis(250));
         outcome = client
             .command_outcome(id, &command_id)
+            .map(Zeroizing::new)
             .ok()
             .filter(|response| response.device_id == id && response.command_id == command_id)
             .map(|response| response.outcome);
@@ -263,7 +267,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(window) = weak.upgrade() {
             if window.get_sending() {
                 close_cancelled.store(true, Ordering::Release);
-                window.set_status("Cancellation requested. Waiting for the bounded result…".into());
+                window.set_status("Cancellation requested. Waiting for the result…".into());
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
             clear(&window);
@@ -309,7 +313,8 @@ mod tests {
             )
             .unwrap();
             let server = thread::spawn(move || {
-                for operation in 0..2 {
+                let mut command_id = String::new();
+                for operation in 0..if status == 200 { 2 } else { 3 } {
                     let (mut stream, _) = listener.accept().unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -332,13 +337,17 @@ mod tests {
                     let response = if operation == 0 {
                         assert!(headers.starts_with(&format!("GET /v1/devices/{DEVICE} ")));
                         serde_json::json!({"id":DEVICE,"label":"test stick","transport":"tls","link":"authenticated","mode":"keyboard","armed":false,"arm_policy":"command-scoped"})
-                    } else {
+                    } else if operation == 1 {
                         assert!(headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences ")));
                         let request: KeyboardSequenceV1 = serde_json::from_slice(&body).unwrap();
                         assert!(matches!(&request.actions[0], SequenceAction::Text { value, .. } if value == "private-fixture"));
+                        command_id = request.command_id.clone();
                         serde_json::json!({"device_id":DEVICE,"command_id":request.command_id,"outcome":"EMITTED","message":"private-fixture","error":"private-fixture"})
+                    } else {
+                        assert!(headers.starts_with(&format!("GET /v1/devices/{DEVICE}/commands/{command_id} ")));
+                        serde_json::json!({"device_id":DEVICE,"command_id":command_id,"outcome":"UNKNOWN","message":"private-fixture"})
                     }.to_string();
-                    let code = if operation == 0 { 200 } else { status };
+                    let code = if operation == 1 { status } else { 200 };
                     write!(stream, "HTTP/1.1 {code} result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
                 }
                 listener.set_nonblocking(true).unwrap();
@@ -358,6 +367,137 @@ mod tests {
             );
             assert!(!message.contains("private-fixture"));
             assert!(message.starts_with(if status == 200 { "EMITTED" } else { "UNKNOWN" }));
+            assert!(
+                matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn lost_or_invalid_receipts_and_failed_poll_still_cancel_once_and_reconcile() {
+        fn receive(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while !bytes.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+            }
+            let headers = String::from_utf8(bytes).unwrap();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            (headers, body)
+        }
+        fn respond(stream: &mut std::net::TcpStream, code: u16, body: &str) {
+            write!(
+                stream,
+                "HTTP/1.1 {code} result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        for receipt in ["lost", "malformed", "mismatched", "failed-poll", "unknown"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = ApiClient::new(
+                keyferry::api::Endpoint::from_url(&format!(
+                    "http://{}",
+                    listener.local_addr().unwrap()
+                ))
+                .unwrap(),
+                "test-token-123456",
+            )
+            .unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let owner_cancel = Arc::clone(&cancelled);
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (headers, body) = receive(&mut stream);
+                assert!(headers.starts_with(&format!("GET /v1/devices/{DEVICE} ")));
+                assert!(body.is_empty());
+                respond(&mut stream, 200, &serde_json::json!({"id":DEVICE,"label":"test stick","transport":"tls","link":"authenticated","mode":"keyboard","armed":false,"arm_policy":"command-scoped"}).to_string());
+                drop(stream);
+
+                let (mut stream, _) = listener.accept().unwrap();
+                let (headers, body) = receive(&mut stream);
+                assert!(headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences ")));
+                let request: KeyboardSequenceV1 = serde_json::from_slice(&body).unwrap();
+                let command_id = request.command_id;
+                let response = |outcome: &str| {
+                    serde_json::json!({"device_id":DEVICE,"command_id":command_id,"outcome":outcome}).to_string()
+                };
+                if receipt == "failed-poll" {
+                    respond(&mut stream, 200, &response("ACCEPTED"));
+                    drop(stream);
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let (headers, body) = receive(&mut stream);
+                    assert!(headers
+                        .starts_with(&format!("GET /v1/devices/{DEVICE}/commands/{command_id} ")));
+                    assert!(body.is_empty());
+                    owner_cancel.store(true, Ordering::Release);
+                    respond(&mut stream, 500, "{}");
+                } else {
+                    // Simulate an owner cancellation while the blocking POST is in flight.
+                    owner_cancel.store(true, Ordering::Release);
+                    match receipt {
+                        "lost" => {},
+                        "malformed" => respond(&mut stream, 200, "{}"),
+                        "unknown" => respond(&mut stream, 200, &response("UNKNOWN")),
+                        "mismatched" => respond(&mut stream, 200, &serde_json::json!({"device_id":DEVICE,"command_id":uuid::Uuid::now_v7(),"outcome":"ACCEPTED"}).to_string()),
+                        _ => unreachable!(),
+                    }
+                    drop(stream);
+                }
+
+                // Let the lost response return EOF before accepting the cancellation request.
+                let (mut stream, _) = listener.accept().unwrap();
+                let (headers, body) = receive(&mut stream);
+                assert!(headers.starts_with(&format!("POST /v1/devices/{DEVICE}/cancel ")));
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["command_id"],
+                    command_id
+                );
+                respond(&mut stream, 200, &response("ABORTED"));
+                drop(stream);
+
+                if receipt != "unknown" {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let (headers, body) = receive(&mut stream);
+                    assert!(headers
+                        .starts_with(&format!("GET /v1/devices/{DEVICE}/commands/{command_id} ")));
+                    assert!(body.is_empty());
+                    respond(&mut stream, 200, &response("ABORTED"));
+                    drop(stream);
+                }
+                listener.set_nonblocking(true).unwrap();
+                thread::sleep(Duration::from_millis(50));
+                assert!(
+                    listener.accept().is_err(),
+                    "submission and cancellation must never replay"
+                );
+            });
+            let mut request = sequence("private-fixture", false).unwrap();
+            let result = submit_once(
+                &client,
+                DEVICE,
+                &mut request,
+                Instant::now() + PROMPT_LIFETIME,
+                &cancelled,
+            );
+            assert!(result.starts_with(if receipt == "unknown" {
+                "UNKNOWN"
+            } else {
+                "ABORTED"
+            }));
+            assert!(!result.contains("private-fixture"));
             assert!(
                 matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
             );
@@ -421,7 +561,7 @@ mod tests {
         assert_eq!(request.arm, SequenceArmPolicy::CommandScoped);
         assert_eq!(request.start_within_ms, 5000);
         assert!(!compile_sequence(&request).unwrap().steps.is_empty());
-        wipe_sequence(&mut request);
+        request.zeroize();
         assert!(
             matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
         );

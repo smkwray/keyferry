@@ -1,4 +1,65 @@
 include!("mcp_test_support.rs");
+
+#[test]
+fn secure_prompt_blocks_ocr_click_and_stability_does_not_resume_input() {
+    for (following, stopped_at) in [
+        (
+            json!([{ "type":"click_text","query":"safe","timeout_ms":100 }]),
+            1,
+        ),
+        (
+            json!([
+                {"type":"wait_for_stable","timeout_ms":1000},
+                {"type":"key","keys":["ENTER"]}
+            ]),
+            2,
+        ),
+    ] {
+        let mut s = server();
+        s.pointer = Some([0.5, 0.5]);
+        s.secure_prompt = |_, _, _| Ok(json!({"outcome":"REQUESTED","input_sent":false}));
+        let mut steps = vec![json!({"type":"secure_text"})];
+        steps.extend(following.as_array().unwrap().iter().cloned());
+        let definition = json!({
+            "schema":"keyferry.recipe.v1", "name":"test-owner-wait",
+            "target_os":"any", "verified":false, "steps":steps
+        });
+        let recipe = recipes::parse(definition.to_string().as_bytes()).unwrap();
+        let args = json!({});
+        let steps = routine_steps(&recipe, &args).unwrap();
+        let result = s
+            .execute_routine(
+                &recipe,
+                &steps,
+                &args,
+                false,
+                false,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let metadata = &result["structuredContent"];
+        assert_eq!(metadata["actions"][0]["receipt"]["outcome"], "REQUESTED");
+        assert_eq!(metadata["stopped_at"], stopped_at);
+        assert_eq!(metadata["awaiting_owner"], true);
+        assert_eq!(metadata["command_count"], 0);
+        assert_eq!(metadata["execution_complete"], false);
+        assert_eq!(
+            metadata["actions"][stopped_at as usize]["error"]["code"],
+            "recipe.owner_completion_required"
+        );
+        if stopped_at == 2 {
+            assert_eq!(
+                metadata["actions"][1]["receipt"]["matched"], true,
+                "the unchanged stable screen must pass its check without releasing the owner latch"
+            );
+        }
+        assert!(
+            !s.root.exists(),
+            "the isolated executor must persist nothing"
+        );
+    }
+}
+
 #[test]
 fn framing_is_newline_bounded_and_sanitized() {
     let mut input =

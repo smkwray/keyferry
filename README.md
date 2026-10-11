@@ -81,8 +81,10 @@ the dialog. **Press Enter after the text** is ticked by default; change that def
 The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
 clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
 files. Use U.S./ABC input and Caps Lock off. Do not put the secret into chat, arguments or stdin,
-and do not let an agent inspect the dialog while entering it. Toolkit and OS transient memory is
-outside the application's wiping guarantee. An uncertain send is never automatically retried.
+and do not let an agent inspect the dialog while entering it. Cleanup guards overwrite owned text,
+request bodies and keyboard buffers after use, including errors. Shared library, toolkit and OS
+memory can retain copies; explicit clipboard operations or native selection behavior can also
+retain text outside Keyferry. An uncertain send is never automatically retried.
 
 An agent can also use `keyctl screen-power DEVICE_UUID off` (or `on`). Current source forwards
 that exact setting through the authenticated holder when needed. It requires capable firmware and

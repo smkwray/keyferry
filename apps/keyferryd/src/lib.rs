@@ -52,6 +52,7 @@ use tokio::{
 use tokio_rustls::{server::TlsStream as ServerTlsStream, TlsAcceptor};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 mod ble;
 mod capture;
@@ -1214,6 +1215,18 @@ pub struct TextStreamCapabilities {
 pub struct PlannedChunk {
     pub steps: Vec<ReportStep>,
     pub expected_ms: u32,
+}
+
+impl Zeroize for PlannedChunk {
+    fn zeroize(&mut self) {
+        self.steps.zeroize();
+    }
+}
+
+impl Drop for PlannedChunk {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3483,19 +3496,20 @@ impl Daemon {
         caller: String,
         request: KeyboardSequenceV1,
     ) -> Result<CommandResponse, ApiError> {
+        let request = Zeroizing::new(request);
         let command_id = Uuid::parse_str(&request.command_id)
             .map_err(|_| ApiError::bad_request("command_id must be UUID v7"))?;
         if command_id.get_version_num() != 7 {
             return Err(ApiError::bad_request("command_id must be UUID v7"));
         }
         let arm_before_first = request.arm == SequenceArmPolicy::CommandScoped;
-        let compiled = compile_sequence(&request).map_err(sequence_error)?;
+        let mut compiled = Zeroizing::new(compile_sequence(&request).map_err(sequence_error)?);
         self.submit(
             id,
             caller,
-            request.profile,
+            request.profile.clone(),
             Some(command_id),
-            compiled.steps,
+            std::mem::take(&mut compiled.steps),
             compiled.text_characters,
             Some(request.start_within_ms),
             arm_before_first,
@@ -6652,8 +6666,9 @@ async fn sequence(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<CommandResponse>), ApiError> {
+    let body = PayloadBody(body);
     let caller = authorize_owner_mutation(&headers, &daemon, &id)?;
-    let request: KeyboardSequenceV1 = parse_payload_body(&body)?;
+    let request: KeyboardSequenceV1 = parse_payload_body(&body.0)?;
     Ok((
         StatusCode::ACCEPTED,
         Json(daemon.submit_sequence(&id, caller, request).await?),
@@ -6664,6 +6679,24 @@ async fn sequence(
 /// every parse failure maps to one fixed, payload-free code.
 fn parse_payload_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(body).map_err(|_| ApiError::bad_request("input.json"))
+}
+
+/// Wipes the collected HTTP body when its allocation is uniquely owned. Shared HTTP/library
+/// allocations remain outside this best-effort cleanup; never mutate aliased Bytes storage.
+struct PayloadBody(Bytes);
+
+impl Zeroize for PayloadBody {
+    fn zeroize(&mut self) {
+        if let Ok(mut body) = std::mem::take(&mut self.0).try_into_mut() {
+            body.as_mut().zeroize();
+        }
+    }
+}
+
+impl Drop for PayloadBody {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 async fn input_sequence(
@@ -7329,14 +7362,15 @@ fn canonical_action_for_stroke(
 }
 
 pub fn plan_chunks(steps: Vec<ReportStep>) -> Result<Vec<PlannedChunk>, String> {
+    let steps = Zeroizing::new(steps);
     if steps.is_empty() {
         return Err("command has no executable steps".to_owned());
     }
     let mut chunks = Vec::new();
-    let mut current = Vec::new();
+    let mut current = Zeroizing::new(Vec::with_capacity(MAX_CHUNK_ACTIONS));
     let mut expected_ms = 0;
     let mut payload_len = 0_usize;
-    for step in steps {
+    for step in steps.iter().copied() {
         let (step_ms, step_payload_len) = step_metrics(step);
         if step_ms > 100 {
             return Err("a wait action cannot exceed 100 ms".to_owned());
@@ -7367,20 +7401,22 @@ pub fn plan_chunks(steps: Vec<ReportStep>) -> Result<Vec<PlannedChunk>, String> 
                 if boundary == 0 {
                     return Err("one held-key gesture exceeds chunk limits".to_owned());
                 }
-                let tail = current.split_off(boundary);
+                let mut tail = Zeroizing::new(Vec::with_capacity(MAX_CHUNK_ACTIONS));
+                tail.extend_from_slice(&current[boundary..]);
+                current.truncate(boundary);
                 let (prefix_ms, _) = chunk_metrics(&current);
                 chunks.push(PlannedChunk {
-                    steps: current,
+                    steps: std::mem::take(&mut *current),
                     expected_ms: prefix_ms,
                 });
                 current = tail;
                 (expected_ms, payload_len) = chunk_metrics(&current);
             } else {
                 chunks.push(PlannedChunk {
-                    steps: current,
+                    steps: std::mem::take(&mut *current),
                     expected_ms,
                 });
-                current = Vec::new();
+                current = Zeroizing::new(Vec::with_capacity(MAX_CHUNK_ACTIONS));
                 expected_ms = 0;
                 payload_len = 0;
             }
@@ -7404,7 +7440,7 @@ pub fn plan_chunks(steps: Vec<ReportStep>) -> Result<Vec<PlannedChunk>, String> 
         return Err("command must end with a release report".to_owned());
     }
     chunks.push(PlannedChunk {
-        steps: current,
+        steps: std::mem::take(&mut *current),
         expected_ms,
     });
     Ok(chunks)
@@ -7475,6 +7511,25 @@ fn timestamp_at(timestamp: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_cleanup_clears_chunks_and_preserves_aliased_http_storage() {
+        let mut chunk = PlannedChunk {
+            steps: vec![ReportStep::Report(KeyboardReport::single(0, 4))],
+            expected_ms: 20,
+        };
+        chunk.zeroize();
+        assert!(chunk.steps.is_empty());
+        assert_eq!(chunk.expected_ms, 20);
+        let alias = Bytes::from(vec![0x41, 0x42]);
+        let mut body = PayloadBody(alias.clone());
+        body.zeroize();
+        assert!(body.0.is_empty());
+        assert_eq!(alias.as_ref(), b"AB");
+        let mut unique = PayloadBody(Bytes::from(vec![0x41, 0x42]));
+        unique.zeroize();
+        assert!(unique.0.is_empty());
+    }
     use axum::{
         body::{to_bytes, Body},
         http::{HeaderValue, Request},

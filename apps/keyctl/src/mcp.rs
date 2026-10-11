@@ -1483,14 +1483,17 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                 receipts.push(json!({"step":i,"error":failure("request.cancelled")}));
                 break;
             }
+            // ClickText includes an input command despite also performing an OCR check;
+            // input_only() describes stretch compilation, not all input-producing steps.
+            if awaiting_owner
+                && (steps[i].input_only() || matches!(steps[i], Step::ClickText { .. }))
+            {
+                stopped = Some(i);
+                receipts
+                    .push(json!({"step":i,"error":failure("recipe.owner_completion_required")}));
+                break;
+            }
             if steps[i].input_only() {
-                if awaiting_owner {
-                    stopped = Some(i);
-                    receipts.push(
-                        json!({"step":i,"error":failure("recipe.owner_completion_required")}),
-                    );
-                    break;
-                }
                 let begin = i;
                 while i < steps.len() && steps[i].input_only() {
                     i += 1;
@@ -1640,10 +1643,15 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                     Ok(receipt) => {
                         receipts.push(json!({"step":i,"type":steps[i].kind(),"receipt":receipt}));
                         completed += 1;
-                        if !matches!(steps[i], Step::SecureText { .. })
-                            && receipts
-                                .last()
-                                .is_some_and(|r| r["receipt"]["skipped"] != true)
+                        // Stability alone can hold while the owner prompt is untouched.
+                        // Only a positive read-only marker/change can resume the routine;
+                        // these observations still do not prove a successful unlock.
+                        if matches!(
+                            steps[i],
+                            Step::ExpectText { .. } | Step::WaitForChange { .. }
+                        ) && receipts
+                            .last()
+                            .is_some_and(|r| r["receipt"]["skipped"] != true)
                         {
                             awaiting_owner = false;
                         }

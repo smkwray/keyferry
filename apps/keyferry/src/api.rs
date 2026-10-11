@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:8042";
 const MAX_HEADERS: usize = 64 * 1024;
@@ -79,6 +80,12 @@ impl std::fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+impl Drop for ApiError {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl From<io::Error> for ApiError {
     fn from(error: io::Error) -> Self {
@@ -744,9 +751,10 @@ impl ApiClient {
     ) -> Result<CommandResponse, ApiError> {
         // The GUI submits the same strict model as keyctl. The daemon remains
         // the command authority and performs its own compilation and bounds checks.
-        let body = serde_json::to_value(sequence)
+        let body = keyferry_layouts::serialize_zeroizing_json(sequence)
             .map_err(|_| ApiError::new("sequence serialization failed"))?;
-        self.request_device_mutation(device_id, "sequences", Some(&body))
+        self.verify_owner_route(device_id)?;
+        self.request_encoded_json("POST", &device_path(device_id, "sequences")?, Some(&body))
     }
 
     pub fn command_outcome(
@@ -837,6 +845,19 @@ impl ApiClient {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<T, ApiError> {
+        let body = body
+            .map(keyferry_layouts::serialize_zeroizing_json)
+            .transpose()
+            .map_err(|_| ApiError::new("cannot encode API request"))?;
+        self.request_encoded_json(method, path, body.as_ref().map(|bytes| bytes.as_slice()))
+    }
+
+    fn request_encoded_json<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> Result<T, ApiError> {
         let response = match &self.endpoint {
             ApiEndpoint::Unavailable => {
                 return Err(ApiError::new("no daemon endpoint is selected"));
@@ -863,16 +884,12 @@ impl ApiClient {
         &self,
         method: &str,
         path: &str,
-        body: Option<&serde_json::Value>,
+        body: Option<&[u8]>,
     ) -> Result<HttpResponse, ApiError> {
         if !path.starts_with('/') || path.chars().any(char::is_control) {
             return Err(ApiError::new("API path is malformed"));
         }
-        let body = body
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|error| ApiError::new(format!("cannot encode API request: {error}")))?
-            .unwrap_or_default();
+        let body = body.unwrap_or_default();
         let mut stream = self.connect()?;
         let content_type = if body.is_empty() {
             String::new()
@@ -889,7 +906,7 @@ impl ApiClient {
             body.len()
         );
         stream.write_all(request.as_bytes())?;
-        stream.write_all(&body)?;
+        stream.write_all(body)?;
         let headers = read_headers(&mut stream)?;
         let response_body = read_body(&mut stream, &headers)?;
         let _ = stream.shutdown(Shutdown::Both);
@@ -932,7 +949,7 @@ impl ApiClient {
         &self,
         method: &str,
         path: &str,
-        body: Option<&serde_json::Value>,
+        body: Option<&[u8]>,
     ) -> Result<HttpResponse, ApiError> {
         validate_api_path(path)?;
         let ApiEndpoint::Remote(remote) = &self.endpoint else {
@@ -974,12 +991,9 @@ impl ApiClient {
                     None => request,
                 };
                 if let Some(body) = body {
-                    let body = serde_json::to_vec(body).map_err(|error| {
-                        ApiError::new(format!("cannot encode API request: {error}"))
-                    })?;
                     request
                         .header("Content-Type", "application/json")
-                        .send(body.as_slice())
+                        .send(body)
                 } else {
                     request.send_empty()
                 }
@@ -998,12 +1012,16 @@ impl ApiClient {
         }
         .map_err(|error| ApiError::new(format!("remote daemon request failed: {error}")))?;
         let status = response.status().as_u16();
-        let bytes = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_RESPONSE as u64 + 1)
-            .read_to_vec()
-            .map_err(|error| ApiError::new(format!("remote daemon response failed: {error}")))?;
+        let bytes = Zeroizing::new(
+            response
+                .body_mut()
+                .with_config()
+                .limit(MAX_RESPONSE as u64 + 1)
+                .read_to_vec()
+                .map_err(|error| {
+                    ApiError::new(format!("remote daemon response failed: {error}"))
+                })?,
+        );
         if bytes.len() > MAX_RESPONSE {
             return Err(ApiError::new("remote daemon response exceeds limit"));
         }
@@ -1515,6 +1533,14 @@ pub struct CommandResponse {
     pub message: Option<String>,
 }
 
+impl Zeroize for CommandResponse {
+    fn zeroize(&mut self) {
+        self.command_id.zeroize();
+        self.device_id.zeroize();
+        self.message.zeroize();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CommandOutcome {
@@ -1623,7 +1649,7 @@ fn read_bounded_line(reader: &mut dyn BufRead, limit: usize) -> Result<Option<Ve
 }
 
 struct HttpResponse {
-    body: Vec<u8>,
+    body: Zeroizing<Vec<u8>>,
 }
 
 struct ResponseHeaders {
@@ -1677,15 +1703,19 @@ fn read_headers(stream: &mut TcpStream) -> Result<ResponseHeaders, ApiError> {
     })
 }
 
-fn read_body(stream: &mut TcpStream, headers: &ResponseHeaders) -> Result<Vec<u8>, ApiError> {
+fn read_body(
+    stream: &mut TcpStream,
+    headers: &ResponseHeaders,
+) -> Result<Zeroizing<Vec<u8>>, ApiError> {
     if headers.chunked {
         return decode_chunked_stream(stream);
     }
-    let mut body = Vec::new();
+    let mut body = Zeroizing::new(Vec::new());
     if let Some(length) = headers.content_length {
         if length > MAX_RESPONSE {
             return Err(ApiError::new("HTTP response exceeds 4 MiB"));
         }
+        body.reserve_exact(length);
         let mut limited = stream.take(length as u64);
         limited.read_to_end(&mut body)?;
         if body.len() != length {
@@ -1702,8 +1732,8 @@ fn read_body(stream: &mut TcpStream, headers: &ResponseHeaders) -> Result<Vec<u8
     Ok(body)
 }
 
-fn decode_chunked_stream(stream: &mut TcpStream) -> Result<Vec<u8>, ApiError> {
-    let mut output = Vec::new();
+fn decode_chunked_stream(stream: &mut TcpStream) -> Result<Zeroizing<Vec<u8>>, ApiError> {
+    let mut output = Zeroizing::new(Vec::new());
     loop {
         let line = read_crlf_line(stream)?;
         let size = usize::from_str_radix(line.split(';').next().unwrap_or_default().trim(), 16)
@@ -1876,6 +1906,21 @@ fn default_token_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_response_cleanup_erases_reflected_strings_without_changing_outcome() {
+        let mut response = CommandResponse {
+            command_id: "reflected-fixture".into(),
+            device_id: "reflected-fixture".into(),
+            outcome: CommandOutcome::Unknown,
+            message: Some("reflected-fixture".into()),
+        };
+        response.zeroize();
+        assert!(response.command_id.is_empty());
+        assert!(response.device_id.is_empty());
+        assert!(response.message.is_none());
+        assert_eq!(response.outcome, CommandOutcome::Unknown);
+    }
     use keyferry_gateway::{sign_gateway_proof, verify_gateway_proof};
     use ring::{
         rand::SystemRandom,

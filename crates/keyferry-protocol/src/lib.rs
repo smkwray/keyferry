@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const MAGIC: u16 = 0x4248; // little-endian bytes: b"HB"
 pub const VERSION_MAJOR: u8 = 1;
@@ -40,6 +41,12 @@ pub struct Frame {
     pub flags: u8,
     pub sequence: u32,
     pub payload: Vec<u8>,
+}
+
+impl Zeroize for Frame {
+    fn zeroize(&mut self) {
+        self.payload.zeroize();
+    }
 }
 
 impl Frame {
@@ -165,7 +172,7 @@ pub fn decode_decoded(bytes: &[u8]) -> Result<Frame, ProtocolError> {
 }
 
 pub fn encode_wire(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
-    let decoded = encode_decoded(frame)?;
+    let decoded = Zeroizing::new(encode_decoded(frame)?);
     let mut wire = cobs_encode(&decoded);
     wire.push(0);
     Ok(wire)
@@ -179,7 +186,7 @@ pub fn decode_wire(wire: &[u8]) -> Result<Frame, ProtocolError> {
     if encoded.contains(&0) {
         return Err(ProtocolError::InteriorWireDelimiter);
     }
-    let decoded = cobs_decode(encoded)?;
+    let decoded = Zeroizing::new(cobs_decode(encoded)?);
     decode_decoded(&decoded)
 }
 
@@ -201,7 +208,9 @@ pub fn crc16_ccitt_false(bytes: &[u8]) -> u16 {
 
 #[must_use]
 pub fn cobs_encode(input: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(input.len() + input.len() / 254 + 1);
+    // Include the wire delimiter now: reserving after encoding could free an unwiped
+    // allocation containing the command payload.
+    let mut output = Vec::with_capacity(input.len() + input.len() / 254 + 2);
     let mut code_index = 0_usize;
     let mut code = 1_u8;
     output.push(0);
@@ -233,7 +242,7 @@ pub fn cobs_decode(input: &[u8]) -> Result<Vec<u8>, ProtocolError> {
         return Err(ProtocolError::EmptyCobsFrame);
     }
 
-    let mut output = Vec::with_capacity(input.len());
+    let mut output = Zeroizing::new(Vec::with_capacity(input.len()));
     let mut index = 0_usize;
 
     while index < input.len() {
@@ -256,12 +265,39 @@ pub fn cobs_decode(input: &[u8]) -> Result<Vec<u8>, ProtocolError> {
         }
     }
 
-    Ok(output)
+    Ok(std::mem::take(&mut *output))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payload_frame_cleanup_preserves_correlation_and_wire_contract() {
+        let mut frame = Frame::v1(message::COMMAND, 7, vec![0x41, 0, 0x42]);
+        assert_eq!(decode_wire(&encode_wire(&frame).unwrap()).unwrap(), frame);
+        frame.zeroize();
+        assert!(frame.payload.is_empty());
+        assert_eq!(frame.sequence, 7);
+        assert_eq!(frame.message_type, message::COMMAND);
+    }
+
+    #[test]
+    fn wire_delimiter_does_not_reallocate_encoded_payload() {
+        for length in [1, 64, MAX_PAYLOAD] {
+            let frame = Frame::v1(message::COMMAND, 7, vec![0x41; length]);
+            let decoded = Zeroizing::new(encode_decoded(&frame).unwrap());
+            let mut encoded = Zeroizing::new(cobs_encode(&decoded));
+            assert!(encoded.capacity() > encoded.len());
+            let pointer = encoded.as_ptr();
+            let capacity = encoded.capacity();
+            encoded.push(0);
+            assert_eq!(encoded.as_ptr(), pointer);
+            assert_eq!(encoded.capacity(), capacity);
+            assert_eq!(encoded.as_slice(), encode_wire(&frame).unwrap());
+            assert_eq!(decode_wire(&encoded).unwrap(), frame);
+        }
+    }
 
     #[test]
     fn crc_known_answer() {

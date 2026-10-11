@@ -14,9 +14,9 @@ use super::{
     authorize, encode_hex, parse_fixed_lower_hex, parse_input_sequence_json, parse_payload_body,
     ActionsRequest, ApiError, BoxFuture, CancelRequest, CommandOutcome, CreateTextStreamRequest,
     Daemon, DaemonError, DeviceView, DevicesResponse, FirmwareView, InstallationTlsSecretSet,
-    InstallationTlsSecretStore, KeyboardSequenceV1, TypeRequest, MAX_FILE_REQUEST_BODY,
-    MAX_FILE_SET_REQUEST_BODY, MAX_SEQUENCE_REQUEST_BODY, MAX_TEXT_STREAM_PART_BODY,
-    TEXT_STREAM_RECEIPT_RETENTION,
+    InstallationTlsSecretStore, KeyboardSequenceV1, PayloadBody, TypeRequest,
+    MAX_FILE_REQUEST_BODY, MAX_FILE_SET_REQUEST_BODY, MAX_SEQUENCE_REQUEST_BODY,
+    MAX_TEXT_STREAM_PART_BODY, TEXT_STREAM_RECEIPT_RETENTION,
 };
 use axum::{
     body::{to_bytes, Body, Bytes},
@@ -50,6 +50,7 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// A verified holder is re-proved with a fresh endpoint route proof at least this often.
 const HOLDER_REVERIFY: Duration = Duration::from_secs(30);
@@ -1760,9 +1761,13 @@ pub(crate) async fn local_forwarding(
     let Ok(body) = to_bytes(body, op.body_limit()).await else {
         return (StatusCode::PAYLOAD_TOO_LARGE, "length limit exceeded").into_response();
     };
-    match forwarder.dispatch(&daemon, op, &body).await {
+    let body = PayloadBody(body);
+    match forwarder.dispatch(&daemon, op, &body.0).await {
         Some(response) => response,
-        None => next.run(Request::from_parts(parts, Body::from(body))).await,
+        None => {
+            next.run(Request::from_parts(parts, Body::from(body.0.clone())))
+                .await
+        }
     }
 }
 
@@ -1770,22 +1775,22 @@ pub(crate) async fn local_forwarding(
 /// Sequence key aliases are sent as canonical names, so a holder that predates aliases accepts
 /// the body from any client; the route proof binds identities and a nonce, never the body.
 /// `None` leaves the request to the local handler, which returns its usual error.
-fn prepare_command_body(kind: CommandKind, body: &[u8]) -> Option<(Uuid, Vec<u8>)> {
+fn prepare_command_body(kind: CommandKind, body: &[u8]) -> Option<(Uuid, Zeroizing<Vec<u8>>)> {
     let (command_id, body) = match kind {
         CommandKind::Type => (
             parse_payload_body::<TypeRequest>(body).ok()?.command_id,
-            body.to_vec(),
+            Zeroizing::new(body.to_vec()),
         ),
         CommandKind::Actions => (
             parse_payload_body::<ActionsRequest>(body).ok()?.command_id,
-            body.to_vec(),
+            Zeroizing::new(body.to_vec()),
         ),
         CommandKind::Sequence => {
-            let mut request = parse_payload_body::<KeyboardSequenceV1>(body).ok()?;
+            let mut request = Zeroizing::new(parse_payload_body::<KeyboardSequenceV1>(body).ok()?);
             canonicalize_sequence_keys(&mut request);
             (
                 Some(Uuid::parse_str(&request.command_id).ok()?),
-                serde_json::to_vec(&request).ok()?,
+                keyferry_layouts::serialize_zeroizing_json(&*request).ok()?,
             )
         }
         CommandKind::InputSequence => {
@@ -1793,7 +1798,7 @@ fn prepare_command_body(kind: CommandKind, body: &[u8]) -> Option<(Uuid, Vec<u8>
             canonicalize_input_sequence_keys(&mut request);
             (
                 Some(Uuid::parse_str(&request.command_id).ok()?),
-                serde_json::to_vec(&request).ok()?,
+                keyferry_layouts::serialize_zeroizing_json(&request).ok()?,
             )
         }
     };
@@ -1805,7 +1810,10 @@ fn prepare_command_body(kind: CommandKind, body: &[u8]) -> Option<(Uuid, Vec<u8>
             request
                 .as_object_mut()?
                 .insert("command_id".to_owned(), command_id.to_string().into());
-            Some((command_id, serde_json::to_vec(&request).ok()?))
+            Some((
+                command_id,
+                keyferry_layouts::serialize_zeroizing_json(&request).ok()?,
+            ))
         }
         (_, Some(command_id)) => Some((command_id, body)),
         (_, None) => None,

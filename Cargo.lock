@@ -2803,6 +2803,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2844,6 +2845,7 @@ name = "keyferry-protocol"
 version = "0.0.0"
 dependencies = [
  "semver",
+ "zeroize",
 ]
 
 [[package]]
@@ -2886,6 +2888,7 @@ dependencies = [
  "windows",
  "windows-future",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

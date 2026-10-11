@@ -2126,7 +2126,8 @@ fn install_api_actions(
             return;
         };
         // The masked prompt is the same separate process `keyctl secure-text` starts; the
-        // secret never enters this window, its status text, or the clipboard.
+        // secret never enters this window or its status text. Clipboard operations in the
+        // separate editor are the owner's choice; toolkit selection behavior is platform-specific.
         let launched = std::env::current_exe().and_then(|program| {
             keyferry_core::process::command(program)
                 .args(["--secure-text", &device_id])

@@ -5,6 +5,8 @@ pub mod text_stream;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::io::{self, Write};
+use zeroize::{Zeroize, Zeroizing};
 
 mod input_sequence;
 
@@ -233,6 +235,22 @@ pub enum ReportStep {
     WaitMs(u16),
 }
 
+impl Zeroize for KeyboardReport {
+    fn zeroize(&mut self) {
+        self.modifiers.zeroize();
+        self.keys.zeroize();
+    }
+}
+
+impl Zeroize for ReportStep {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Report(report) => report.zeroize(),
+            Self::WaitMs(ms) => ms.zeroize(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutError {
     UnsupportedCharacter(char),
@@ -375,6 +393,84 @@ pub struct CompiledSequence {
     pub planned_ms: u32,
 }
 
+// Payload cleanup preserves command/profile/timing metadata. Owners wrap these values in
+// Zeroizing so early returns and cancellation use the same cleanup as successful submission.
+impl Zeroize for KeyboardSequenceV1 {
+    fn zeroize(&mut self) {
+        for action in &mut self.actions {
+            action.zeroize();
+        }
+    }
+}
+
+impl Zeroize for SequenceAction {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Text { value, .. } => value.zeroize(),
+            Self::Tap { key, .. } => key.zeroize(),
+            Self::Chord { keys, .. } | Self::OrderedChord { keys, .. } => keys.zeroize(),
+            Self::Repeat { actions, .. } => {
+                for action in actions {
+                    action.zeroize();
+                }
+            }
+            Self::Wait { .. } => {}
+        }
+    }
+}
+
+impl Zeroize for SequenceLeafAction {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Text { value, .. } => value.zeroize(),
+            Self::Tap { key, .. } => key.zeroize(),
+            Self::Chord { keys, .. } | Self::OrderedChord { keys, .. } => keys.zeroize(),
+            Self::Wait { .. } => {}
+        }
+    }
+}
+
+impl Zeroize for CompiledSequence {
+    fn zeroize(&mut self) {
+        self.steps.zeroize();
+    }
+}
+
+/// Serialize into a fixed allocation: growing a Vec after writing payload would leave
+/// its previous allocations unwiped. Both passes use the same production serde serializer.
+pub fn serialize_zeroizing_json<T: Serialize>(
+    value: &T,
+) -> Result<Zeroizing<Vec<u8>>, serde_json::Error> {
+    struct Size(usize);
+    impl Write for Size {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut size = Size(0);
+    serde_json::to_writer(&mut size, value)?;
+    let mut bytes = Zeroizing::new(vec![0; size.0]);
+    let written = {
+        let mut writer = io::Cursor::new(bytes.as_mut_slice());
+        serde_json::to_writer(&mut writer, value)?;
+        writer.position() as usize
+    };
+    if written != size.0 {
+        return Err(serde_json::Error::io(io::Error::other(
+            "JSON size changed during serialization",
+        )));
+    }
+    bytes.truncate(written);
+    Ok(bytes)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SequenceError {
     Schema,
@@ -435,6 +531,36 @@ struct CompileState {
     text_characters: usize,
     gestures: usize,
     planned_ms: u32,
+}
+
+impl Zeroize for CompileState {
+    fn zeroize(&mut self) {
+        self.steps.zeroize();
+    }
+}
+
+impl Drop for CompileState {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl CompileState {
+    fn reserve_steps(&mut self, additional: usize) {
+        let required = self.steps.len() + additional;
+        if required > self.steps.capacity() {
+            let mut replacement =
+                Vec::with_capacity(required.max(self.steps.capacity().saturating_mul(2)));
+            replacement.extend_from_slice(&self.steps);
+            self.steps.zeroize();
+            self.steps = replacement;
+        }
+    }
+
+    fn push_step(&mut self, step: ReportStep) {
+        self.reserve_steps(1);
+        self.steps.push(step);
+    }
 }
 
 enum Leaf<'a> {
@@ -520,7 +646,7 @@ pub fn compile_sequence(request: &KeyboardSequenceV1) -> Result<CompiledSequence
         return Err(SequenceError::NoKeyEffect);
     }
     Ok(CompiledSequence {
-        steps: state.steps,
+        steps: std::mem::take(&mut state.steps),
         source_nodes: state.source_nodes,
         text_characters: state.text_characters,
         gestures: state.gestures,
@@ -552,10 +678,11 @@ fn compile_leaf(
                 return Err(SequenceError::TextCharacterLimit);
             }
             let timing = validate_sequence_timing(timing.unwrap_or(default_timing))?;
-            let planned = plan_text_us(value, timing).map_err(|error| match error {
-                LayoutError::UnsupportedCharacter(_) => SequenceError::UnsupportedCharacter,
-                _ => SequenceError::Timing,
-            })?;
+            let mut planned =
+                Zeroizing::new(plan_text_us(value, timing).map_err(|error| match error {
+                    LayoutError::UnsupportedCharacter(_) => SequenceError::UnsupportedCharacter,
+                    _ => SequenceError::Timing,
+                })?);
             let gestures = planned.len() / 4;
             add_gestures(state, gestures)?;
             add_duration(
@@ -564,7 +691,8 @@ fn compile_leaf(
                     .unwrap_or(u32::MAX)
                     .saturating_mul(u32::from(timing.key_down_ms + timing.release_gap_ms)),
             )?;
-            state.steps.extend(planned);
+            state.reserve_steps(planned.len());
+            state.steps.extend(planned.drain(..));
         }
         Leaf::Tap(name, timing) => {
             let timing = validate_sequence_timing(timing.unwrap_or(default_timing))?;
@@ -613,7 +741,8 @@ fn compile_leaf(
                     return Err(SequenceError::DuplicateChordKey);
                 }
             }
-            let reports = ordered_reports(&keys).map_err(|_| SequenceError::RolloverLimit)?;
+            let reports =
+                Zeroizing::new(ordered_reports(&keys).map_err(|_| SequenceError::RolloverLimit)?);
             add_gestures(state, 1)?;
             let prefixes = (reports.len() - 1) as u32;
             add_duration(
@@ -622,38 +751,32 @@ fn compile_leaf(
                     + u32::from(timing.key_down_ms + timing.release_gap_ms),
             )?;
             for (index, report) in reports.iter().copied().enumerate() {
-                state.steps.push(ReportStep::Report(report));
-                state
-                    .steps
-                    .push(ReportStep::WaitMs(if index + 1 == reports.len() {
-                        timing.key_down_ms
-                    } else {
-                        ORDERED_PRESS_MS
-                    }));
+                state.push_step(ReportStep::Report(report));
+                state.push_step(ReportStep::WaitMs(if index + 1 == reports.len() {
+                    timing.key_down_ms
+                } else {
+                    ORDERED_PRESS_MS
+                }));
             }
             for report in reports[..reports.len() - 1].iter().rev().copied() {
-                state.steps.push(ReportStep::Report(report));
-                state.steps.push(ReportStep::WaitMs(ORDERED_RELEASE_MS));
+                state.push_step(ReportStep::Report(report));
+                state.push_step(ReportStep::WaitMs(ORDERED_RELEASE_MS));
             }
-            state
-                .steps
-                .push(ReportStep::Report(KeyboardReport::RELEASED));
-            state.steps.push(ReportStep::WaitMs(timing.release_gap_ms));
+            state.push_step(ReportStep::Report(KeyboardReport::RELEASED));
+            state.push_step(ReportStep::WaitMs(timing.release_gap_ms));
         }
         Leaf::Wait(ms) => {
             if !(1..=MAX_SEQUENCE_WAIT_MS).contains(&ms) {
                 return Err(SequenceError::Wait);
             }
             if state.steps.is_empty() {
-                state
-                    .steps
-                    .push(ReportStep::Report(KeyboardReport::RELEASED));
+                state.push_step(ReportStep::Report(KeyboardReport::RELEASED));
             }
             add_duration(state, u32::from(ms))?;
             let mut remaining = ms;
             while remaining != 0 {
                 let part = remaining.min(100);
-                state.steps.push(ReportStep::WaitMs(part));
+                state.push_step(ReportStep::WaitMs(part));
                 remaining -= part;
             }
         }
@@ -710,18 +833,16 @@ fn emit_gesture(
         state,
         u32::from(timing.key_down_ms) + u32::from(timing.release_gap_ms),
     )?;
-    state.steps.push(ReportStep::Report(report));
-    state.steps.push(ReportStep::WaitMs(timing.key_down_ms));
-    state
-        .steps
-        .push(ReportStep::Report(KeyboardReport::RELEASED));
-    state.steps.push(ReportStep::WaitMs(timing.release_gap_ms));
+    state.push_step(ReportStep::Report(report));
+    state.push_step(ReportStep::WaitMs(timing.key_down_ms));
+    state.push_step(ReportStep::Report(KeyboardReport::RELEASED));
+    state.push_step(ReportStep::WaitMs(timing.release_gap_ms));
     Ok(())
 }
 
 pub fn plan_text_us(text: &str, timing: TypingTiming) -> Result<Vec<ReportStep>, LayoutError> {
     let timing = timing.validate()?;
-    let mut steps = Vec::with_capacity(text.chars().count() * 4);
+    let mut steps = Zeroizing::new(Vec::with_capacity(text.chars().count() * 4));
     let mut chars = text.chars().peekable();
 
     while let Some(mut ch) = chars.next() {
@@ -754,7 +875,7 @@ pub fn plan_text_us(text: &str, timing: TypingTiming) -> Result<Vec<ReportStep>,
     if !ends_released {
         steps.push(ReportStep::Report(KeyboardReport::RELEASED));
     }
-    Ok(steps)
+    Ok(std::mem::take(&mut *steps))
 }
 
 pub fn stroke_for_us_ascii(ch: char) -> Result<Keystroke, LayoutError> {
@@ -883,6 +1004,134 @@ pub fn chord_from_names<S: AsRef<str>>(names: &[S]) -> Result<Keystroke, LayoutE
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn payload_cleanup_clears_nested_sequence_and_reports_on_early_return() {
+        struct Borrowed<'a>(&'a mut KeyboardSequenceV1);
+        impl Zeroize for Borrowed<'_> {
+            fn zeroize(&mut self) {
+                self.0.zeroize();
+            }
+        }
+        fn reject(request: &mut KeyboardSequenceV1) -> Result<(), ()> {
+            let _owner = Zeroizing::new(Borrowed(request));
+            Err(())
+        }
+        let mut request = sequence(vec![
+            SequenceAction::Text {
+                value: "synthetic-text".into(),
+                timing: None,
+            },
+            SequenceAction::Repeat {
+                count: 2,
+                actions: vec![
+                    SequenceLeafAction::Text {
+                        value: "synthetic-nested".into(),
+                        timing: None,
+                    },
+                    SequenceLeafAction::Chord {
+                        keys: names(&["CTRL", "a"]),
+                        timing: None,
+                    },
+                ],
+            },
+        ]);
+        let command = request.command_id.clone();
+        assert_eq!(reject(&mut request), Err(()));
+        assert_eq!(request.command_id, command);
+        assert!(
+            matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
+        );
+        let SequenceAction::Repeat { actions, .. } = &request.actions[1] else {
+            panic!()
+        };
+        assert!(matches!(&actions[0], SequenceLeafAction::Text { value, .. } if value.is_empty()));
+        assert!(matches!(&actions[1], SequenceLeafAction::Chord { keys, .. } if keys.is_empty()));
+        let mut report = ReportStep::Report(KeyboardReport::single(MOD_LEFT_SHIFT, 4));
+        report.zeroize();
+        assert_eq!(report, ReportStep::Report(KeyboardReport::RELEASED));
+    }
+
+    #[test]
+    fn payload_serializer_uses_exact_fixed_capacity_and_rejects_second_pass_changes() {
+        use std::cell::Cell;
+        struct Changing {
+            calls: Cell<usize>,
+            first: &'static str,
+            second: &'static str,
+        }
+        impl Serialize for Changing {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let call = self.calls.get();
+                self.calls.set(call + 1);
+                serializer.serialize_str(if call == 0 { self.first } else { self.second })
+            }
+        }
+        let value = serde_json::json!({"text": "abc\\\"\n".repeat(256)});
+        let encoded = serialize_zeroizing_json(&value).unwrap();
+        assert_eq!(encoded.as_slice(), serde_json::to_vec(&value).unwrap());
+        assert_eq!(encoded.len(), encoded.capacity());
+        for (first, second) in [("short", "longer-fixture"), ("longer-fixture", "short")] {
+            let value = Changing {
+                calls: Cell::new(0),
+                first,
+                second,
+            };
+            assert!(serialize_zeroizing_json(&value).is_err());
+            assert_eq!(value.calls.get(), 2);
+        }
+        struct FailSecond(Cell<usize>);
+        impl Serialize for FailSecond {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeSeq};
+                let call = self.0.get();
+                self.0.set(call + 1);
+                let mut sequence = serializer.serialize_seq(Some(1))?;
+                sequence.serialize_element("synthetic-payload")?;
+                if call == 1 {
+                    return Err(S::Error::custom("synthetic serialization failure"));
+                }
+                sequence.end()
+            }
+        }
+        let value = FailSecond(Cell::new(0));
+        let error = serialize_zeroizing_json(&value).unwrap_err();
+        assert_eq!(value.0.get(), 2);
+        assert!(!error.to_string().contains("synthetic-payload"));
+    }
+
+    #[test]
+    fn compiler_payload_growth_and_error_keep_the_same_plan_semantics() {
+        let mut state = CompileState {
+            steps: vec![ReportStep::Report(KeyboardReport::single(0, 4))],
+            source_nodes: 1,
+            text_characters: 1,
+            gestures: 1,
+            planned_ms: 10,
+        };
+        state.reserve_steps(8);
+        assert!(state.steps.capacity() >= 9);
+        assert_eq!(
+            state.steps[0],
+            ReportStep::Report(KeyboardReport::single(0, 4))
+        );
+        state.zeroize();
+        assert!(state.steps.is_empty());
+        let request = sequence(vec![
+            SequenceAction::Text {
+                value: "synthetic-prefix".into(),
+                timing: None,
+            },
+            SequenceAction::Text {
+                value: "\u{2603}".into(),
+                timing: None,
+            },
+        ]);
+        assert_eq!(
+            compile_sequence(&request),
+            Err(SequenceError::UnsupportedCharacter)
+        );
+    }
 
     fn sequence(actions: Vec<SequenceAction>) -> KeyboardSequenceV1 {
         KeyboardSequenceV1 {

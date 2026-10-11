@@ -274,15 +274,20 @@ clipboard, or ask the human to enter the secret in chat, stdin, or arguments.
 Only a deliberate human confirmation and Send once can submit one command-scoped keyboard sequence.
 The destination cannot be changed inside the prompt. The exact device must report an authenticated,
 idle, disarmed keyboard route initially and immediately before submission. Text is restricted to
-1–256 printable ASCII bytes with no normalization; Enter is optional and off initially. Expiry and
+1–256 printable ASCII bytes with no normalization; optional Enter follows the saved owner setting
+and is on unless disabled. Expiry and
 pre-submission cancellation clear the editor without a POST. After submission, cancellation uses the
 existing exact-command route once; uncertain results are UNKNOWN and the sequence is never replayed.
 Responses are reduced to correlated IDs and fixed outcome text; reflected peer messages/errors
-never enter the dialog. Secret buffers are transient, Rust-owned text is zeroized, and the editor
-and its undo state are discarded on send, close, cancellation, or expiry. No prompt body, recipe,
-file, clipboard copy, transcript, or disk receipt is created by this flow. The secret accessibility
-value is blank. The UI toolkit/TLS/OS may retain transient allocations; this is not a guarantee
-against process-memory inspection, swap, OS crash dumps, or a compromised authorized controller.
+never enter the dialog. Cleanup guards overwrite owned text, serialized request bodies, compiled
+keyboard reports and outgoing frames on completion or error; firmware clears completed receive
+buffers and terminal command storage, including session loss and USB faults. The editor and its
+undo state are discarded on send, close, cancellation, or expiry. No prompt body, recipe, file,
+transcript, or disk receipt is created by this flow. Keyferry does not deliberately copy the secret
+to a clipboard; explicit editor operations and native toolkit selection behavior may do so. The
+secret accessibility value is blank. Shared HTTP/library allocations, the UI toolkit, TLS and OS
+may retain copies; this is not a guarantee against process-memory inspection, swap, OS crash dumps,
+or a compromised authorized controller.
 The standard editor allows a human's explicit clipboard operations; users should type secrets when
 clipboard history/synchronization is a concern. Masking alone is not a memory-security boundary.
 
