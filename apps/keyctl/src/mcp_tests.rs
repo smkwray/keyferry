@@ -135,6 +135,99 @@ fn dispatch_lifecycle_schema_and_duplicate_id_no_replay() {
 }
 
 #[test]
+fn pointer_glide_duration_schema_rejects_invalid_direct_and_batch_before_capture() {
+    let listed = tools();
+    let recipe_schema: Value =
+        serde_json::from_str(include_str!("../../../protocol/recipe-v1.schema.json")).unwrap();
+    for step in recipe_schema["$defs"]["routine_input_step"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(
+            recipe_schema["$defs"]["routine_step"]["oneOf"]
+                .as_array()
+                .unwrap(),
+        )
+    {
+        let name = step["properties"]["type"]["const"].as_str().unwrap_or("");
+        if !["move", "click", "scroll", "drag", "click_text"].contains(&name) {
+            continue;
+        }
+        let reference = step["properties"]["glide_ms"]["$ref"].as_str().unwrap();
+        let duration = &recipe_schema
+            .pointer(reference.strip_prefix('#').unwrap())
+            .unwrap()["oneOf"][0];
+        assert_eq!(duration["minimum"], routines::GLIDE_MIN_MS);
+        assert_eq!(
+            duration["maximum"],
+            if name == "drag" {
+                routines::GLIDE_DRAG_MAX_MS
+            } else {
+                routines::GLIDE_MAX_MS
+            }
+        );
+        assert_eq!(duration["multipleOf"], routines::GLIDE_TICK_MS);
+    }
+    let batch = &listed.iter().find(|t| t["name"] == "batch").unwrap()["inputSchema"];
+    let mut s = server();
+    init(&mut s);
+    let c = AtomicBool::new(false);
+    for (name, args, max_ms) in [
+        ("move", json!({"x":1,"y":2}), routines::GLIDE_MAX_MS),
+        ("click", json!({"x":1,"y":2}), routines::GLIDE_MAX_MS),
+        (
+            "scroll",
+            json!({"x":1,"y":2,"dx":0,"dy":1}),
+            routines::GLIDE_MAX_MS,
+        ),
+        (
+            "drag",
+            json!({"from_x":1,"from_y":2,"to_x":3,"to_y":4}),
+            routines::GLIDE_DRAG_MAX_MS,
+        ),
+    ] {
+        let schema = &listed.iter().find(|t| t["name"] == name).unwrap()["inputSchema"];
+        assert!(validate(&args, schema));
+        for ms in [routines::GLIDE_MIN_MS, max_ms] {
+            let mut args = args.clone();
+            args["glide_ms"] = json!(ms);
+            assert!(validate(&args, schema));
+            assert!(validate(
+                &json!({"actions":[{"tool":name,"arguments":args}]}),
+                batch
+            ));
+        }
+        for (i, ms) in [
+            json!(null),
+            json!(119),
+            json!(125),
+            json!(max_ms + 10),
+            json!(120.5),
+            json!("120"),
+            json!(-120),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut args = args.clone();
+            args["glide_ms"] = ms;
+            for (tool, arguments) in [
+                (name, args.clone()),
+                ("batch", json!({"actions":[{"tool":name,"arguments":args}]})),
+            ] {
+                let result = s.dispatch(json!({"jsonrpc":"2.0","id":format!("{name}-{tool}-{i}"),"method":"tools/call","params":{"name":tool,"arguments":arguments}}), &c).unwrap();
+                assert_eq!(
+                    result["result"]["structuredContent"]["error"]["code"], "input.tool_arguments",
+                    "{result}"
+                );
+            }
+        }
+    }
+    assert_eq!(s.frames.next, 0);
+    assert!(!s.root.exists());
+}
+
+#[test]
 fn images_are_opt_in_and_save_path_is_rejected_before_capture() {
     let listed = tools();
     for name in [

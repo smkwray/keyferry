@@ -26,6 +26,32 @@ pub const GLIDE: Glide = Glide {
     origin: [0.5, 0.5],
 };
 
+pub const GLIDE_TICK_MS: u64 = 10;
+pub const GLIDE_MIN_MS: u64 = 120;
+pub const GLIDE_MAX_MS: u64 = 5000;
+pub const GLIDE_DRAG_MAX_MS: u64 = 280;
+pub const GLIDE_MAX_SAMPLES: u32 = 120;
+
+/// Missing duration preserves the distance-based glide; an explicit duration is never clamped.
+pub fn validate_glide_ms(glide_ms: Option<u64>, drag: bool) -> Result<(), RecipeError> {
+    if glide_ms.is_some_and(|ms| {
+        !(GLIDE_MIN_MS..=if drag {
+            GLIDE_DRAG_MAX_MS
+        } else {
+            GLIDE_MAX_MS
+        })
+            .contains(&ms)
+            || ms % GLIDE_TICK_MS != 0
+    }) {
+        return Err(RecipeError::new("pointer.glide_ms"));
+    }
+    Ok(())
+}
+
+fn explicit_glide_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(d).map(Some)
+}
+
 /// Gap between single-detent scroll reports.
 pub const SCROLL_DETENT_MS: u64 = 30;
 
@@ -35,7 +61,12 @@ fn report(p: [f64; 2]) -> Value {
 
 /// Absolute reports gliding from the presumed position `at` to exactly `to` on an ease-in-out
 /// minimum-jerk (10t^3-15t^4+6t^5) path; step count scales with distance. Updates `at`.
-pub fn glide_to(at: &mut Option<[f64; 2]>, to: [f64; 2]) -> Vec<Value> {
+pub fn glide_to(
+    at: &mut Option<[f64; 2]>,
+    to: [f64; 2],
+    glide_ms: Option<u64>,
+) -> Result<Vec<Value>, RecipeError> {
+    validate_glide_ms(glide_ms, false)?;
     let mut moves = Vec::new();
     let from = at.unwrap_or_else(|| {
         moves.push(report(GLIDE.origin));
@@ -44,6 +75,30 @@ pub fn glide_to(at: &mut Option<[f64; 2]>, to: [f64; 2]) -> Vec<Value> {
     let a = from.map(|v| (v * HID_MAX).round());
     let b = to.map(|v| (v * HID_MAX).round());
     let d = [b[0] - a[0], b[1] - a[1]];
+    if let Some(ms) = glide_ms {
+        // Keep every sample, including repeated HID positions, so small moves have the same
+        // requested pacing. Longer free glides distribute their extra time between samples.
+        let steps = (ms / GLIDE_TICK_MS).min(u64::from(GLIDE_MAX_SAMPLES));
+        let extra_ms = ms - steps * GLIDE_TICK_MS;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let s = t * t * t * (10.0 + t * (6.0 * t - 15.0));
+            let p = [(a[0] + d[0] * s).round(), (a[1] + d[1] * s).round()];
+            moves.push(report(if i == steps {
+                to
+            } else {
+                p.map(|v| v / HID_MAX)
+            }));
+            if i < steps {
+                let wait_ms = i * extra_ms / (steps - 1) - (i - 1) * extra_ms / (steps - 1);
+                if wait_ms != 0 {
+                    moves.push(json!({"type":"wait","ms":wait_ms}));
+                }
+            }
+        }
+        *at = Some(to);
+        return Ok(moves);
+    }
     if d[0].abs().max(d[1].abs()) > GLIDE.still_counts {
         let span = (d[0].hypot(d[1]) / HID_MAX).min(1.0);
         let steps =
@@ -63,7 +118,7 @@ pub fn glide_to(at: &mut Option<[f64; 2]>, to: [f64; 2]) -> Vec<Value> {
     }
     moves.push(report(to));
     *at = Some(to);
-    moves
+    Ok(moves)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -135,10 +190,14 @@ pub enum Step {
     Move {
         x: u32,
         y: u32,
+        #[serde(default, deserialize_with = "explicit_glide_ms")]
+        glide_ms: Option<u64>,
     },
     Click {
         x: u32,
         y: u32,
+        #[serde(default, deserialize_with = "explicit_glide_ms")]
+        glide_ms: Option<u64>,
         #[serde(default)]
         button: Button,
         #[serde(default)]
@@ -149,12 +208,17 @@ pub enum Step {
         y: u32,
         dx: i64,
         dy: i64,
+        #[serde(default, deserialize_with = "explicit_glide_ms")]
+        glide_ms: Option<u64>,
     },
     Drag {
         from_x: u32,
         from_y: u32,
         to_x: u32,
         to_y: u32,
+        /// Applies independently to the approach and the button-held glide.
+        #[serde(default, deserialize_with = "explicit_glide_ms")]
+        glide_ms: Option<u64>,
         #[serde(default)]
         button: Button,
     },
@@ -177,6 +241,8 @@ pub enum Step {
     ClickText {
         query: String,
         timeout_ms: u64,
+        #[serde(default, deserialize_with = "explicit_glide_ms")]
+        glide_ms: Option<u64>,
         #[serde(default)]
         region: Option<Region>,
         #[serde(default)]
@@ -267,21 +333,28 @@ pub fn input_actions(
         }],
         Step::TypeText { text } => vec![json!({"type":"text","value":text})],
         Step::Wait { ms } => vec![json!({"type":"wait","ms":ms})],
-        Step::Move { x, y } => glide_to(cursor, point(*x, *y)?),
+        Step::Move { x, y, glide_ms } => glide_to(cursor, point(*x, *y)?, *glide_ms)?,
         Step::Click {
             x,
             y,
             button,
             double,
+            glide_ms,
         } => {
-            let mut actions = glide_to(cursor, point(*x, *y)?);
+            let mut actions = glide_to(cursor, point(*x, *y)?, *glide_ms)?;
             actions.push(
                 json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()}),
             );
             actions
         }
-        Step::Scroll { x, y, dx, dy } => {
-            let mut actions = glide_to(cursor, point(*x, *y)?);
+        Step::Scroll {
+            x,
+            y,
+            dx,
+            dy,
+            glide_ms,
+        } => {
+            let mut actions = glide_to(cursor, point(*x, *y)?, *glide_ms)?;
             // One report per detent, like a wheel: macOS scrolls ~1 px for one 60-detent report
             // but ~2 lines per detent for separate +-1 reports.
             let detents = dx.unsigned_abs().max(dy.unsigned_abs());
@@ -300,12 +373,14 @@ pub fn input_actions(
             to_x,
             to_y,
             button,
+            glide_ms,
         } => {
+            validate_glide_ms(*glide_ms, true)?;
             let from = point(*from_x, *from_y)?;
             let to = point(*to_x, *to_y)?;
-            let mut actions = glide_to(cursor, from);
+            let mut actions = glide_to(cursor, from, *glide_ms)?;
             actions.push(json!({"type":"button_down","button":button.wire()}));
-            actions.extend(glide_to(cursor, to));
+            actions.extend(glide_to(cursor, to, *glide_ms)?);
             actions.push(json!({"type":"wait","ms":40}));
             actions.push(json!({"type":"button_up","button":button.wire()}));
             actions
@@ -540,6 +615,32 @@ pub fn validate_definition(recipe: &RecipeV1) -> Result<Summary, RecipeError> {
                 stretches += 1;
             }
         } else {
+            if let Step::ClickText {
+                glide_ms: Some(glide_ms),
+                button,
+                double,
+                ..
+            } = &steps[i]
+            {
+                // The OCR destination is unknown during validation. Explicit pacing is fixed,
+                // so budget its real production chunks and click as well as the OCR timeout.
+                let click = Step::Click {
+                    x: MAX_SCREENSHOT_SIDE - 1,
+                    y: MAX_SCREENSHOT_SIDE - 1,
+                    glide_ms: Some(*glide_ms),
+                    button: *button,
+                    double: *double,
+                };
+                for part in compile_stretch(
+                    &[click],
+                    None,
+                    start_within(recipe),
+                    &mut |_, _| Ok([1.0, 1.0]),
+                    Some(GLIDE.origin),
+                )? {
+                    planned_ms += part.planned_ms;
+                }
+            }
             planned_ms += match &steps[i] {
                 Step::ExpectText { timeout_ms, .. }
                 | Step::ClickText { timeout_ms, .. }
@@ -715,6 +816,14 @@ fn substitute_step(
 }
 
 fn validate_step(step: &Step, nested: bool) -> Result<(), RecipeError> {
+    match step {
+        Step::Move { glide_ms, .. }
+        | Step::Click { glide_ms, .. }
+        | Step::Scroll { glide_ms, .. }
+        | Step::ClickText { glide_ms, .. } => validate_glide_ms(*glide_ms, false)?,
+        Step::Drag { glide_ms, .. } => validate_glide_ms(*glide_ms, true)?,
+        _ => {}
+    }
     let pixel = |n: u32| n < MAX_SCREENSHOT_SIDE;
     let (timeout, region) = match step {
         Step::Repeat {
@@ -1049,7 +1158,7 @@ mod tests {
     fn glide_is_eased_monotonic_bounded_timed_and_ends_exactly_on_target() {
         let (from, target) = ([0.1, 0.1], [0.9, 0.8]);
         let mut cursor = Some(from);
-        let moves = glide_to(&mut cursor, target);
+        let moves = glide_to(&mut cursor, target, None).unwrap();
         assert_eq!(cursor, Some(target));
         assert_eq!(moves.len(), GLIDE.max_steps as usize, "longest glide");
         assert_eq!(xy(moves.last().unwrap()), target, "exact endpoint");
@@ -1074,28 +1183,231 @@ mod tests {
         // One report per 10 ms HID poll: 120-240 ms plus the 30 ms neutral release.
         let timed = compiled(&moves);
         assert_eq!(timed.planned_ms, 10 * moves.len() as u64 + 30);
-        let longest = compiled(&glide_to(&mut Some([0.0, 0.0]), [1.0, 1.0])).planned_ms - 30;
+        let longest =
+            compiled(&glide_to(&mut Some([0.0, 0.0]), [1.0, 1.0], None).unwrap()).planned_ms - 30;
         assert_eq!(longest, 10 * u64::from(GLIDE.max_steps));
         assert!(longest <= 240);
 
         // Duration scales with distance, never below the minimum glide.
-        let short = glide_to(&mut Some([0.4, 0.5]), [0.6, 0.5]);
+        let short = glide_to(&mut Some([0.4, 0.5]), [0.6, 0.5], None).unwrap();
         assert!(short.len() < moves.len() && short.len() + 1 >= GLIDE.min_steps as usize);
         assert!(compiled(&short).planned_ms - 30 >= 120 - 10);
         // A move under the still threshold is one report: it is not a visible jump.
-        let still = glide_to(&mut Some([0.5, 0.5]), [0.501, 0.5]);
+        let still = glide_to(&mut Some([0.5, 0.5]), [0.501, 0.5], None).unwrap();
         assert_eq!(still, vec![report([0.501, 0.5])]);
 
         // Compiler-only fallback for validation: one origin report, then the glide.
         // Live MCP requires an observed cursor and cannot select this fallback.
         let mut unknown = None;
-        let first = glide_to(&mut unknown, [0.9, 0.9]);
+        let first = glide_to(&mut unknown, [0.9, 0.9], None).unwrap();
         assert_eq!(xy(&first[0]), GLIDE.origin);
         assert!(first.len() > GLIDE.min_steps as usize);
         assert!(largest_step(GLIDE.origin, &path(&first)) < NO_JUMP);
         assert_eq!(
-            glide_to(&mut None, [0.5, 0.501]),
+            glide_to(&mut None, [0.5, 0.501], None).unwrap(),
             vec![report([0.5, 0.501])]
+        );
+    }
+
+    #[test]
+    fn explicit_glides_preserve_density_endpoints_and_requested_sample_time() {
+        for ms in [120, 280, 1000, 5000] {
+            let from = [0.1, 0.1];
+            let target = [0.9, 0.8];
+            let mut at = Some(from);
+            let actions = glide_to(&mut at, target, Some(ms)).unwrap();
+            let points = path(&actions);
+            let count = (ms / GLIDE_TICK_MS).min(u64::from(GLIDE_MAX_SAMPLES));
+            assert_eq!(points.len(), count as usize);
+            assert_eq!(actions.last().unwrap(), &report(target));
+            assert_eq!(at, Some(target));
+            let mut previous = from;
+            let mut delta = Vec::new();
+            for point in &points {
+                assert!(point.iter().all(|v| (0.0..=1.0).contains(v)));
+                assert!((point[0] * HID_MAX).round() >= (previous[0] * HID_MAX).round());
+                assert!((point[1] * HID_MAX).round() >= (previous[1] * HID_MAX).round());
+                delta.push(point[0] - previous[0]);
+                previous = *point;
+            }
+            let peak = delta.iter().copied().fold(0.0, f64::max);
+            assert!(delta[0] < peak / 4.0 && delta.last().unwrap() < &(peak / 4.0));
+            let distance = (target[0] - from[0]).hypot(target[1] - from[1]);
+            assert!(largest_step(from, &points) <= 1.9 * distance / count as f64 + 2.0 / HID_MAX);
+            let waits: Vec<_> = actions.iter().filter(|a| a["type"] == "wait").collect();
+            let wait_ms: u64 = waits.iter().map(|a| a["ms"].as_u64().unwrap()).sum();
+            assert_eq!(count * GLIDE_TICK_MS + wait_ms, ms);
+            if ms > u64::from(GLIDE_MAX_SAMPLES) * GLIDE_TICK_MS {
+                assert_eq!(
+                    waits.len(),
+                    count as usize - 1,
+                    "delay between every sample"
+                );
+                let min = waits
+                    .iter()
+                    .map(|a| a["ms"].as_u64().unwrap())
+                    .min()
+                    .unwrap();
+                let max = waits
+                    .iter()
+                    .map(|a| a["ms"].as_u64().unwrap())
+                    .max()
+                    .unwrap();
+                assert!(max - min <= 1);
+            } else {
+                assert!(waits.is_empty());
+            }
+            assert!(actions.len() <= 239);
+            let compiled = compiled(&actions);
+            assert_eq!(compiled.planned_ms, ms + 30 * compiled.chunks.len() as u64);
+        }
+        let target = [0.50001, 0.5];
+        let actions = glide_to(&mut Some([0.5, 0.5]), target, Some(280)).unwrap();
+        let points = path(&actions);
+        assert_eq!(points.len(), 28);
+        assert!(
+            points.windows(2).any(|p| p[0] == p[1]),
+            "duplicates retain pacing"
+        );
+        assert_eq!(points.last(), Some(&target));
+        assert_eq!(compiled(&actions).planned_ms, 310);
+    }
+
+    #[test]
+    fn explicit_glide_steps_press_after_arrival_and_keep_drag_balanced() {
+        for kind in ["move", "click", "scroll"] {
+            let mut step = json!({"type":kind,"x":1270,"y":1270,"glide_ms":5000});
+            if kind == "scroll" {
+                step["dx"] = json!(0);
+                step["dy"] = json!(-1);
+            }
+            let step: Step = serde_json::from_value(step).unwrap();
+            let parts =
+                compile_stretch(&[step], None, 5000, &mut screen, Some([0.0, 0.0])).unwrap();
+            assert_eq!(parts.len(), 1);
+            let actions = &parts[0].actions;
+            let last_move = actions
+                .iter()
+                .rposition(|a| a["type"] == "move_absolute")
+                .unwrap();
+            assert_eq!(xy(&actions[last_move]), [1270.0 / 1279.0, 1270.0 / 1279.0]);
+            if kind != "move" {
+                assert_eq!(last_move + 1, actions.len() - 1);
+                assert_eq!(actions.last().unwrap()["type"], kind);
+            }
+        }
+        let step: Step = serde_json::from_value(json!({"type":"drag","from_x":5,"from_y":5,
+            "to_x":1270,"to_y":1270,"glide_ms":280}))
+        .unwrap();
+        let parts = compile_stretch(&[step], None, 5000, &mut screen, Some([0.99, 0.0])).unwrap();
+        let actions = &parts[0].actions;
+        let down = actions
+            .iter()
+            .position(|a| a["type"] == "button_down")
+            .unwrap();
+        let up = actions
+            .iter()
+            .position(|a| a["type"] == "button_up")
+            .unwrap();
+        assert_eq!(down, 28, "approach uses requested duration");
+        assert_eq!(
+            up - down,
+            30,
+            "held glide uses requested duration plus arrival hold"
+        );
+        let compiled = compiled(actions);
+        let held: Vec<_> = compiled
+            .chunks
+            .iter()
+            .filter(|c| tags(c).contains(&action::POINTER_BUTTON_DOWN))
+            .collect();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].planned_ms, 380);
+        assert_eq!(
+            held[0].body.len(),
+            184,
+            "180 action bytes plus chunk header"
+        );
+        assert!(tags(held[0]).ends_with(&[
+            action::WAIT_MS,
+            action::POINTER_BUTTON_UP,
+            action::NEUTRAL_ALL
+        ]));
+    }
+
+    #[test]
+    fn glide_bounds_reject_before_compilation_and_integer_templates_resolve() {
+        for kind in ["move", "click", "scroll", "drag", "click_text"] {
+            let base = match kind {
+                "drag" => json!({"type":kind,"from_x":0,"from_y":0,"to_x":1270,"to_y":1270}),
+                "click_text" => json!({"type":kind,"query":"ok","timeout_ms":100}),
+                "scroll" => json!({"type":kind,"x":1270,"y":1270,"dx":0,"dy":1}),
+                _ => json!({"type":kind,"x":1270,"y":1270}),
+            };
+            for invalid in [
+                Value::Null,
+                json!("120"),
+                json!(120.5),
+                json!(-120),
+                json!(0),
+                json!(110),
+                json!(125),
+                json!(5010),
+            ] {
+                let mut step = base.clone();
+                step["glide_ms"] = invalid;
+                assert!(parsed(&definition(json!([step]))).is_err(), "{kind}");
+            }
+            let mut step = base;
+            step["glide_ms"] = json!(if kind == "drag" { 290 } else { 5010 });
+            let parsed_step: Step = serde_json::from_value(step.clone()).unwrap();
+            assert_eq!(
+                validate_step(&parsed_step, false).unwrap_err().code(),
+                "pointer.glide_ms"
+            );
+            if kind != "click_text" {
+                assert_eq!(
+                    compile_stretch(&[parsed_step], None, 5000, &mut screen, Some([0.5, 0.5]))
+                        .err()
+                        .unwrap()
+                        .code(),
+                    "pointer.glide_ms"
+                );
+            }
+            assert_eq!(
+                parsed(&definition(json!([step]))).unwrap_err().code(),
+                "pointer.glide_ms"
+            );
+        }
+        for invalid in [110, 125, 5010] {
+            let mut at = Some([0.5, 0.5]);
+            assert_eq!(
+                glide_to(&mut at, [0.9, 0.9], Some(invalid))
+                    .unwrap_err()
+                    .code(),
+                "pointer.glide_ms"
+            );
+            assert_eq!(at, Some([0.5, 0.5]));
+        }
+        let mut value =
+            definition(json!([{"type":"move","x":1270,"y":1270,"glide_ms":"{duration}"}]));
+        value["parameters"] =
+            json!([{"name":"duration","type":"integer","minimum":120,"maximum":5000}]);
+        let recipe = parsed(&value).unwrap();
+        let steps = resolve(&recipe, &params(json!({"duration":1000})), false).unwrap();
+        assert!(matches!(
+            steps[0],
+            Step::Move {
+                glide_ms: Some(1000),
+                ..
+            }
+        ));
+        assert_eq!(
+            resolve(&recipe, &params(json!({"duration":125})), false)
+                .err()
+                .unwrap()
+                .code(),
+            "pointer.glide_ms"
         );
     }
 

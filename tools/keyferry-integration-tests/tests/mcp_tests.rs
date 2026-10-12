@@ -632,7 +632,7 @@ async fn batch_repeat_uses_one_command_and_rejects_bounds_before_input() {
 #[test]
 fn secure_request_requires_owner_completion_and_never_exposes_values() {
     let mut s = server();
-    s.secure_prompt = |_, _, _| Ok(json!({"outcome":"REQUESTED","input_sent":false}));
+    s.secure_prompt = |_, _, _, _| Ok(json!({"outcome":"REQUESTED","input_sent":false}));
     let definition = routine_definition(json!([
         {"type":"secure_text"},
         {"type":"expect_text","query":"{marker}","optional":true,"timeout_ms":100},
@@ -710,6 +710,163 @@ fn largest_jump(path: &[[f64; 2]]) -> f64 {
     path.windows(2)
         .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
         .fold(0.0, f64::max)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_glide_duration_reaches_daemon_for_tools_batches_and_ocr_routines() {
+    let (mut s, transport, _, task) = harness(vec![], true).await;
+    let root = s.root.clone();
+    tokio::task::spawn_blocking(move || {
+        s.library = super::super::recipe::Library {
+            local: s.root.join("local"),
+            shared: Some(s.root.join("shared")),
+        };
+        init(&mut s);
+        bind_fake(&mut s);
+        let c = AtomicBool::new(false);
+        let visual = s.frames.pointer.as_ref().unwrap().clone();
+        let reports = || visual.lock().unwrap().path.len();
+        let emitted_once = |command: &Value| {
+            assert_eq!(command["outcome"], "EMITTED", "{command}");
+            let id = uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
+            assert_eq!(transport.execution_count(id), 1);
+            assert!(!transport.is_remotely_armed());
+        };
+        s.call("screenshot", &json!({}), &c).unwrap();
+        for (name, args, count) in [
+            ("move", json!({"x":150,"y":110,"glide_ms":5000}), 120),
+            ("click", json!({"x":280,"y":200,"glide_ms":280}), 28),
+            (
+                "scroll",
+                json!({"x":60,"y":180,"dx":0,"dy":-1,"glide_ms":1000}),
+                100,
+            ),
+            (
+                "drag",
+                json!({"from_x":280,"from_y":60,"to_x":60,"to_y":200,"glide_ms":280}),
+                56,
+            ),
+        ] {
+            let before = reports();
+            let response = s
+                .dispatch(
+                    json!({"jsonrpc":"2.0","id":name,"method":"tools/call",
+                "params":{"name":name,"arguments":args}}),
+                    &c,
+                )
+                .unwrap();
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            emitted_once(&response["result"]["structuredContent"]["command"]);
+            assert_eq!(reports() - before, count, "{name} pacing reached daemon");
+        }
+        let before = reports();
+        let response = s
+            .dispatch(
+                json!({"jsonrpc":"2.0","id":"paced-batch","method":"tools/call",
+                "params":{"name":"batch","arguments":{"settle":false,"actions":[
+                    {"tool":"move","arguments":{"x":150,"y":110,"glide_ms":1000}},
+                    {"tool":"click","arguments":{"x":280,"y":200,"glide_ms":280}}
+                ]}}}),
+                &c,
+            )
+            .unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let receipts = response["result"]["structuredContent"]["actions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        for receipt in receipts {
+            emitted_once(&receipt["command"]);
+        }
+        assert_eq!(reports() - before, 128);
+
+        let definition = routine_definition(json!([
+            {"type":"click_text","query":"Safe test target","timeout_ms":100,"glide_ms":1000}
+        ]));
+        let saved = s
+            .dispatch(
+                json!({"jsonrpc":"2.0","id":"save-paced-ocr","method":"tools/call",
+            "params":{"name":"routine_save","arguments":{"definition":definition}}}),
+                &c,
+            )
+            .unwrap();
+        assert_eq!(saved["result"]["isError"], false, "{saved}");
+        let before = reports();
+        let response = s
+            .dispatch(
+                json!({"jsonrpc":"2.0","id":"run-paced-ocr","method":"tools/call",
+            "params":{"name":"routine_run","arguments":{"name":"test-flow"}}}),
+                &c,
+            )
+            .unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        emitted_once(&response["result"]["structuredContent"]["actions"][0]["receipt"]["command"]);
+        assert_eq!(
+            reports() - before,
+            100,
+            "OCR click uses the selected pacing"
+        );
+
+        let before = (reports(), transport.control_request_counts());
+        for (i, invalid) in [
+            Value::Null,
+            json!("120"),
+            json!(120.5),
+            json!(110),
+            json!(125),
+            json!(5010),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = s
+                .dispatch(
+                    json!({"jsonrpc":"2.0","id":format!("invalid-{i}"),"method":"tools/call",
+                "params":{"name":"move","arguments":{"x":150,"y":110,"glide_ms":invalid}}}),
+                    &c,
+                )
+                .unwrap();
+            assert_eq!(response["result"]["isError"], true, "{response}");
+        }
+        for (name, args) in [
+            (
+                "drag",
+                json!({"from_x":280,"from_y":60,"to_x":60,"to_y":200,"glide_ms":290}),
+            ),
+            (
+                "batch",
+                json!({"settle":false,"actions":[
+                    {"tool":"move","arguments":{"x":150,"y":110,"glide_ms":1000}},
+                    {"tool":"click","arguments":{"x":280,"y":200,"glide_ms":125}}
+                ]}),
+            ),
+            (
+                "routine_save",
+                json!({"replace":true,"definition":routine_definition(json!([
+                    {"type":"move","x":150,"y":110,"glide_ms":1000},
+                    {"type":"click_text","query":"Safe test target","timeout_ms":100,"glide_ms":125}
+                ]))}),
+            ),
+        ] {
+            let response = s
+                .dispatch(
+                    json!({"jsonrpc":"2.0","id":format!("invalid-{name}"),"method":"tools/call",
+                "params":{"name":name,"arguments":args}}),
+                    &c,
+                )
+                .unwrap();
+            assert_eq!(response["result"]["isError"], true, "{response}");
+        }
+        assert_eq!(
+            (reports(), transport.control_request_counts()),
+            before,
+            "invalid pacing sends no input"
+        );
+    })
+    .await
+    .unwrap();
+    task.abort();
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -803,13 +960,13 @@ async fn faulted_glides_never_replay_and_track_only_possible_starts() {
             let error = s
                 .call(
                     "drag",
-                    &json!({"from_x":40,"from_y":40,"to_x":290,"to_y":200,"uncalibrated":true}),
+                    &json!({"from_x":40,"from_y":40,"to_x":290,"to_y":200,"uncalibrated":true,"glide_ms":280}),
                     &c,
                 )
                 .unwrap_err();
             assert_eq!(error["code"], "command.failed_or_unknown", "{error}");
             if let Some(id) = error["command"]["command_id"].as_str() {
-                assert!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()) <= 1);
+                assert_eq!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()), usize::from(fault == SimulationFault::LostAfterStart));
             }
             assert!(!transport.is_remotely_armed());
             let path = s

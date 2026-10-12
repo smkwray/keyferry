@@ -123,21 +123,31 @@ Never save secrets in literal text, descriptions, metadata or ordinary parameter
 | `key` | `keys`: 1..14 registry names/aliases; one key taps, multiple form a chord. |
 | `type_text` | `text`: supported ASCII, 1..4096 bytes, with `{parameter}` templates. |
 | `wait` | `ms`: 1..10000, inside the input command. |
-| `move`, `click` | `x,y`: screenshot pixels 0..1279; click adds optional left/right/middle `button`, `double`. |
-| `scroll` | `x,y,dx,dy`: detents -127..127, not both zero. |
-| `drag` | `from_x,from_y,to_x,to_y`, optional `button`; glides to the start, presses, glides while held, balanced 40 ms hold. |
+| `move`, `click` | `x,y`: screenshot pixels 0..1279; optional `glide_ms`: 120..5000 in multiples of 10; click adds optional left/right/middle `button`, `double`. |
+| `scroll` | `x,y,dx,dy`: detents -127..127, not both zero; optional `glide_ms`: 120..5000 in multiples of 10. |
+| `drag` | `from_x,from_y,to_x,to_y`, optional `button`, `glide_ms`: 120..280 in multiples of 10 per leg; glides to the start, presses, glides while held, balanced 40 ms hold. |
 | `repeat` | `count`: 1..1000; `delay_ms`: 0..10000 between iterations; `steps`: 1..32 input-only leaves. No nested repeat/checkpoints. |
 | `expect_text` | Non-empty `query`, `timeout_ms`: 1..30000, optional `region`, `on_fail:stop`. `optional:true` skips only an empty optional marker. |
-| `click_text` | As above plus `button`, `double`; requires exactly one OCR match, clicks its center using calibration. |
+| `click_text` | As above plus `button`, `double`, optional `glide_ms`: 120..5000 in multiples of 10; requires exactly one OCR match, clicks its center using calibration. |
 | `wait_for_change`, `wait_for_stable` | `timeout_ms`, optional screenshot-pixel `region`, `on_fail:stop`. |
 | `secure_text` | Optional `param` naming a secure parameter; requests the owner-only dialog on this controller. No secret input or storage. |
 
-Every pointer step glides, never jumps: eased absolute reports from the presumed position to the
-target, 120-240 ms by distance, buttons and scrolls after arrival. A pointer stretch over the input
-limits splits at step boundaries into consecutive commands that stop at the first failure.
+Every pointer step glides, never jumps: eased absolute reports from the observed position to the
+target, buttons and scrolls after arrival. Omitted `glide_ms` preserves the distance-based default
+of 12..24 samples (about 120..240 ms). A higher explicit value slows the same eased path;
+`drag.glide_ms` applies separately to the approach and the held drag. The value is requested HID
+travel time: network, command/chunk neutral reports, click/hold and screen settling add latency.
+There is no saved speed preference or firmware change. For example:
 
-Numeric fields may be an exact `{integer_parameter}` template; text/query fields substitute text
-parameters within literals. Keys and regions are fixed. All unknown fields, nulls, non-integers,
+```json
+{"type":"move","x":800,"y":400,"glide_ms":1000}
+```
+
+A pointer stretch over the input limits splits at step boundaries into consecutive commands that
+stop at the first failure.
+
+Numeric fields, including `glide_ms`, may be an exact `{integer_parameter}` template; text/query
+fields substitute text parameters within literals. Keys and regions are fixed. All unknown fields, nulls, non-integers,
 unbound templates, unsupported text, malformed bounds and nested repeats reject before input.
 Validation compiles each stretch using worst-case parameter sizes/counts through the production
 input compiler (256 nodes, 4096 effects, 60 s per command, 65536-byte body). Total planned input

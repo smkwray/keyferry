@@ -361,10 +361,10 @@ accepts the risk of driving a different target or a cropped/scaled display.
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `screenshot` | optional `format` = jpeg/png | image (JPEG by default), screenshot/native geometry, frame ID/age and capture status; no file export |
-| `move` | integer `x,y`; optional `uncalibrated` | absolute move receipt |
-| `click` | `x,y`; optional `button` = left/right/middle, `double`, `uncalibrated` | move then single/double click receipt |
-| `drag` | `from_x,from_y,to_x,to_y`; optional `button`, `uncalibrated` | balanced atomic drag, 40 ms hold |
-| `scroll` | `x,y,dx,dy`; optional `uncalibrated` | integer detents, each -127..127, not both zero |
+| `move` | integer `x,y`; optional `glide_ms`, `uncalibrated` | absolute move receipt |
+| `click` | `x,y`; optional `button` = left/right/middle, `double`, `glide_ms`, `uncalibrated` | move then single/double click receipt |
+| `drag` | `from_x,from_y,to_x,to_y`; optional `button`, `glide_ms`, `uncalibrated` | balanced atomic drag, 40 ms hold |
+| `scroll` | `x,y,dx,dy`; optional `glide_ms`, `uncalibrated` | integer detents, each -127..127, not both zero |
 | `type_text` | `text` (1..4096 supported ASCII characters) | ordinary US-mapped text; unsupported characters reject |
 | `key` | `keys` (1..14 names/aliases) | tap or balanced chord through the `keyctl keys` table |
 | `wait_for_stable` | `timeout_ms` (1..30000); optional `region` | matched after at least 3 fresh frames below 0.002 mean normalized RGB difference for 300 ms; otherwise timed_out |
@@ -374,6 +374,15 @@ accepts the risk of driving a different target or a cropped/scaled display.
 | `status` | none | chosen device/source, selection reasons, authenticated state, capture errors/restarts and binding |
 | `list_devices` / `select_device` | none / exact `device` UUID | authorized inventory / choose authenticated stick and clear binding |
 | `list_capture_sources` / `select_capture_source` | none / exact `source` ID | local/remote inventory / choose capture source and clear binding |
+
+Optional `glide_ms` requests HID travel time: integer 120..5000 in multiples of 10 for
+`move`, `click` and `scroll`; 120..280 for each leg of `drag` (approach and held drag).
+Higher values slow the same eased path. Omission preserves the distance-based 12..24 samples
+(about 120..240 ms). For example, `move {"x":800,"y":400,"glide_ms":1000}`.
+Network, command/chunk neutral reports, clicks and settling add end-to-end latency.
+This is per action, with no saved speed preference or firmware change. Older installed runtimes
+may reject the field; rebuild/reinstall before relying on it. Physical qualification of this option
+remains open.
 
 A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame. Positive `dy` is
 wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject

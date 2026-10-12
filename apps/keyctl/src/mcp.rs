@@ -37,7 +37,6 @@ const ANIMATION_SAMPLE: Duration = Duration::from_millis(1100);
 // Live MCP comparison: JPEG was 32x smaller and returned 27% faster than fast PNG.
 const DEFAULT_IMAGE_FORMAT: &str = "jpeg";
 const DEFAULT_RETURN_SCREENSHOT: bool = false;
-const GLIDE_HELP: &str = " The pointer always glides (~120-240 ms, eased) from its last position; buttons press after arrival.";
 const HELP: &str = "keyctl mcp [--device UUID] [--source NAME_OR_ID]\n  Stdio MCP; screenshots/OCR stay in memory. No listener or automatic app launch.\n  Calibrate each session before pointer tools, or explicitly pass uncalibrated:true.\n  Pointer tools first need the cursor: screenshot, then calibrate with cursor_x/cursor_y.\n  Ordinary ASCII text only; secrets belong to keyctl secure-text's owner dialog.";
 
 fn options(args: &[String]) -> Result<(Option<String>, Option<String>), &'static str> {
@@ -351,7 +350,14 @@ fn tools() -> Vec<Value> {
             description.to_owned()
         };
         if pointer {
-            description.push_str(GLIDE_HELP);
+            let max_ms = if name == "drag" {
+                routines::GLIDE_DRAG_MAX_MS
+            } else {
+                routines::GLIDE_MAX_MS
+            };
+            properties["glide_ms"] = json!({"type":"integer","minimum":routines::GLIDE_MIN_MS,"maximum":max_ms,"multipleOf":routines::GLIDE_TICK_MS,
+                "description":"Optional smooth travel duration; larger is slower. Drag applies this duration to each leg. Excludes transport, chunk release, click and screen-settle time."});
+            description.push_str(&format!(" The pointer always glides with easing from its last position; buttons press after arrival. Optional glide_ms controls travel: {}..{max_ms} ms in {} ms steps; omitted keeps distance-based ~120-240 ms. Drag applies it separately to the approach and held movement.", routines::GLIDE_MIN_MS, routines::GLIDE_TICK_MS));
         }
         result.push(json!({"name":name,"description":description,"inputSchema":{"type":"object","additionalProperties":false,"properties":properties,"required":required},
             "annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":read_only,"openWorldHint":false}}));
@@ -445,6 +451,9 @@ fn validate(value: &Value, schema: &Value) -> bool {
     if let Some(n) = value.as_i64() {
         if schema["minimum"].as_i64().is_some_and(|min| n < min)
             || schema["maximum"].as_i64().is_some_and(|max| n > max)
+            || schema["multipleOf"]
+                .as_i64()
+                .is_some_and(|step| step <= 0 || n % step != 0)
         {
             return false;
         }
@@ -922,12 +931,14 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
     fn glide_command(
         &mut self,
         p: [f64; 2],
+        glide_ms: Option<u64>,
         then: Option<Value>,
         cancelled: &AtomicBool,
     ) -> Result<Value, Value> {
         self.require_position()?;
         let mut at = self.pointer;
-        let mut actions = routines::glide_to(&mut at, p);
+        let mut actions =
+            routines::glide_to(&mut at, p, glide_ms).map_err(|e| failure(e.code()))?;
         actions.extend(then);
         self.submit_tracked(actions, true, at, None, 5000, cancelled)
     }
@@ -1622,6 +1633,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                         region,
                         button,
                         double,
+                        glide_ms,
                         ..
                     } => {
                         let (check, point) =
@@ -1632,7 +1644,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
                         let p = self.point(&frame, x, y, false)?;
                         baseline = frame;
                         commands += 1;
-                        let command = self.glide_command(p, Some(json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()})), cancelled)?;
+                        let command = self.glide_command(p, *glide_ms, Some(json!({"type":if *double {"double_click"} else {"click"},"button":button.wire()})), cancelled)?;
                         Ok(json!({"check":check,"command":command}))
                     }
                     Step::SecureText { .. } => {
@@ -1871,13 +1883,13 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         {
             let aside = p.map(|v| v + (0.5 - v).signum() * 0.1);
             let before = self.frame(cancelled)?;
-            self.glide_command(aside, None, cancelled)?;
+            self.glide_command(aside, None, None, cancelled)?;
             self.observe_action(&before, mask, cancelled)?;
         }
         let before = self.frame(cancelled)?;
         // The probe glides like every agent motion; EMITTED arrives after the final report, and
         // observation then requires the moved cursor to hold still on fresh frames.
-        let mut receipt = self.glide_command(p, None, cancelled)?;
+        let mut receipt = self.glide_command(p, None, None, cancelled)?;
         let (frame, observation) = self.observe_action(&before, mask, cancelled)?;
         if observation["settled"] != true {
             return Err(failure("calibration.cursor_not_seen"));
