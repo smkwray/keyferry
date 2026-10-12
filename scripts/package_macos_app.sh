@@ -91,6 +91,8 @@ plutil -insert LSMinimumSystemVersion -string 13.0 "$plist"
 plutil -insert NSHighResolutionCapable -bool true "$plist"
 plutil -insert NSBluetoothAlwaysUsageDescription -string \
     'Keyferry uses Bluetooth to connect securely to a nearby Keyferry USB device.' "$plist"
+plutil -insert NSCameraUsageDescription -string \
+    'Keyferry uses a connected HDMI capture card to show the computer you control.' "$plist"
 
 codesign --force --deep --sign - "$bundle"
 codesign --verify --deep --strict "$bundle"

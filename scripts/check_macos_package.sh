@@ -96,6 +96,9 @@ python3 scripts/check_public_tree.py --artifact "$release" \
 usage_description=$(plutil -extract NSBluetoothAlwaysUsageDescription raw \
     "$app/Contents/Info.plist")
 [ -n "$usage_description" ]
+camera_description=$(plutil -extract NSCameraUsageDescription raw \
+    "$app/Contents/Info.plist")
+[ -n "$camera_description" ]
 
 set +e
 "$app/Contents/MacOS/keyferry-pairing" >/dev/null 2>&1
