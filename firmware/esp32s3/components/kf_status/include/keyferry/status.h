@@ -144,6 +144,54 @@ Presentation BuildPresentation(
     PresentationDensity density = PresentationDensity::kNormal) noexcept;
 Page SelectPage(const Snapshot& snapshot, std::uint64_t elapsed_ms) noexcept;
 
+// Panel care for LCD retention and OLED wear. With the screen preference on,
+// the panel is lit for kScreenAwakeMs after boot or any attention event, then
+// sleeps; while lit, the whole image steps around a small orbit.
+inline constexpr std::uint64_t kScreenAwakeMs = 60000;
+inline constexpr std::uint64_t kScreenShiftPeriodMs = 30000;
+inline constexpr int kScreenShiftPx = 2;
+
+struct PixelOffset {
+  int x{};
+  int y{};
+  friend bool operator==(PixelOffset left, PixelOffset right) noexcept {
+    return left.x == right.x && left.y == right.y;
+  }
+  friend bool operator!=(PixelOffset left, PixelOffset right) noexcept {
+    return !(left == right);
+  }
+};
+
+PixelOffset ScreenOffset(std::uint64_t elapsed_ms) noexcept;
+
+// Debounced press detection for a sampled button. Sample() returns true once
+// per press, when two consecutive samples confirm it; holding the button
+// does not repeat the press, and state persists across caller ticks.
+class ButtonPress final {
+ public:
+  bool Sample(bool down) noexcept;
+
+ private:
+  bool down_{};
+  std::uint8_t changed_samples_{};
+};
+
+class ScreenCare final {
+ public:
+  // Returns whether the panel should be lit. Attention is a requested wake
+  // or a change in what the device is doing: activity, link or USB presence.
+  // Heap figures, page cycling and other diagnostic churn do not wake it.
+  bool Update(const Snapshot& snapshot, bool wake_requested,
+              std::uint64_t now_ms) noexcept;
+
+ private:
+  bool started_{};
+  Activity activity_{};
+  LinkPath link_{};
+  bool usb_mounted_{};
+  std::uint64_t attention_ms_{};
+};
+
 // Static, metadata-only labels. This interface deliberately has no string or
 // payload field through which credentials or typed content could reach a display.
 const char* UsbLabel(bool mounted, bool suspended) noexcept;

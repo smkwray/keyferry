@@ -70,9 +70,9 @@ using keyferry::hid::PointerReport;
 
 constexpr char kTag[] = "keyferry_hil";
 #if defined(KEYFERRY_BOARD_RGB_STATUS)
-constexpr auto kRecoveryButtonGpio = keyferry::board::button_gpio;
+constexpr auto kButtonGpio = keyferry::board::button_gpio;
 #else
-constexpr auto kRecoveryButtonGpio = keyferry::board::boot_gpio;
+constexpr auto kButtonGpio = keyferry::board::boot_gpio;
 #endif
 constexpr std::uint8_t kKeyboardInterface = 0;
 constexpr std::uint8_t kProvisioningInterface = 1;
@@ -535,9 +535,11 @@ class HilRuntime final : public keyferry::transport::Delegate,
 
   void SetTransport(keyferry::transport::EspTransport* transport) { transport_ = transport; }
 
-  bool ScreenPowerDesired(keyferry::protocol::ScreenPower* output) {
-    if (output == nullptr || !Lock()) return false;
+  bool ScreenPowerDesired(keyferry::protocol::ScreenPower* output,
+                          bool* wake) {
+    if (output == nullptr || wake == nullptr || !Lock()) return false;
     *output = screen_power_.stored();
+    *wake = screen_power_.TakeWake();
     Unlock();
     return true;
   }
@@ -1063,6 +1065,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
                        display_orientation_storage_, requested));
         if (handled) {
           screen_power_.SetStored(requested);
+          if (requested == keyferry::protocol::ScreenPower::kOn) {
+            screen_power_.RequestWake();
+          }
           pending_screen_power_status_ = {
               frame.sequence, screen_power_.active(), screen_power_.stored(),
               screen_power_.available(), true};
@@ -2629,6 +2634,24 @@ struct StatusTaskContext {
       keyferry::protocol::ScreenPower::kOn};
 };
 
+bool ConfigureButton() {
+  if constexpr (!keyferry::board::capabilities.button ||
+                kButtonGpio < 0 || kButtonGpio >= GPIO_NUM_MAX) {
+    return false;
+  }
+  gpio_config_t config{};
+  config.pin_bit_mask = 1ULL << kButtonGpio;
+  config.mode = GPIO_MODE_INPUT;
+  config.pull_up_en = GPIO_PULLUP_ENABLE;
+  config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  config.intr_type = GPIO_INTR_DISABLE;
+  return gpio_config(&config) == ESP_OK;
+}
+
+bool ButtonDown() {
+  return gpio_get_level(static_cast<gpio_num_t>(kButtonGpio)) == 0;
+}
+
 void StatusTask(void* context) {
 #if defined(KEYFERRY_BOARD_RGB_STATUS)
   const auto* led_status = static_cast<const StatusTaskContext*>(context);
@@ -2683,26 +2706,55 @@ void StatusTask(void* context) {
     vTaskDelete(nullptr);
     return;
   }
-  bool screen_on = status->screen_power == keyferry::protocol::ScreenPower::kOn;
-  status->runtime->ScreenPowerApplied(status->screen_power, true);
+  // `applied` is the preference in effect; `lit` is the panel. With the
+  // preference on, the panel still sleeps between attention periods.
+  auto applied = status->screen_power;
+  bool lit = applied == keyferry::protocol::ScreenPower::kOn;
+  status->runtime->ScreenPowerApplied(applied, true);
+  const auto set_lit = [&](const bool enabled,
+                           const keyferry::protocol::ScreenPower power) {
+    if (lit != enabled) {
+      if (!display.SetEnabled(enabled)) {
+        status->runtime->ScreenPowerApplied(power, false);
+        return false;
+      }
+      lit = enabled;
+    }
+    if (applied != power) {
+      applied = power;
+      status->runtime->ScreenPowerApplied(power, true);
+    }
+    return true;
+  };
+  // Sample the button through each 250 ms tick so a short tap is not missed.
+  const bool button = ConfigureButton();
+  keyferry::status::ButtonPress button_press;
+  const auto wait_tick = [&]() {
+    bool pressed = false;
+    for (int sample = 0; sample < 10; ++sample) {
+      vTaskDelay(pdMS_TO_TICKS(25));
+      pressed = button_press.Sample(button && ButtonDown()) || pressed;
+    }
+    return pressed;
+  };
   keyferry::status::ActivityPresentationFilter activity_filter;
+  keyferry::status::ScreenCare screen_care;
+  bool wake = false;
   while (true) {
     keyferry::protocol::ScreenPower desired{};
-    if (!status->runtime->ScreenPowerDesired(&desired)) {
-      vTaskDelay(pdMS_TO_TICKS(250));
+    bool wake_requested = false;
+    if (!status->runtime->ScreenPowerDesired(&desired, &wake_requested)) {
+      wake = wait_tick() || wake;
       continue;
     }
+    wake = wake || wake_requested;
     if (desired == keyferry::protocol::ScreenPower::kOff) {
-      if (screen_on) {
-        if (!display.SetEnabled(false)) {
-          status->runtime->ScreenPowerApplied(desired, false);
-          vTaskDelete(nullptr);
-          return;
-        }
-        screen_on = false;
-        status->runtime->ScreenPowerApplied(desired, true);
+      wake = false;
+      if (!set_lit(false, desired)) {
+        vTaskDelete(nullptr);
+        return;
       }
-      vTaskDelay(pdMS_TO_TICKS(250));
+      wait_tick();
       continue;
     }
     keyferry::status::LinkPath link = keyferry::status::LinkPath::kOffline;
@@ -2774,6 +2826,16 @@ void StatusTask(void* context) {
             keyferry::status::ConnectionProgress::kBluetoothAdvertising;
       }
     }
+    if (!screen_care.Update(snapshot, wake, elapsed_ms)) {
+      wake = false;
+      if (!set_lit(false, desired)) {
+        vTaskDelete(nullptr);
+        return;
+      }
+      wake = wait_tick();
+      continue;
+    }
+    wake = false;
     const auto page = keyferry::status::SelectPage(snapshot, elapsed_ms);
     constexpr auto kPresentationDensity =
         keyferry::board::display.presentation ==
@@ -2781,25 +2843,26 @@ void StatusTask(void* context) {
             ? keyferry::status::PresentationDensity::kCompact
             : keyferry::status::PresentationDensity::kNormal;
     if (!display.Show(keyferry::status::BuildPresentation(
-            snapshot, page, kPresentationDensity))) {
+                          snapshot, page, kPresentationDensity),
+                      keyferry::status::ScreenOffset(elapsed_ms))) {
       status->runtime->ScreenPowerApplied(desired, false);
       vTaskDelete(nullptr);
       return;
     }
-    if (!screen_on) {
+    if (!lit) {
+      // Do not light a frame if the preference changed to off meanwhile.
       keyferry::protocol::ScreenPower still_desired{};
-      if (status->runtime->ScreenPowerDesired(&still_desired) &&
-          still_desired == keyferry::protocol::ScreenPower::kOn) {
-        if (!display.SetEnabled(true)) {
-          status->runtime->ScreenPowerApplied(desired, false);
-          vTaskDelete(nullptr);
-          return;
-        }
-        screen_on = true;
-        status->runtime->ScreenPowerApplied(desired, true);
+      const bool read =
+          status->runtime->ScreenPowerDesired(&still_desired, &wake);
+      if (!read || still_desired != keyferry::protocol::ScreenPower::kOn) {
+        continue;
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(250));
+    if (!set_lit(true, desired)) {
+      vTaskDelete(nullptr);
+      return;
+    }
+    wake = wait_tick() || wake;
   }
 }
 
@@ -2808,19 +2871,7 @@ bool UsbRecoveryRequested(
   if (stored_output_mode != keyferry::protocol::OutputMode::kBleHid) {
     return false;
   }
-  if constexpr (!keyferry::board::capabilities.button ||
-                kRecoveryButtonGpio < 0 ||
-                kRecoveryButtonGpio >= GPIO_NUM_MAX) {
-    ESP_LOGE(kTag, "BLE output has no usable recovery button; using USB for this boot");
-    return true;
-  }
-  gpio_config_t config{};
-  config.pin_bit_mask = 1ULL << kRecoveryButtonGpio;
-  config.mode = GPIO_MODE_INPUT;
-  config.pull_up_en = GPIO_PULLUP_ENABLE;
-  config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  config.intr_type = GPIO_INTR_DISABLE;
-  if (gpio_config(&config) != ESP_OK) {
+  if (!ConfigureButton()) {
     ESP_LOGE(kTag, "BLE output recovery button unavailable; using USB for this boot");
     return true;
   }
@@ -2830,7 +2881,7 @@ bool UsbRecoveryRequested(
   constexpr std::uint32_t kDebounceSamples = 3;
   std::uint32_t pressed_samples = 0;
   for (std::uint32_t elapsed = 0; elapsed < kWindowMs; elapsed += kPollMs) {
-    if (gpio_get_level(static_cast<gpio_num_t>(kRecoveryButtonGpio)) == 0) {
+    if (ButtonDown()) {
       ++pressed_samples;
       if (pressed_samples >= kDebounceSamples) {
         ESP_LOGW(kTag, "BOOT pressed; using USB output for this boot only");

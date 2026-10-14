@@ -130,6 +130,42 @@ Page SelectPage(const Snapshot& snapshot,
                                             : Page::kDiagnostics;
 }
 
+PixelOffset ScreenOffset(const std::uint64_t elapsed_ms) noexcept {
+  // A closed ring: each step, including the wrap, moves one axis by
+  // kScreenShiftPx, so a 1 px stroke never covers the same pixels in
+  // neighbouring positions.
+  constexpr int s = kScreenShiftPx;
+  constexpr PixelOffset kOrbit[] = {{-s, -s}, {0, -s}, {s, -s}, {s, 0},
+                                    {s, s},   {0, s},  {-s, s}, {-s, 0}};
+  constexpr std::uint64_t kSteps = sizeof(kOrbit) / sizeof(kOrbit[0]);
+  return kOrbit[(elapsed_ms / kScreenShiftPeriodMs) % kSteps];
+}
+
+bool ButtonPress::Sample(const bool down) noexcept {
+  changed_samples_ = down == down_ ? 0 : changed_samples_ + 1;
+  if (changed_samples_ < 2) {
+    return false;
+  }
+  down_ = down;
+  changed_samples_ = 0;
+  return down;
+}
+
+bool ScreenCare::Update(const Snapshot& snapshot, const bool wake_requested,
+                        const std::uint64_t now_ms) noexcept {
+  const bool changed = !started_ || snapshot.activity != activity_ ||
+                       snapshot.link != link_ ||
+                       snapshot.usb_mounted != usb_mounted_;
+  if (changed || wake_requested || now_ms < attention_ms_) {
+    attention_ms_ = now_ms;
+  }
+  started_ = true;
+  activity_ = snapshot.activity;
+  link_ = snapshot.link;
+  usb_mounted_ = snapshot.usb_mounted;
+  return now_ms - attention_ms_ < kScreenAwakeMs;
+}
+
 Presentation BuildPresentation(const Snapshot& snapshot,
                                const Page page,
                                const PresentationDensity density) noexcept {

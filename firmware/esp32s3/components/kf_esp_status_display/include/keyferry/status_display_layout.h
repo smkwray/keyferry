@@ -35,9 +35,11 @@ Glyph GlyphRows(char character) noexcept;
 bool HasGlyph(char character) noexcept;
 LineLayout LayoutFor(LineRole role, CanvasSize canvas) noexcept;
 PixelBounds BoundsFor(const Line& line, CanvasSize canvas) noexcept;
+// True when the line stays on the canvas at every ScreenOffset position.
 bool LineFits(const Line& line, CanvasSize canvas) noexcept;
 void PaintBlock(std::uint16_t* pixels, int canvas_width, int canvas_height,
                 std::size_t block_y, std::size_t block_rows,
-                const Presentation& presentation) noexcept;
+                const Presentation& presentation,
+                PixelOffset offset = {}) noexcept;
 
 }  // namespace keyferry::status::display_layout

@@ -96,6 +96,9 @@ int main() {
   assert(state.available() && state.active() == ScreenPower::kOff);
   state.Unavailable();
   assert(!state.available());
+  assert(!state.TakeWake());
+  state.RequestWake();
+  assert(state.TakeWake() && !state.TakeWake());
   storage.power = 0xff;
   power = keyferry::display_orientation::LoadPower(storage);
   assert(power.power == ScreenPower::kOn &&

@@ -20,8 +20,11 @@ namespace keyferry::status {
 class EspStatusDisplay final {
  public:
   bool Initialize(protocol::DisplayOrientation orientation, bool screen_on);
-  bool Show(const Presentation& presentation);
+  bool Show(const Presentation& presentation, PixelOffset offset = {});
   // Called only by the status task; false means hardware state is unknown.
+  // Disabled means backlight off and the controller in display-off sleep, so
+  // the panel no longer drives the last frame. Show() may repaint frame
+  // memory while disabled; enabling then wakes and lights the new frame.
   bool SetEnabled(bool enabled);
   [[nodiscard]] bool available() const noexcept { return available_; }
 
@@ -41,8 +44,9 @@ class EspStatusDisplay final {
                         std::size_t size);
   bool SendScanlines(std::size_t y, std::size_t rows);
   void PaintBlock(std::size_t y, std::size_t rows,
-                  const Presentation& presentation);
+                  const Presentation& presentation, PixelOffset offset);
   bool SetBacklight(bool enabled);
+  bool SetPanelAwake(bool awake);
   void Disable();
 
   SemaphoreHandle_t transfer_done_{nullptr};
@@ -51,9 +55,10 @@ class EspStatusDisplay final {
              static_cast<std::size_t>(board::display.width) * kRowsPerTransfer>
       scanlines_{};
   std::optional<Presentation> last_{};
+  PixelOffset last_offset_{};
   bool backlight_configured_{false};
   bool available_{false};
-  bool backlight_on_{false};
+  bool enabled_{false};
   protocol::DisplayOrientation orientation_{
       protocol::DisplayOrientation::kNormal};
 };

@@ -49,11 +49,20 @@ class PowerState final {
     available_ = true;
   }
   void Unavailable() { available_ = false; }
+  // On sleeps after an idle period; an accepted request for on, even when
+  // already stored, asks the display task to wake for a fresh period.
+  void RequestWake() { wake_requested_ = true; }
+  bool TakeWake() {
+    const bool requested = wake_requested_;
+    wake_requested_ = false;
+    return requested;
+  }
 
  private:
   protocol::ScreenPower stored_;
   protocol::ScreenPower active_{protocol::ScreenPower::kOn};
   bool available_{false};
+  bool wake_requested_{false};
 };
 
 class Storage {

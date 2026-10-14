@@ -56,7 +56,7 @@ def source_checks() -> None:
             fail(f"portable status presentation contains device detail: {forbidden}")
     require_tokens(
         DISPLAY_COMPONENT / "include" / "keyferry" / "esp_status_display.h",
-        ("bool Show(const Presentation& presentation)",),
+        ("bool Show(const Presentation& presentation, PixelOffset offset",),
     )
     manifests = sorted(BOARDS.glob("*/board.json"))
     if len(manifests) < 2:

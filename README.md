@@ -179,6 +179,9 @@ act only on that stick. Preparing another stick is separate, under **Setup & sec
 On supported firmware, **Keyboard & display** offers **Screen on** and **Screen off** for the
 selected stick. The choice survives unplugging and takes effect without restarting the stick.
 The status distinguishes a saved choice from a change the display has finished applying.
+To protect the panel, **Screen on** lights the display for 60 seconds after boot, a status change,
+a BOOT-button press or choosing **Screen on** again, then lets it sleep; the image also drifts by
+a couple of pixels while lit. **Screen off** keeps it dark.
 
 ## Command line
 

@@ -163,6 +163,12 @@ When unavailable, active power does not prove the LCD's physical state. Active m
 stored while the display task applies the new setting, so the host may read status again. Unknown
 values or lengths are protocol faults, and lost responses never trigger an automatic retry.
 
+On is attention-lit, to limit LCD retention and OLED wear: the panel lights at boot and for
+60 seconds after a change of activity, link or USB presence, a BOOT-button press, or any accepted
+`SET_SCREEN_POWER` on (also when already on); it then sleeps until the next such event. While lit,
+the image steps through a 2-pixel orbit every 30 seconds. Off keeps the panel asleep. Active power
+reports the applied preference, not whether the panel is lit at that moment.
+
 ## Targeted gateway handoff
 
 Capability `TARGETED_GATEWAY_HANDOFF_V1` (`0x00200000`) denotes the complete transaction below.

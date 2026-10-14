@@ -20,6 +20,9 @@ constexpr ledc_timer_t kBacklightTimer = LEDC_TIMER_0;
 constexpr ledc_channel_t kBacklightChannel = LEDC_CHANNEL_0;
 constexpr std::uint32_t kBacklightMaxDuty = (1U << 10U) - 1U;
 constexpr std::uint32_t kTransferTimeoutMs = 100;
+// Both controllers need 120 ms after SLPOUT or SLPIN before the opposite
+// command; the extra tick covers a partial first tick.
+const TickType_t kSleepTransitionTicks = pdMS_TO_TICKS(120) + 1;
 }  // namespace
 
 bool EspStatusDisplay::Initialize(
@@ -44,27 +47,41 @@ bool EspStatusDisplay::Initialize(
     return false;
   }
   available_ = true;
+  enabled_ = true;
   const Snapshot boot{};
   if (!Show(BuildPresentation(boot, Page::kSummary))) {
     return false;
   }
-  if (!SetBacklight(screen_on)) {
+  if (!(screen_on ? SetBacklight(true) : SetPanelAwake(false))) {
     Disable();
     return false;
   }
-  backlight_on_ = screen_on;
+  enabled_ = screen_on;
   return true;
 }
 
 bool EspStatusDisplay::SetEnabled(const bool enabled) {
   if (!available_) return false;
-  if (backlight_on_ == enabled) return true;
-  if (!SetBacklight(enabled)) {
+  if (enabled_ == enabled) return true;
+  const bool applied =
+      enabled ? SetPanelAwake(true) && SetBacklight(true)
+              : SetBacklight(false) && SetPanelAwake(false);
+  if (!applied) {
     Disable();
     return false;
   }
-  backlight_on_ = enabled;
+  enabled_ = enabled;
   return true;
+}
+
+bool EspStatusDisplay::SetPanelAwake(const bool awake) {
+  // Frame memory keeps its contents and accepts writes while asleep.
+  const bool sent = awake ? SendPanelCommand(0x11, nullptr, 0)
+                          : SendPanelCommand(0x28, nullptr, 0) &&
+                                SendPanelCommand(0x10, nullptr, 0);
+  if (!sent) return false;
+  vTaskDelay(kSleepTransitionTicks);
+  return !awake || SendPanelCommand(0x29, nullptr, 0);
 }
 
 bool EspStatusDisplay::ConfigureBacklight() {
@@ -159,7 +176,7 @@ bool EspStatusDisplay::InitializeSt7789() {
   if (!SendPanelCommand(0x11, nullptr, 0)) {
     return false;
   }
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(kSleepTransitionTicks);
 
   const std::uint8_t color_mode = 0x55;
   const std::uint8_t ram_control[] = {0x00, 0xF8};
@@ -211,7 +228,7 @@ bool EspStatusDisplay::InitializeSt7735() {
   if (!SendPanelCommand(0x11, nullptr, 0)) {
     return false;
   }
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(kSleepTransitionTicks);
 
   const std::uint8_t frame_normal[] = {0x05, 0x3A, 0x3A};
   const std::uint8_t frame_partial[] = {0x05, 0x3A, 0x3A,
@@ -264,11 +281,12 @@ bool EspStatusDisplay::SendPanelCommand(const std::uint8_t command,
          esp_lcd_panel_io_tx_param(io_, command, data, size) == ESP_OK;
 }
 
-bool EspStatusDisplay::Show(const Presentation& presentation) {
+bool EspStatusDisplay::Show(const Presentation& presentation,
+                            const PixelOffset offset) {
   if (!available_) {
     return false;
   }
-  if (last_.has_value() && *last_ == presentation) {
+  if (last_.has_value() && *last_ == presentation && last_offset_ == offset) {
     return true;
   }
   for (std::size_t y = 0;
@@ -277,7 +295,7 @@ bool EspStatusDisplay::Show(const Presentation& presentation) {
     const std::size_t rows =
         std::min(kRowsPerTransfer,
                  static_cast<std::size_t>(board::display.height) - y);
-    PaintBlock(y, rows, presentation);
+    PaintBlock(y, rows, presentation, offset);
     if (!SendScanlines(y, rows)) {
       Disable();
       ESP_LOGW(kTag, "optional status display transfer failed");
@@ -285,14 +303,17 @@ bool EspStatusDisplay::Show(const Presentation& presentation) {
     }
   }
   last_ = presentation;
+  last_offset_ = offset;
   return true;
 }
 
 void EspStatusDisplay::PaintBlock(const std::size_t y,
                                   const std::size_t rows,
-                                  const Presentation& presentation) {
+                                  const Presentation& presentation,
+                                  const PixelOffset offset) {
   display_layout::PaintBlock(scanlines_.data(), board::display.width,
-                             board::display.height, y, rows, presentation);
+                             board::display.height, y, rows, presentation,
+                             offset);
 }
 
 bool EspStatusDisplay::SendScanlines(const std::size_t y,
@@ -365,6 +386,11 @@ bool EspStatusDisplay::SetBacklight(const bool enabled) {
 
 void EspStatusDisplay::Disable() {
   SetBacklight(false);
+  // Best effort: stop driving the last frame if the bus still works. The
+  // delay keeps SLPIN clear of a SLPOUT that may have just been sent.
+  vTaskDelay(kSleepTransitionTicks);
+  SendPanelCommand(0x28, nullptr, 0);
+  SendPanelCommand(0x10, nullptr, 0);
   available_ = false;
 }
 

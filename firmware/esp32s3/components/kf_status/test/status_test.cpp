@@ -326,6 +326,123 @@ int main(const int argc, char** argv) {
     }
   }
 
+  // The orbit stays within kScreenShiftPx, visits every position before
+  // repeating, and moves one axis at a time, including the wrap.
+  constexpr std::uint64_t kOrbitSteps = 8;
+  {
+    std::vector<PixelOffset> seen;
+    for (std::uint64_t step = 0; step < kOrbitSteps; ++step) {
+      const PixelOffset offset = ScreenOffset(step * kScreenShiftPeriodMs);
+      assert(offset.x >= -kScreenShiftPx && offset.x <= kScreenShiftPx);
+      assert(offset.y >= -kScreenShiftPx && offset.y <= kScreenShiftPx);
+      assert(std::find(seen.begin(), seen.end(), offset) == seen.end());
+      seen.push_back(offset);
+      assert(ScreenOffset(step * kScreenShiftPeriodMs +
+                          kScreenShiftPeriodMs - 1) == offset);
+    }
+    assert(ScreenOffset(kOrbitSteps * kScreenShiftPeriodMs) == seen.front());
+    for (std::size_t index = 0; index < seen.size(); ++index) {
+      const PixelOffset previous = seen[(index + seen.size() - 1) % seen.size()];
+      assert((seen[index].x == previous.x) != (seen[index].y == previous.y));
+    }
+  }
+
+  // Every orbit position paints the same pixel count: nothing is clipped.
+  for (const CanvasSize canvas : {kWaveshareCanvas, kLilygoCanvas}) {
+    const auto lit_pixels = [&canvas](const Presentation& presentation,
+                                      const PixelOffset offset) {
+      std::vector<std::uint16_t> pixels(
+          static_cast<std::size_t>(canvas.width) * canvas.height);
+      PaintBlock(pixels.data(), canvas.width, canvas.height, 0,
+                 static_cast<std::size_t>(canvas.height), presentation,
+                 offset);
+      return std::count_if(pixels.begin(), pixels.end(),
+                           [](const std::uint16_t pixel) { return pixel != 0; });
+    };
+    const Presentation widest =
+        canvas.width == kLilygoCanvas.width ? maximum_compact_diagnostics
+                                            : maximum_diagnostics;
+    for (const Presentation& presentation : {summary, widest}) {
+      const auto centered = lit_pixels(presentation, {});
+      for (std::uint64_t step = 0; step < kOrbitSteps; ++step) {
+        assert(lit_pixels(presentation,
+                          ScreenOffset(step * kScreenShiftPeriodMs)) ==
+               centered);
+      }
+    }
+  }
+
+  {
+    ScreenCare care;
+    Snapshot idle = ready;
+    // Boot is attention; steady state then times out.
+    assert(care.Update(idle, false, 1000));
+    assert(care.Update(idle, false, 1000 + kScreenAwakeMs - 1));
+    assert(!care.Update(idle, false, 1000 + kScreenAwakeMs));
+    // Diagnostic churn does not wake the panel.
+    Snapshot churn = idle;
+    churn.free_internal_heap = 1234;
+    churn.transport_running = !idle.transport_running;
+    churn.usb_suspended = true;
+    churn.connection = ConnectionProgress::kWifiJoining;
+    assert(!care.Update(churn, false, 2 * kScreenAwakeMs));
+    // A requested wake lights it for a full period.
+    assert(care.Update(churn, true, 3 * kScreenAwakeMs));
+    assert(care.Update(churn, false, 4 * kScreenAwakeMs - 1));
+    assert(!care.Update(churn, false, 4 * kScreenAwakeMs));
+    // Activity, link and USB presence changes are attention.
+    Snapshot typing = churn;
+    typing.activity = Activity::kActive;
+    assert(care.Update(typing, false, 5 * kScreenAwakeMs));
+    assert(!care.Update(typing, false, 6 * kScreenAwakeMs));
+    typing.link = LinkPath::kBluetooth;
+    assert(care.Update(typing, false, 7 * kScreenAwakeMs));
+    assert(!care.Update(typing, false, 8 * kScreenAwakeMs));
+    typing.usb_mounted = !typing.usb_mounted;
+    assert(care.Update(typing, false, 9 * kScreenAwakeMs));
+    // A regressed clock restarts the period rather than wrapping.
+    assert(care.Update(typing, false, 1));
+    assert(!care.Update(typing, false, 1 + kScreenAwakeMs));
+  }
+
+  {
+    // One wake per debounced press; a long hold does not keep waking, and a
+    // press spanning the caller's tick boundary is still seen once.
+    ButtonPress press;
+    assert(!press.Sample(false));
+    assert(!press.Sample(true));
+    assert(press.Sample(true));
+    for (int sample = 0; sample < 4000; ++sample) {
+      assert(!press.Sample(true));
+    }
+    assert(!press.Sample(false));
+    assert(!press.Sample(false));
+    // A one-sample glitch is ignored.
+    assert(!press.Sample(true));
+    assert(!press.Sample(false));
+    assert(!press.Sample(false));
+    assert(!press.Sample(true));
+    assert(press.Sample(true));
+    // A one-sample release while held does not produce a second press.
+    assert(!press.Sample(false));
+    assert(!press.Sample(true));
+    assert(!press.Sample(true));
+
+    // A held button cannot defeat the idle timeout.
+    ScreenCare care;
+    ButtonPress held;
+    bool wake = false;
+    std::uint64_t now = 0;
+    for (; now < 3 * kScreenAwakeMs; now += 25) {
+      wake = held.Sample(true) || wake;
+      if (now % 250 == 0) {
+        care.Update(ready, wake, now);
+        wake = false;
+      }
+    }
+    assert(!care.Update(ready, false, now));
+  }
+
   assert(HasGlyph('-'));
   assert(HasGlyph('.'));
   assert(HasGlyph(':'));

@@ -167,15 +167,15 @@ LineLayout LayoutFor(const LineRole role, const CanvasSize canvas) noexcept {
     case LineRole::kBuild:
       return {12, 119, 1};
     case LineRole::kDiagnosticHeader:
-      return {12, 8, 1};
+      return {10, 8, 1};
     case LineRole::kTransport:
-      return {12, 29, 1};
+      return {10, 29, 1};
     case LineRole::kWifi:
-      return {12, 50, 1};
+      return {10, 50, 1};
     case LineRole::kBluetooth:
-      return {12, 71, 1};
+      return {10, 71, 1};
     case LineRole::kHeap:
-      return {12, 99, 1};
+      return {10, 99, 1};
   }
   return {0, 0, 1};
 }
@@ -197,14 +197,16 @@ PixelBounds BoundsFor(const Line& line, const CanvasSize canvas) noexcept {
 
 bool LineFits(const Line& line, const CanvasSize canvas) noexcept {
   const PixelBounds bounds = BoundsFor(line, canvas);
-  return bounds.left >= 0 && bounds.top >= 0 &&
-         bounds.right <= canvas.width && bounds.bottom <= canvas.height;
+  return bounds.left >= kScreenShiftPx && bounds.top >= kScreenShiftPx &&
+         bounds.right + kScreenShiftPx <= canvas.width &&
+         bounds.bottom + kScreenShiftPx <= canvas.height;
 }
 
 void PaintBlock(std::uint16_t* pixels, const int canvas_width,
                 const int canvas_height, const std::size_t block_y,
                 const std::size_t block_rows,
-                const Presentation& presentation) noexcept {
+                const Presentation& presentation,
+                const PixelOffset offset) noexcept {
   if (pixels == nullptr || canvas_width <= 0 || canvas_height <= 0 ||
       block_rows == 0 ||
       block_y + block_rows > static_cast<std::size_t>(canvas_height)) {
@@ -212,15 +214,18 @@ void PaintBlock(std::uint16_t* pixels, const int canvas_width,
   }
   std::fill(pixels, pixels + block_rows * canvas_width, kBackgroundColor);
   const std::uint16_t accent = AccentColor(presentation.activity());
+  const int bar_x = std::clamp(kScreenShiftPx + offset.x, 0, canvas_width - 2);
   for (std::size_t row = 0; row < block_rows; ++row) {
-    pixels[row * canvas_width] = accent;
-    pixels[row * canvas_width + 1] = accent;
+    pixels[row * canvas_width + bar_x] = accent;
+    pixels[row * canvas_width + bar_x + 1] = accent;
   }
   const CanvasSize canvas{canvas_width, canvas_height};
   for (std::size_t index = 0; index < presentation.line_count(); ++index) {
     const Line& line = presentation.line(index);
-    PaintText(pixels, block_y, block_rows, LayoutFor(line.role, canvas),
-              canvas_width,
+    LineLayout layout = LayoutFor(line.role, canvas);
+    layout.x += offset.x;
+    layout.y += offset.y;
+    PaintText(pixels, block_y, block_rows, layout, canvas_width,
               ToneColor(line.tone, presentation.activity()), line.text.data());
   }
 }
