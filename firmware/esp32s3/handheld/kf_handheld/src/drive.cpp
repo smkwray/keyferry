@@ -467,7 +467,7 @@ bool CreateImage(std::uint64_t bytes) {
   char final_path[64] = {};
   char temp_path[64] = {};
   char name[16] = {};
-  FIL file;
+  FIL file{};  // zeroed: with dynamic buffers f_open() writes into any non-null file.buf
   bool opened = false;
   for (int n = 1; n < 100 && !opened && !Cancelled(); ++n) {
     std::snprintf(name, sizeof(name), "DRIVE%d.IMG", n);
@@ -612,7 +612,7 @@ bool DriveExport(int index, bool writable) {
   MarkerPath(g_marker, sizeof(g_marker), drive.name);
   if (writable) {
     // Recorded before the computer can write; fail closed unless it is fully on the card.
-    FIL marker;
+    FIL marker{};  // zeroed, as in CreateImage()
     UINT moved = 0;
     const bool opened = f_open(&marker, g_marker, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK;
     const bool wrote = opened && f_write(&marker, "1", 1, &moved) == FR_OK && moved == 1;
