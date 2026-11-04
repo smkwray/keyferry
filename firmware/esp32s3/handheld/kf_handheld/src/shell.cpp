@@ -140,17 +140,28 @@ constexpr std::uint32_t kFlightMagic = 0x4B46464C;
 RTC_NOINIT_ATTR FlightLog g_flight;
 vprintf_like_t g_console_vprintf = nullptr;
 
+portMUX_TYPE g_flight_lock = portMUX_INITIALIZER_UNLOCKED;
+
 int FlightVprintf(const char* format, va_list args) {
   va_list copy;
   va_copy(copy, args);
   char line[160];
   const int n = vsnprintf(line, sizeof(line), format, copy);
   va_end(copy);
-  if (n > 0 && g_flight.magic == kFlightMagic) {
+  if (n > 0) {
+    // ESP-IDF may call this from several tasks at once: the bounds check, copy and length update
+    // form one critical section (formatting above and the console write below stay outside).
     const std::uint32_t take = std::min<std::uint32_t>(static_cast<std::uint32_t>(n), sizeof(line) - 1);
-    if (g_flight.length + take > sizeof(g_flight.text)) g_flight.length = 0;  // wrap: keep newest
-    std::memcpy(g_flight.text + g_flight.length, line, take);
-    g_flight.length += take;
+    taskENTER_CRITICAL(&g_flight_lock);
+    if (g_flight.magic == kFlightMagic) {
+      if (g_flight.length > sizeof(g_flight.text) ||
+          g_flight.length + take > sizeof(g_flight.text)) {
+        g_flight.length = 0;  // wrap: keep newest
+      }
+      std::memcpy(g_flight.text + g_flight.length, line, take);
+      g_flight.length += take;
+    }
+    taskEXIT_CRITICAL(&g_flight_lock);
   }
   return g_console_vprintf != nullptr ? g_console_vprintf(format, args) : n;
 }
@@ -843,7 +854,7 @@ void StartUi() {
     ESP_LOGE(kTag, "display start failed");
     return;
   }
-  if (g_function != Function::kKeyferry) PmuInit();
+  PmuInit();  // key-event latching and measurement only; PWR blanks/wakes in every function
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
   bsp_display_lock(0);
   BuildUi();
