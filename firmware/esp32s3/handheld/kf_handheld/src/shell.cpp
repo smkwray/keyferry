@@ -148,13 +148,13 @@ void StartFlightLog(bool keep_previous) {
 }
 
 #if defined(KEYFERRY_HANDHELD_SELFTEST)
-// Bench self-test: Home launches Keep Awake, which starts, runs 70 s and returns, kRounds times.
+// Bench self-test: Home launches Keep Awake, which starts, nudges once, runs 20 s and returns.
 struct SelfTest {
   std::uint32_t magic;
   std::uint32_t round;
 };
 constexpr std::uint32_t kSelfTestMagic = 0x4B465354;
-constexpr std::uint32_t kSelfTestRounds = 2;
+constexpr std::uint32_t kSelfTestRounds = 10;
 RTC_NOINIT_ATTR SelfTest g_selftest;
 #endif
 
@@ -609,7 +609,7 @@ void Supervise(void*) {
         KeepAwakeStateNow() == KeepAwakeState::kReady && KeepAwakeUsbMounted()) {
       KeepAwakeSetRunning(true);
     }
-    if (seconds >= 75) {
+    if (seconds >= 20) {
       ESP_LOGI(kTag, "selftest: leaving Keep Awake");
       KeepAwakeSetRunning(false);
       Launch(Function::kHome);
