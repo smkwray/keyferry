@@ -48,9 +48,10 @@ constexpr char kBrightnessKey[] = "bright";
 constexpr char kStartKey[] = "start";       // 1: power-up starts Keyferry
 constexpr char kHostKey[] = "host";         // macros::Host for Macros shortcuts
 constexpr char kMacroPageKey[] = "mpage";   // last Macros page shown
+constexpr char kAwakeKey[] = "kadur";       // Keep Awake timer, index into ui::kKeepAwakeMinutes
+constexpr char kBlankKey[] = "blank";       // screen off after, index into ui::kScreenOffSeconds
 constexpr int kDefaultBrightness = 60;
 constexpr int kMinBrightness = 5;
-constexpr std::uint32_t kBlankAfterMs = 20000;
 constexpr std::int64_t kBootLongHoldUs = 2000000;
 constexpr std::int64_t kNoticeUs = 2500000;
 constexpr gpio_num_t kBootGpio = GPIO_NUM_0;
@@ -237,6 +238,8 @@ KeyferryHooks g_keyferry{};
 std::atomic<bool> g_leaving{false};
 i2c_master_dev_handle_t g_pmu = nullptr;
 int g_brightness = kDefaultBrightness;
+int g_awake_duration = 1;  // index into ui::kKeepAwakeMinutes
+int g_screen_off = 1;      // index into ui::kScreenOffSeconds
 macros::Host g_host = macros::Host::kWindows;
 bool g_blanked = false;
 bool g_boot_down = false;
@@ -257,7 +260,7 @@ bool UsbFunction() { return g_function == Function::kKeepAwake || g_function == 
 // Stops any input a handheld USB function is producing; safe from any task. For Macros it is
 // final for this boot: the only way on is the exit worker's restart.
 void StopInput() {
-  if (g_function == Function::kKeepAwake) KeepAwakeSetRunning(false);
+  if (g_function == Function::kKeepAwake) KeepAwakeStop();
   if (g_function == Function::kMacros) MacroPadClose();
 }
 
@@ -389,6 +392,17 @@ bool LoadStartInKeyferry() {
 #endif
 }
 
+// An index into one of the UI's choice tables; out of range gives `fallback`.
+int LoadChoice(const char* key, int count, int fallback) {
+  const int value = LoadSetting(key, static_cast<std::uint8_t>(fallback));
+  return value < count ? value : fallback;
+}
+
+void LoadDisplaySettings() {
+  g_brightness = LoadBrightness();
+  g_screen_off = LoadChoice(kBlankKey, ui::kScreenOffChoices, 1);
+}
+
 macros::Host LoadHost() {
   return LoadSetting(kHostKey, 0) == static_cast<std::uint8_t>(macros::Host::kMac) ? macros::Host::kMac
                                                                                    : macros::Host::kWindows;
@@ -504,7 +518,22 @@ void OnAction(ui::Action action, int value) {
       }
       break;
     case ui::Action::kTouch: ESP_LOGI(kTag, "touch %d %d", value >> 16, value & 0xFFFF); break;
-    case ui::Action::kKeepAwakeToggle: KeepAwakeSetRunning(!KeepAwakeRunning()); break;
+    case ui::Action::kKeepAwakeToggle:
+      if (KeepAwakeRunning()) {
+        KeepAwakeStop();
+      } else {
+        KeepAwakeStart(ui::kKeepAwakeMinutes[g_awake_duration] * 60);
+      }
+      break;
+    case ui::Action::kKeepAwakeDuration:
+      g_awake_duration = value;
+      StoreSetting(kAwakeKey, static_cast<std::uint8_t>(value));
+      KeepAwakeSetTimer(ui::kKeepAwakeMinutes[value] * 60);  // a running timer restarts from now
+      break;
+    case ui::Action::kScreenOff:
+      g_screen_off = value;
+      StoreSetting(kBlankKey, static_cast<std::uint8_t>(value));
+      break;
     case ui::Action::kBrightness:
       g_brightness = value;
       bsp_display_brightness_set(g_brightness);
@@ -529,6 +558,7 @@ void OnAction(ui::Action action, int value) {
 const char* KeepAwakeText(KeepAwakeState state) {
   switch (state) {
     case KeepAwakeState::kRunning: return "Running";
+    case KeepAwakeState::kFinished: return "Done: timer ended";
     case KeepAwakeState::kStoppedUnplugged: return "Stopped: unplugged";
     case KeepAwakeState::kStoppedSuspended: return "Stopped: computer slept";
     case KeepAwakeState::kStoppedUnconfirmed: return "Stopped: not confirmed";
@@ -541,11 +571,14 @@ void RefreshKeepAwake() {
   const KeepAwakeState state = KeepAwakeStateNow();
   view.state = KeepAwakeText(state);
   view.running = KeepAwakeRunning();
-  view.stopped_by_fault = state != KeepAwakeState::kReady && state != KeepAwakeState::kRunning;
+  view.stopped_by_fault = state != KeepAwakeState::kReady && state != KeepAwakeState::kRunning &&
+                          state != KeepAwakeState::kFinished;
   view.usb = UsbHidMounted();
   view.nudges = KeepAwakeNudges();
   view.seconds_to_next = KeepAwakeSecondsToNext();
   view.interval_seconds = kKeepAwakeIntervalSeconds;
+  view.seconds_left = KeepAwakeSecondsLeft();
+  view.timer_seconds = KeepAwakeTimerSeconds();
   ui::RefreshKeepAwake(view);
 }
 
@@ -594,38 +627,35 @@ const char* ChargeText(int direction) {
 }
 
 void RefreshCheck() {
-  char buttons[64];
-  char power[96];
-  char storage[80];
-  char memory[96];
-  std::snprintf(buttons, sizeof(buttons), "BOOT %s   PWR %" PRIu32 " short, %" PRIu32 " long",
-                g_boot_down ? "DOWN" : "up", g_pwr_short_count, g_pwr_long_count);
+  char buttons[48];
+  char power[48];
+  char storage[48];
+  char memory[48];
+  std::snprintf(buttons, sizeof(buttons), "BOOT %s " LV_SYMBOL_BULLET " PWR %" PRIu32 "x",
+                g_boot_down ? "down" : "up", g_pwr_short_count);
   const PowerStatus status = ReadPower();
   if (!status.readable) {
-    std::snprintf(power, sizeof(power), "Power chip: not readable");
+    std::snprintf(power, sizeof(power), "Power chip not readable");
   } else if (!status.battery_present) {
-    std::snprintf(power, sizeof(power), "USB power: %s\nBattery: none", status.vbus_good ? "yes" : "no");
+    std::snprintf(power, sizeof(power), "%s, no battery", status.vbus_good ? "USB" : "No USB");
   } else {
-    std::snprintf(power, sizeof(power), "USB power: %s\nBattery: %d mV, %d%%, %s",
-                  status.vbus_good ? "yes" : "no", status.battery_mv, status.battery_percent,
+    std::snprintf(power, sizeof(power), "Battery %d%%, %s", status.battery_percent,
                   ChargeText(status.charge_direction));
   }
   switch (g_sd_state) {
     case SdState::kUnchecked:
-    case SdState::kChecking: std::snprintf(storage, sizeof(storage), "SD card: checking..."); break;
+    case SdState::kChecking: std::snprintf(storage, sizeof(storage), "Checking..."); break;
     case SdState::kMounted:
-      std::snprintf(storage, sizeof(storage), "SD card: %" PRIu32 ".%" PRIu32 " GB, FAT",
+      std::snprintf(storage, sizeof(storage), "%" PRIu32 ".%" PRIu32 " GB, FAT",
                     static_cast<std::uint32_t>(g_sd_bytes / 1000000000ULL),
                     static_cast<std::uint32_t>(g_sd_bytes / 100000000ULL % 10));
       break;
-    case SdState::kFailed:
-      std::snprintf(storage, sizeof(storage), "SD card: not mounted\n(%s)", esp_err_to_name(g_sd_error));
-      break;
+    case SdState::kFailed: std::snprintf(storage, sizeof(storage), "Not mounted"); break;
   }
-  std::snprintf(memory, sizeof(memory), "RAM %u KiB free (%u KiB block)\nPSRAM %u KiB free",
+  const unsigned psram_tenths = static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) * 10 >> 20);
+  std::snprintf(memory, sizeof(memory), "%uK RAM " LV_SYMBOL_BULLET " %u.%uM PSRAM",
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10),
-                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) >> 10),
-                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10));
+                psram_tenths / 10, psram_tenths % 10);
   ui::RefreshCheck(ui::CheckView{buttons, power, storage, memory});
 }
 
@@ -714,7 +744,8 @@ void OnTick(lv_timer_t*) {
     }
   }
 
-  if (!g_blanked && lv_display_get_inactive_time(nullptr) >= kBlankAfterMs) Blank();
+  const std::uint32_t blank_after_ms = ui::kScreenOffSeconds[g_screen_off] * 1000U;
+  if (!g_blanked && lv_display_get_inactive_time(nullptr) >= blank_after_ms) Blank();
 }
 
 void OnRenderReady(lv_event_t*) { g_renders.fetch_add(1); }
@@ -770,11 +801,11 @@ void Supervise(void*) {
   if (g_function == Function::kKeepAwake) {
     if (seconds >= 4 && !KeepAwakeRunning() && KeepAwakeNudges() == 0 &&
         KeepAwakeStateNow() == KeepAwakeState::kReady && UsbHidMounted()) {
-      KeepAwakeSetRunning(true);
+      KeepAwakeStart(0);
     }
     if (seconds >= 20) {
       ESP_LOGI(kTag, "selftest: leaving Keep Awake");
-      KeepAwakeSetRunning(false);
+      KeepAwakeStop();
       Launch(Function::kHome);
     }
   }
@@ -848,6 +879,8 @@ void StartUi() {
   config.min_brightness = kMinBrightness;
   config.start_in_keyferry = LoadStartInKeyferry();
   config.host = g_host;
+  config.keep_awake_duration = g_awake_duration;
+  config.screen_off = g_screen_off;
   config.macro_page = LoadSetting(kMacroPageKey, 0);
   config.action = OnAction;
   bsp_display_lock(0);
@@ -866,7 +899,7 @@ void StartKeyferryShell(const KeyferryHooks& hooks) {
   if (g_exit_worker == nullptr && g_keyferry.begin_leave != nullptr) {
     g_keyferry.begin_leave(g_keyferry.context);  // no way to leave cleanly: stop input now
   }
-  g_brightness = LoadBrightness();  // the bridge has already initialized NVS
+  LoadDisplaySettings();  // the bridge has already initialized NVS
   StartUi();
 }
 
@@ -917,8 +950,9 @@ void RunShellUnlessKeyferry() {
     usb_serial_jtag_ll_phy_enable_external(false);
   }
   if (nvs != ESP_OK) ESP_LOGE(kTag, "NVS unavailable (%s); settings will not persist", esp_err_to_name(nvs));
-  g_brightness = LoadBrightness();
+  LoadDisplaySettings();
   g_host = LoadHost();
+  g_awake_duration = LoadChoice(kAwakeKey, ui::kKeepAwakeChoices, 1);
   StartUi();
   const PowerStatus power = ReadPower();
   ESP_LOGI(kTag, "shell ready: pmu=%d vbus=%d battery=%d mv=%d pct=%d charge=%d internal_free=%u largest=%u",

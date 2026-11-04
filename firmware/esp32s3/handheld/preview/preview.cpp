@@ -27,7 +27,8 @@ void Settle() {
 }
 
 const char* const kScenes[] = {
-    "home", "check", "settings", "keep-awake", "keep-awake-running", "macros-0", "macros-1",
+    "home", "check", "settings", "keep-awake", "keep-awake-timer", "keep-awake-always",
+    "keep-awake-done", "macros-0", "macros-1",
     "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
     "keyferry",
 };
@@ -44,8 +45,8 @@ bool Scene(const char* name) {
   } else if (std::strcmp(name, "check") == 0) {
     ui::Build(config, ui::Screen::kHome);
     ui::Show(ui::Screen::kCheck);
-    ui::RefreshCheck(ui::CheckView{"BOOT up   PWR 2 short, 0 long", "USB power: yes\nBattery: none",
-                                   "SD card: 14.8 GB, FAT", "RAM 328 KiB free (256 KiB block)\nPSRAM 8136 KiB free"});
+    ui::RefreshCheck(ui::CheckView{"BOOT up " LV_SYMBOL_BULLET " PWR pressed 2x", "USB, no battery",
+                                   "14.8 GB, FAT", "328K RAM " LV_SYMBOL_BULLET " 7.9M PSRAM"});
   } else if (std::strcmp(name, "settings") == 0) {
     ui::Build(config, ui::Screen::kHome);
     ui::Show(ui::Screen::kSettings);
@@ -55,14 +56,19 @@ bool Scene(const char* name) {
     view.state = "Ready";
     view.usb = true;
     ui::RefreshKeepAwake(view);
-  } else if (std::strcmp(name, "keep-awake-running") == 0) {
+  } else if (std::strncmp(name, "keep-awake-", 11) == 0) {
+    const bool always = std::strcmp(name, "keep-awake-always") == 0;
+    const bool done = std::strcmp(name, "keep-awake-done") == 0;
+    config.keep_awake_duration = always ? 3 : 1;
     ui::Build(config, ui::Screen::kKeepAwake);
     ui::KeepAwakeView view;
-    view.state = "Running";
-    view.running = true;
+    view.state = done ? "Done: timer ended" : "Running";
+    view.running = !done;
     view.usb = true;
-    view.nudges = 34;
-    view.seconds_to_next = 12;
+    view.nudges = done ? 144 : 34;
+    view.seconds_to_next = done ? -1 : 12;
+    view.seconds_left = always || done ? -1 : 2592;
+    view.timer_seconds = always || done ? 0 : 3600;
     ui::RefreshKeepAwake(view);
   } else if (std::strncmp(name, "macros-", 7) == 0) {
     config.macro_page = name[7] - '0';

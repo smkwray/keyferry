@@ -2,6 +2,7 @@
 // actions out, and the host preview (scripts/preview_handheld.py) renders this same code.
 #pragma once
 #include <cstdint>
+#include <iterator>
 
 #include "lvgl.h"
 #include "macros.h"
@@ -11,29 +12,39 @@ namespace keyferry::handheld::ui {
 constexpr int kWidth = 368;
 constexpr int kHeight = 448;
 
+// Choices the screens offer; the shell applies them by the same index.
+inline constexpr int kKeepAwakeMinutes[] = {30, 60, 120, 0};  // 0: until stopped
+inline constexpr int kScreenOffSeconds[] = {15, 30, 60, 120, 300};
+constexpr int kKeepAwakeChoices = static_cast<int>(std::size(kKeepAwakeMinutes));
+constexpr int kScreenOffChoices = static_cast<int>(std::size(kScreenOffSeconds));
+
 enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry };
 
 enum class Action : std::uint8_t {
   kLaunchKeyferry,
   kLaunchKeepAwake,
   kLaunchMacros,
-  kLeave,             // Home from inside a function
-  kWake,              // a touch on the blanked panel
-  kShown,             // value: Screen
-  kTouch,             // Board Check touch, value: x << 16 | y
+  kLeave,               // Home from inside a function
+  kWake,                // a touch on the blanked panel
+  kShown,               // value: Screen
+  kTouch,               // Board Check touch, value: x << 16 | y
   kKeepAwakeToggle,
-  kBrightness,        // value: percent, while it changes
-  kBrightnessCommit,  // value: percent, to store
-  kStartInKeyferry,   // value: 0 or 1
-  kMacroHost,         // value: macros::Host
-  kRunMacro,          // value: page << 8 | index
-  kMacroPage,         // value: page now showing
+  kKeepAwakeDuration,   // value: index into kKeepAwakeMinutes
+  kBrightness,          // value: percent, while it changes
+  kBrightnessCommit,    // value: percent, to store
+  kScreenOff,           // value: index into kScreenOffSeconds
+  kStartInKeyferry,     // value: 0 or 1
+  kMacroHost,           // value: macros::Host
+  kRunMacro,            // value: page << 8 | index
+  kMacroPage,           // value: page now showing
 };
 
 struct Config {
   bool keyferry = false;  // bridge linked: Keyferry tile and the Start in Keyferry row
   int brightness = 60;
   int min_brightness = 5;
+  int screen_off = 1;           // index into kScreenOffSeconds
+  int keep_awake_duration = 1;  // index into kKeepAwakeMinutes
   bool start_in_keyferry = false;
   macros::Host host = macros::Host::kWindows;
   int macro_page = 0;
@@ -53,6 +64,7 @@ struct HomeView {
 };
 void RefreshHome(const HomeView& view);
 
+// One short line each (about 24 characters fit).
 struct CheckView {
   const char* buttons;
   const char* power;
@@ -62,19 +74,21 @@ struct CheckView {
 void RefreshCheck(const CheckView& view);
 
 struct KeepAwakeView {
-  const char* state;  // "Ready", "Running", "Stopped: ..."
+  const char* state;  // "Ready", "Running", "Done", "Stopped: ..."
   bool running = false;
   bool stopped_by_fault = false;
   bool usb = false;
   std::uint32_t nudges = 0;
-  int seconds_to_next = -1;
+  int seconds_to_next = -1;   // next nudge, while running
   int interval_seconds = 25;
+  int seconds_left = -1;      // timer, while running; -1: until stopped
+  int timer_seconds = 0;      // the running timer's full length; 0: until stopped
 };
 void RefreshKeepAwake(const KeepAwakeView& view);
 
 struct MacrosView {
   bool usb = false;
-  int busy = -1;              // page << 8 | index while a macro plays
+  int busy = -1;                 // page << 8 | index while a macro plays
   const char* notice = nullptr;  // short result, shown under the title for a moment
   bool notice_is_error = false;
 };

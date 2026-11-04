@@ -1,5 +1,6 @@
 // Keep Awake (ADR 0018): a standalone relative mouse that, after an explicit local Start, sends a
-// (+1, 0) then (-1, 0) pair every 25 s. Stops on unplug, suspend or an unconfirmed report.
+// (+1, 0) then (-1, 0) pair every 25 s. Stops when its timer runs out, and on unplug, suspend or
+// an unconfirmed report.
 #include "keep_awake.h"
 
 #include <atomic>
@@ -21,6 +22,13 @@ std::atomic<bool> g_running{false};
 std::atomic<KeepAwakeState> g_state{KeepAwakeState::kReady};
 std::atomic<std::uint32_t> g_nudges{0};
 std::atomic<std::int64_t> g_next_due{0};  // 0: the next nudge is due now
+std::atomic<std::int64_t> g_deadline{0};  // 0: until stopped
+std::atomic<int> g_timer_seconds{0};
+
+void SetDeadline(int seconds) {
+  g_timer_seconds.store(seconds > 0 ? seconds : 0);
+  g_deadline.store(seconds > 0 ? esp_timer_get_time() + seconds * 1000000LL : 0);
+}
 
 bool Nudge(std::int8_t dx) {
   hid_mouse_report_t report{};
@@ -40,6 +48,11 @@ void NudgeTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(50));
     if (!g_running.load()) {
       g_next_due.store(0);
+      continue;
+    }
+    const std::int64_t deadline = g_deadline.load();
+    if (deadline != 0 && esp_timer_get_time() >= deadline) {
+      StopWith(KeepAwakeState::kFinished);
       continue;
     }
     if (!UsbHidMounted()) {
@@ -72,19 +85,35 @@ bool KeepAwakeStartUsb() {
   return xTaskCreate(NudgeTask, "kf_keep_awake", 3072, nullptr, 4, nullptr) == pdPASS;
 }
 
-void KeepAwakeSetRunning(bool running) {
-  if (running) {
-    g_state.store(KeepAwakeState::kRunning);
-    g_running.store(true);
-    ESP_LOGI(kTag, "started");
-  } else if (g_running.load()) {
-    StopWith(KeepAwakeState::kReady);
-  }
+void KeepAwakeStart(int seconds) {
+  SetDeadline(seconds);
+  g_state.store(KeepAwakeState::kRunning);
+  g_running.store(true);
+  ESP_LOGI(kTag, "started: timer=%d s", seconds);
+}
+
+void KeepAwakeSetTimer(int seconds) {
+  if (!g_running.load()) return;
+  SetDeadline(seconds);
+  ESP_LOGI(kTag, "timer=%d s", seconds);
+}
+
+void KeepAwakeStop() {
+  if (g_running.load()) StopWith(KeepAwakeState::kReady);
 }
 
 bool KeepAwakeRunning() { return g_running.load(); }
 KeepAwakeState KeepAwakeStateNow() { return g_state.load(); }
 std::uint32_t KeepAwakeNudges() { return g_nudges.load(); }
+
+int KeepAwakeSecondsLeft() {
+  const std::int64_t deadline = g_deadline.load();
+  if (!g_running.load() || deadline == 0) return -1;
+  const std::int64_t left = deadline - esp_timer_get_time();
+  return left <= 0 ? 0 : static_cast<int>((left + 999999) / 1000000);
+}
+
+int KeepAwakeTimerSeconds() { return g_running.load() ? g_timer_seconds.load() : 0; }
 
 int KeepAwakeSecondsToNext() {
   if (!g_running.load()) return -1;

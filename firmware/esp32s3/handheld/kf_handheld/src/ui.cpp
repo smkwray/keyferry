@@ -1,18 +1,25 @@
-// Handheld screens: one dark theme, big targets (nothing under 72 px tall, about 6 mm on this
-// panel), tinted icon tiles and a Home button in the same top-left place on every screen.
+// Handheld screens. Design rules: true black (AMOLED), one accent colour per function, raised
+// buttons that press in when touched, and nothing to tap under 72 px tall (about 6 mm on this
+// panel). Every screen but Home has the Home button in the same top-left place.
 #include "ui.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 
 namespace keyferry::handheld::ui {
 namespace {
 
+// --- Look ----------------------------------------------------------------------------------------
+
 constexpr std::uint32_t kBlack = 0x000000;
-constexpr std::uint32_t kSurface = 0x16181D;
-constexpr std::uint32_t kSurfacePressed = 0x2B2F38;
+constexpr std::uint32_t kCard = 0x121418;         // flat panels that hold controls
+constexpr std::uint32_t kRaisedTop = 0x22252D;    // buttons: a soft top-to-bottom gradient
+constexpr std::uint32_t kRaisedBottom = 0x16181D;
+constexpr std::uint32_t kPressed = 0x30343E;
 constexpr std::uint32_t kBorder = 0x2A2E37;
+constexpr std::uint32_t kDivider = 0x22252C;
 constexpr std::uint32_t kText = 0xF2F4F8;
 constexpr std::uint32_t kMuted = 0x9AA3B2;
 constexpr std::uint32_t kError = 0xFF6B6B;
@@ -31,10 +38,11 @@ const lv_font_t* const kLarge = &lv_font_montserrat_40;
 constexpr int kMargin = 12;
 constexpr int kGap = 10;
 constexpr int kRadius = 22;
+constexpr int kControl = 72;  // the smallest touch target
 constexpr int kHomeWidth = 88;
-constexpr int kHomeHeight = 72;
-constexpr int kContentTop = kMargin + kHomeHeight + 10;
-constexpr int kHalfWidth = (kWidth - 2 * kMargin - kGap) / 2;
+constexpr int kContentTop = kMargin + kControl + 10;
+constexpr int kInnerWidth = kWidth - 2 * kMargin;
+constexpr int kHalfWidth = (kInnerWidth - kGap) / 2;
 
 struct State {
   Config config;
@@ -42,14 +50,15 @@ struct State {
   lv_obj_t* wake_shield = nullptr;
   lv_obj_t* home_status = nullptr;
   lv_obj_t* touch_dot = nullptr;
-  lv_obj_t* touch_label = nullptr;
-  lv_obj_t* buttons_label = nullptr;
-  lv_obj_t* power_label = nullptr;
-  lv_obj_t* storage_label = nullptr;
-  lv_obj_t* memory_label = nullptr;
+  lv_obj_t* touch_value = nullptr;
+  lv_obj_t* check_values[4] = {};
   lv_obj_t* brightness_value = nullptr;
   int brightness = 60;
+  lv_obj_t* screen_off_value = nullptr;
+  int screen_off = 1;
   lv_obj_t* host_buttons[2] = {};
+  lv_obj_t* awake_chips[kKeepAwakeChoices] = {};
+  int awake_duration = 1;
   lv_obj_t* awake_arc = nullptr;
   lv_obj_t* awake_button = nullptr;
   lv_obj_t* awake_icon = nullptr;
@@ -73,6 +82,9 @@ lv_style_t g_card_style;
 lv_style_t g_button_style;
 lv_style_t g_pressed_style;
 lv_style_t g_disabled_style;
+lv_style_transition_dsc_t g_press_transition;
+const lv_style_prop_t kPressProps[] = {LV_STYLE_TRANSFORM_WIDTH, LV_STYLE_TRANSFORM_HEIGHT,
+                                       LV_STYLE_BG_COLOR, LV_STYLE_BG_GRAD_COLOR, LV_STYLE_PROP_INV};
 
 void Emit(Action action, int value) {
   if (g.config.action != nullptr) g.config.action(action, value);
@@ -91,22 +103,32 @@ void InitStyles() {
   lv_style_set_text_font(&g_screen_style, kBody);
 
   lv_style_init(&g_card_style);
-  lv_style_set_bg_color(&g_card_style, lv_color_hex(kSurface));
+  lv_style_set_bg_color(&g_card_style, lv_color_hex(kCard));
   lv_style_set_bg_opa(&g_card_style, LV_OPA_COVER);
   lv_style_set_radius(&g_card_style, kRadius);
   lv_style_set_pad_all(&g_card_style, 16);
 
+  lv_style_transition_dsc_init(&g_press_transition, kPressProps, lv_anim_path_ease_out, 90, 0, nullptr);
+
   lv_style_init(&g_button_style);
-  lv_style_set_bg_color(&g_button_style, lv_color_hex(kSurface));
+  lv_style_set_bg_color(&g_button_style, lv_color_hex(kRaisedTop));
+  lv_style_set_bg_grad_color(&g_button_style, lv_color_hex(kRaisedBottom));
+  lv_style_set_bg_grad_dir(&g_button_style, LV_GRAD_DIR_VER);
   lv_style_set_bg_opa(&g_button_style, LV_OPA_COVER);
   lv_style_set_radius(&g_button_style, kRadius);
   lv_style_set_border_width(&g_button_style, 2);
   lv_style_set_border_color(&g_button_style, lv_color_hex(kBorder));
   lv_style_set_text_color(&g_button_style, lv_color_hex(kText));
+  lv_style_set_transition(&g_button_style, &g_press_transition);
 
+  // Pressed: a little smaller and lighter, like a key going down.
   lv_style_init(&g_pressed_style);
-  lv_style_set_bg_color(&g_pressed_style, lv_color_hex(kSurfacePressed));
+  lv_style_set_bg_color(&g_pressed_style, lv_color_hex(kPressed));
+  lv_style_set_bg_grad_color(&g_pressed_style, lv_color_hex(kPressed));
   lv_style_set_border_color(&g_pressed_style, lv_color_hex(kMuted));
+  lv_style_set_transform_width(&g_pressed_style, -3);
+  lv_style_set_transform_height(&g_pressed_style, -3);
+  lv_style_set_transition(&g_pressed_style, &g_press_transition);
 
   lv_style_init(&g_disabled_style);
   lv_style_set_opa(&g_disabled_style, LV_OPA_40);
@@ -128,10 +150,9 @@ lv_obj_t* Plain(lv_obj_t* parent) {
   return object;
 }
 
-lv_obj_t* Card(lv_obj_t* parent, int x, int y, int width, int height) {
+lv_obj_t* Card(lv_obj_t* parent, int width, int height) {
   lv_obj_t* card = Plain(parent);
   lv_obj_add_style(card, &g_card_style, 0);
-  lv_obj_set_pos(card, x, y);
   lv_obj_set_size(card, width, height);
   return card;
 }
@@ -147,22 +168,39 @@ lv_obj_t* Button(lv_obj_t* parent, int width, int height) {
   return button;
 }
 
-// An icon over a name, centered; used by Home tiles and macro buttons.
+// Selected chips and segments: filled with the accent, dark text.
+void SetSelected(lv_obj_t* button, bool selected, std::uint32_t accent) {
+  const std::uint32_t top = selected ? accent : kRaisedTop;
+  const std::uint32_t bottom = selected ? accent : kRaisedBottom;
+  lv_obj_set_style_bg_color(button, lv_color_hex(top), 0);
+  lv_obj_set_style_bg_grad_color(button, lv_color_hex(bottom), 0);
+  lv_obj_set_style_border_color(button, lv_color_hex(selected ? accent : kBorder), 0);
+  lv_obj_set_style_text_color(lv_obj_get_child(button, 0), lv_color_hex(selected ? kBlack : kText), 0);
+}
+
+// A tinted circle with the function's icon.
+lv_obj_t* Badge(lv_obj_t* parent, const char* symbol, std::uint32_t color, int size,
+                const lv_font_t* font) {
+  lv_obj_t* badge = Plain(parent);
+  lv_obj_set_size(badge, size, size);
+  lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(badge, lv_color_hex(color), 0);
+  lv_obj_set_style_bg_opa(badge, LV_OPA_20, 0);
+  lv_obj_center(Label(badge, font, color, symbol));
+  return badge;
+}
+
+// An icon over a name, centered; Home tiles carry the icon in a badge.
 void IconAndName(lv_obj_t* button, const char* symbol, const char* name, std::uint32_t color,
                  bool badge) {
   lv_obj_set_flex_flow(button, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_row(button, badge ? 10 : 6, 0);
-  lv_obj_t* holder = button;
   if (badge) {
-    holder = Plain(button);
-    lv_obj_set_size(holder, 56, 56);
-    lv_obj_set_style_radius(holder, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(holder, lv_color_hex(color), 0);
-    lv_obj_set_style_bg_opa(holder, LV_OPA_20, 0);
+    Badge(button, symbol, color, 56, kTitle);
+  } else {
+    Label(button, kTitle, color, symbol);
   }
-  lv_obj_t* icon = Label(holder, kTitle, color, symbol);
-  if (badge) lv_obj_center(icon);
   lv_obj_t* label = Label(button, kBody, kText, name);
   lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
 }
@@ -187,7 +225,7 @@ void OnHome(lv_event_t*) {
 
 // Top bar: Home button in the corner, title beside it. Returns the title label.
 lv_obj_t* Header(lv_obj_t* screen, const char* title) {
-  lv_obj_t* home = Button(screen, kHomeWidth, kHomeHeight);
+  lv_obj_t* home = Button(screen, kHomeWidth, kControl);
   lv_obj_set_pos(home, kMargin, kMargin);
   lv_obj_center(Label(home, kTitle, kText, LV_SYMBOL_HOME));
   lv_obj_add_event_cb(home, OnHome, LV_EVENT_CLICKED, nullptr);
@@ -199,6 +237,8 @@ lv_obj_t* Header(lv_obj_t* screen, const char* title) {
 void OnAction(lv_event_t* event) { Emit(static_cast<Action>(Unpack(event)), 0); }
 void OnShow(lv_event_t* event) { Show(static_cast<Screen>(Unpack(event))); }
 
+// --- Home ----------------------------------------------------------------------------------------
+
 void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, std::uint32_t color,
              lv_event_cb_t callback, int data, bool enabled) {
   constexpr int kTop = 72;
@@ -209,9 +249,12 @@ void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, 
   IconAndName(tile, symbol, name, color, true);
   if (enabled) {
     lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, Pack(data));
-  } else {
-    lv_obj_add_state(tile, LV_STATE_DISABLED);
+    return;
   }
+  lv_obj_add_state(tile, LV_STATE_DISABLED);
+  lv_obj_t* soon = Label(tile, kSmall, kMuted, "Soon");
+  lv_obj_set_ignore_layout(soon, true);
+  lv_obj_align(soon, LV_ALIGN_TOP_RIGHT, -12, 8);
 }
 
 void BuildHome() {
@@ -240,11 +283,33 @@ void OnCheckTouch(lv_event_t* event) {
   lv_indev_get_point(lv_indev_active(), &point);
   lv_obj_set_pos(g.touch_dot, point.x - 14, point.y - 14);
   lv_obj_set_hidden(g.touch_dot, false);
-  lv_label_set_text_fmt(g.touch_label, "Touch  x %d  y %d", static_cast<int>(point.x),
+  lv_label_set_text_fmt(g.touch_value, "x %d   y %d", static_cast<int>(point.x),
                         static_cast<int>(point.y));
   if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
     Emit(Action::kTouch, static_cast<int>(point.x) << 16 | static_cast<int>(point.y));
   }
+}
+
+// One list row: tinted icon, small caption, one-line value. Returns the value label.
+lv_obj_t* CheckRow(lv_obj_t* list, const char* symbol, const char* caption, bool divider) {
+  constexpr int kRow = 66;
+  lv_obj_t* row = Plain(list);
+  lv_obj_set_size(row, LV_PCT(100), kRow);
+  if (divider) {
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(kDivider), 0);
+  }
+  Badge(row, symbol, kCheckColor, 40, kBody);
+  lv_obj_align(lv_obj_get_child(row, 0), LV_ALIGN_LEFT_MID, 0, 0);
+  lv_obj_t* label = Label(row, kSmall, kMuted, caption);
+  lv_obj_align(label, LV_ALIGN_TOP_LEFT, 56, 10);
+  lv_obj_t* value = Label(row, kBody, kText, "");
+  // One line: a value too long for it ends in dots rather than wrapping into the next row.
+  lv_obj_set_size(value, kInnerWidth - 32 - 56, lv_font_get_line_height(kBody));
+  lv_label_set_long_mode(value, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_align(value, LV_ALIGN_TOP_LEFT, 56, 30);
+  return value;
 }
 
 void BuildCheck() {
@@ -253,17 +318,16 @@ void BuildCheck() {
   lv_obj_set_clickable(screen, true);
   lv_obj_add_event_cb(screen, OnCheckTouch, LV_EVENT_PRESSED, nullptr);
   lv_obj_add_event_cb(screen, OnCheckTouch, LV_EVENT_PRESSING, nullptr);
-  lv_obj_t* card = Card(screen, kMargin, kContentTop, kWidth - 2 * kMargin, kHeight - kContentTop - kMargin);
-  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(card, 14, 0);
-  g.touch_label = Label(card, kBody, kCheckColor, "Touch  tap anywhere");
-  g.buttons_label = Label(card, kBody, kText, "");
-  g.power_label = Label(card, kBody, kText, "");
-  g.storage_label = Label(card, kBody, kText, "");
-  g.memory_label = Label(card, kSmall, kMuted, "");
-  for (lv_obj_t* label : {g.buttons_label, g.power_label, g.storage_label, g.memory_label}) {
-    lv_obj_set_width(label, LV_PCT(100));
-  }
+  lv_obj_t* list = Card(screen, kInnerWidth, kHeight - kContentTop - kMargin);
+  lv_obj_set_pos(list, kMargin, kContentTop);
+  lv_obj_set_style_pad_ver(list, 4, 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  g.touch_value = CheckRow(list, LV_SYMBOL_GPS, "Touch", false);
+  lv_label_set_text(g.touch_value, "Tap anywhere");
+  g.check_values[0] = CheckRow(list, LV_SYMBOL_POWER, "Buttons", true);
+  g.check_values[1] = CheckRow(list, LV_SYMBOL_CHARGE, "Power", true);
+  g.check_values[2] = CheckRow(list, LV_SYMBOL_SD_CARD, "SD card", true);
+  g.check_values[3] = CheckRow(list, LV_SYMBOL_DRIVE, "Memory", true);
   g.touch_dot = Plain(screen);
   lv_obj_set_size(g.touch_dot, 28, 28);
   lv_obj_set_style_radius(g.touch_dot, LV_RADIUS_CIRCLE, 0);
@@ -274,17 +338,15 @@ void BuildCheck() {
 
 // --- Settings ------------------------------------------------------------------------------------
 
-constexpr int kRowHeight = 92;
-constexpr int kControl = 72;
+constexpr int kRowHeight = 96;
 
-lv_obj_t* SettingsRow(lv_obj_t* screen, int row, const char* caption) {
-  lv_obj_t* card = Card(screen, kMargin, kContentTop + row * (kRowHeight + 8), kWidth - 2 * kMargin,
-                        kRowHeight);
-  lv_obj_set_style_pad_all(card, 10, 0);
-  lv_obj_set_style_pad_left(card, 18, 0);
-  lv_obj_t* label = Label(card, kBody, kText, caption);
+lv_obj_t* SettingsRow(lv_obj_t* list, const char* caption) {
+  lv_obj_t* row = Card(list, kInnerWidth, kRowHeight);
+  lv_obj_set_style_pad_all(row, 12, 0);
+  lv_obj_set_style_pad_left(row, 18, 0);
+  lv_obj_t* label = Label(row, kBody, kText, caption);
   lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
-  return card;
+  return row;
 }
 
 lv_obj_t* RowButton(lv_obj_t* row, int width, int x_from_right, const char* text) {
@@ -292,6 +354,26 @@ lv_obj_t* RowButton(lv_obj_t* row, int width, int x_from_right, const char* text
   lv_obj_align(button, LV_ALIGN_RIGHT_MID, -x_from_right, 0);
   lv_obj_center(Label(button, kTitle, kText, text));
   return button;
+}
+
+// Caption over an accent value on the left, - and + on the right. Returns the value label.
+lv_obj_t* StepperRow(lv_obj_t* list, const char* caption, lv_event_cb_t callback, bool repeat) {
+  lv_obj_t* row = SettingsRow(list, caption);
+  lv_obj_align(lv_obj_get_child(row, 0), LV_ALIGN_TOP_LEFT, 0, 2);
+  lv_obj_t* value = Label(row, kTitle, kKeepAwakeColor, "");
+  lv_obj_align(value, LV_ALIGN_BOTTOM_LEFT, 0, -2);
+  lv_obj_t* plus = RowButton(row, kControl, 0, LV_SYMBOL_PLUS);
+  lv_obj_t* minus = RowButton(row, kControl, kControl + 8, LV_SYMBOL_MINUS);
+  for (lv_obj_t* button : {minus, plus}) {
+    void* step = Pack(button == plus ? 1 : -1);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_SHORT_CLICKED, step);
+    if (repeat) {
+      lv_obj_add_event_cb(button, callback, LV_EVENT_LONG_PRESSED, step);
+      lv_obj_add_event_cb(button, callback, LV_EVENT_LONG_PRESSED_REPEAT, step);
+      lv_obj_add_event_cb(button, callback, LV_EVENT_RELEASED, step);
+    }
+  }
+  return value;
 }
 
 void ShowBrightness() { lv_label_set_text_fmt(g.brightness_value, "%d%%", g.brightness); }
@@ -306,7 +388,7 @@ void OnBrightnessStep(lv_event_t* event) {
     pending = false;
     return;
   }
-  const int step = Unpack(event);
+  const int step = Unpack(event) * 10;
   int value = g.brightness + step;
   if (step < 0 && g.brightness > g.config.min_brightness && value < g.config.min_brightness) {
     value = g.config.min_brightness;
@@ -322,13 +404,26 @@ void OnBrightnessStep(lv_event_t* event) {
   }
 }
 
+void ShowScreenOff() {
+  const int seconds = kScreenOffSeconds[g.screen_off];
+  if (seconds < 60) {
+    lv_label_set_text_fmt(g.screen_off_value, "%d s", seconds);
+  } else {
+    lv_label_set_text_fmt(g.screen_off_value, "%d min", seconds / 60);
+  }
+}
+
+void OnScreenOffStep(lv_event_t* event) {
+  const int index = g.screen_off + Unpack(event);
+  if (index < 0 || index >= kScreenOffChoices) return;
+  g.screen_off = index;
+  ShowScreenOff();
+  Emit(Action::kScreenOff, index);
+}
+
 void ShowHost() {
   for (int i = 0; i < 2; ++i) {
-    lv_obj_t* button = g.host_buttons[i];
-    const bool selected = static_cast<int>(g.config.host) == i;
-    lv_obj_set_style_bg_color(button, lv_color_hex(selected ? kMacrosColor : kSurface), 0);
-    lv_obj_set_style_border_color(button, lv_color_hex(selected ? kMacrosColor : kBorder), 0);
-    lv_obj_set_style_text_color(lv_obj_get_child(button, 0), lv_color_hex(selected ? kBlack : kText), 0);
+    SetSelected(g.host_buttons[i], static_cast<int>(g.config.host) == i, kMacrosColor);
   }
 }
 
@@ -346,24 +441,30 @@ void OnStartInKeyferry(lv_event_t* event) {
 void BuildSettings() {
   lv_obj_t* screen = NewScreen(Screen::kSettings);
   Header(screen, "Settings");
+  // The rows scroll under a fixed header; a partly visible last row shows there is more.
+  lv_obj_t* list = Plain(screen);
+  lv_obj_set_pos(list, 0, kContentTop);
+  lv_obj_set_size(list, kWidth, kHeight - kContentTop);
+  lv_obj_set_scrollable(list, true);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+  lv_obj_set_style_pad_hor(list, kMargin, 0);
+  lv_obj_set_style_pad_bottom(list, kMargin, 0);
+  lv_obj_set_style_pad_row(list, 8, 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_bg_color(list, lv_color_hex(kSettingsColor), LV_PART_SCROLLBAR);
+  lv_obj_set_style_bg_opa(list, LV_OPA_60, LV_PART_SCROLLBAR);
+  lv_obj_set_style_width(list, 4, LV_PART_SCROLLBAR);
 
-  lv_obj_t* brightness = SettingsRow(screen, 0, "Brightness");
   g.brightness = g.config.brightness;
-  lv_obj_t* plus = RowButton(brightness, kControl, 0, LV_SYMBOL_PLUS);
-  lv_obj_t* minus = RowButton(brightness, kControl, kControl + 8, LV_SYMBOL_MINUS);
-  for (lv_obj_t* button : {minus, plus}) {
-    void* step = Pack(button == plus ? 10 : -10);
-    lv_obj_add_event_cb(button, OnBrightnessStep, LV_EVENT_SHORT_CLICKED, step);
-    lv_obj_add_event_cb(button, OnBrightnessStep, LV_EVENT_LONG_PRESSED, step);
-    lv_obj_add_event_cb(button, OnBrightnessStep, LV_EVENT_LONG_PRESSED_REPEAT, step);
-    lv_obj_add_event_cb(button, OnBrightnessStep, LV_EVENT_RELEASED, step);
-  }
-  lv_obj_align(lv_obj_get_child(brightness, 0), LV_ALIGN_TOP_LEFT, 0, 2);
-  g.brightness_value = Label(brightness, kTitle, kKeepAwakeColor, "");
-  lv_obj_align(g.brightness_value, LV_ALIGN_BOTTOM_LEFT, 0, -2);
+  g.brightness_value = StepperRow(list, "Brightness", OnBrightnessStep, true);
   ShowBrightness();
 
-  lv_obj_t* host = SettingsRow(screen, 1, "Macros for");
+  g.screen_off = g.config.screen_off >= 0 && g.config.screen_off < kScreenOffChoices ? g.config.screen_off : 1;
+  g.screen_off_value = StepperRow(list, "Screen off after", OnScreenOffStep, false);
+  ShowScreenOff();
+
+  lv_obj_t* host = SettingsRow(list, "Macros for");
   const char* names[2] = {"Mac", "Win"};
   for (int i = 0; i < 2; ++i) {
     // Right to left: Mac, then Windows.
@@ -375,9 +476,8 @@ void BuildSettings() {
   }
   ShowHost();
 
-  int next_row = 2;
   if (g.config.keyferry) {
-    lv_obj_t* start = SettingsRow(screen, next_row++, "Start in Keyferry");
+    lv_obj_t* start = SettingsRow(list, "Start in Keyferry");
     lv_obj_t* toggle = lv_switch_create(start);
     lv_obj_set_size(toggle, 96, 52);
     lv_obj_align(toggle, LV_ALIGN_RIGHT_MID, 0, 0);
@@ -386,10 +486,25 @@ void BuildSettings() {
     if (g.config.start_in_keyferry) lv_obj_add_state(toggle, LV_STATE_CHECKED);
     lv_obj_add_event_cb(toggle, OnStartInKeyferry, LV_EVENT_VALUE_CHANGED, nullptr);
   }
-  lv_obj_t* hint = Label(screen, kSmall, kMuted,
-                         "Screen sleeps after 20 s; a touch wakes it.\n"
+  lv_obj_t* hint = Label(list, kSmall, kMuted,
+                         "A touch wakes the screen.\n"
                          "PWR: screen off/on.   BOOT: back to Home.");
-  lv_obj_set_pos(hint, kMargin + 8, kContentTop + next_row * (kRowHeight + 8) + 6);
+  lv_obj_set_style_pad_left(hint, 8, 0);
+  lv_obj_set_style_pad_top(hint, 4, 0);
+
+  // Rows fade out at the bottom edge instead of being cut off: there is more below.
+  constexpr int kFade = 36;
+  lv_obj_set_style_pad_bottom(list, kFade, 0);
+  lv_obj_t* fade = Plain(list);
+  lv_obj_set_floating(fade, true);
+  lv_obj_set_size(fade, kWidth, kFade);
+  lv_obj_align(fade, LV_ALIGN_BOTTOM_MID, 0, kFade);  // the list's bottom padding holds it
+  lv_obj_set_style_bg_color(fade, lv_color_hex(kBlack), 0);
+  lv_obj_set_style_bg_grad_color(fade, lv_color_hex(kBlack), 0);
+  lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+  lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_bg_grad_opa(fade, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
 }
 
 // --- Keep Awake ----------------------------------------------------------------------------------
@@ -397,26 +512,61 @@ void BuildSettings() {
 void PulseStep(void* object, std::int32_t value) {
   lv_obj_t* button = static_cast<lv_obj_t*>(object);
   lv_obj_set_style_outline_width(button, value, 0);
-  lv_obj_set_style_outline_opa(button, static_cast<lv_opa_t>(LV_OPA_COVER * (24 - value) / 24), 0);
+  lv_obj_set_style_outline_opa(button, static_cast<lv_opa_t>(LV_OPA_COVER * (20 - value) / 20), 0);
 }
 
+// A ring that swells out of the button on every nudge: proof it is working.
 void Pulse() {
   lv_anim_t animation;
   lv_anim_init(&animation);
   lv_anim_set_var(&animation, g.awake_button);
-  lv_anim_set_values(&animation, 0, 24);
+  lv_anim_set_values(&animation, 0, 20);
   lv_anim_set_duration(&animation, 700);
+  lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
   lv_anim_set_exec_cb(&animation, PulseStep);
   lv_anim_start(&animation);
+}
+
+void ShowDuration() {
+  for (int i = 0; i < kKeepAwakeChoices; ++i) {
+    SetSelected(g.awake_chips[i], i == g.awake_duration, kKeepAwakeColor);
+  }
+}
+
+void OnDuration(lv_event_t* event) {
+  g.awake_duration = Unpack(event);
+  ShowDuration();
+  Emit(Action::kKeepAwakeDuration, g.awake_duration);
 }
 
 void BuildKeepAwake() {
   lv_obj_t* screen = NewScreen(Screen::kKeepAwake);
   Header(screen, "Keep Awake");
-  constexpr int kArc = 228;
-  constexpr int kCircle = 180;
-  constexpr int kArcTop = kContentTop + 2;
+  constexpr int kChipWidth = (kInnerWidth - (kKeepAwakeChoices - 1) * 8) / kKeepAwakeChoices;
+  g.awake_duration = g.config.keep_awake_duration >= 0 && g.config.keep_awake_duration < kKeepAwakeChoices
+                         ? g.config.keep_awake_duration
+                         : 1;
+  for (int i = 0; i < kKeepAwakeChoices; ++i) {
+    lv_obj_t* chip = Button(screen, kChipWidth, kControl);
+    lv_obj_set_pos(chip, kMargin + i * (kChipWidth + 8), kContentTop);
+    char text[16];
+    const int minutes = kKeepAwakeMinutes[i];
+    if (minutes == 0) {
+      std::snprintf(text, sizeof(text), "Always");
+    } else if (minutes < 60) {
+      std::snprintf(text, sizeof(text), "%d min", minutes);
+    } else {
+      std::snprintf(text, sizeof(text), "%d h", minutes / 60);
+    }
+    lv_obj_center(Label(chip, kBody, kText, text));
+    lv_obj_add_event_cb(chip, OnDuration, LV_EVENT_CLICKED, Pack(i));
+    g.awake_chips[i] = chip;
+  }
+  ShowDuration();
 
+  constexpr int kArc = 206;
+  constexpr int kCircle = 164;
+  constexpr int kArcTop = kContentTop + kControl + 10;
   g.awake_arc = lv_arc_create(screen);
   lv_obj_set_size(g.awake_arc, kArc, kArc);
   lv_obj_align(g.awake_arc, LV_ALIGN_TOP_MID, 0, kArcTop);
@@ -426,9 +576,9 @@ void BuildKeepAwake() {
   lv_arc_set_value(g.awake_arc, 0);
   lv_obj_remove_style(g.awake_arc, nullptr, LV_PART_KNOB);
   lv_obj_set_clickable(g.awake_arc, false);
-  lv_obj_set_style_arc_width(g.awake_arc, 10, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(g.awake_arc, lv_color_hex(kSurface), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(g.awake_arc, 10, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(g.awake_arc, 9, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(g.awake_arc, lv_color_hex(kDivider), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(g.awake_arc, 9, LV_PART_INDICATOR);
   lv_obj_set_style_arc_color(g.awake_arc, lv_color_hex(kKeepAwakeColor), LV_PART_INDICATOR);
 
   g.awake_button = Button(screen, kCircle, kCircle);
@@ -438,20 +588,20 @@ void BuildKeepAwake() {
   lv_obj_align(g.awake_button, LV_ALIGN_TOP_MID, 0, kArcTop + (kArc - kCircle) / 2);
   lv_obj_set_flex_flow(g.awake_button, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(g.awake_button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_row(g.awake_button, 6, 0);
+  lv_obj_set_style_pad_row(g.awake_button, 4, 0);
   g.awake_icon = Label(g.awake_button, kLarge, kKeepAwakeColor, LV_SYMBOL_PLAY);
   g.awake_label = Label(g.awake_button, kTitle, kText, "Start");
   lv_obj_add_event_cb(g.awake_button, OnAction, LV_EVENT_CLICKED,
                       Pack(static_cast<int>(Action::kKeepAwakeToggle)));
 
   g.awake_state = Label(screen, kBody, kText, "Ready");
-  lv_obj_set_width(g.awake_state, kWidth - 2 * kMargin);
+  lv_obj_set_width(g.awake_state, kInnerWidth);
   lv_obj_set_style_text_align(g.awake_state, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(g.awake_state, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 12);
+  lv_obj_align(g.awake_state, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 8);
   g.awake_detail = Label(screen, kSmall, kMuted, "");
-  lv_obj_set_width(g.awake_detail, kWidth - 2 * kMargin);
+  lv_obj_set_width(g.awake_detail, kInnerWidth);
   lv_obj_set_style_text_align(g.awake_detail, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(g.awake_detail, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 44);
+  lv_obj_align(g.awake_detail, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 36);
 }
 
 // --- Macros --------------------------------------------------------------------------------------
@@ -463,6 +613,7 @@ void ShowMacroPage(int page) {
   const int pages = macros::PageCount();
   for (int i = 0; i < pages; ++i) {
     lv_obj_t* dot = lv_obj_get_child(g.macro_dots, i);
+    lv_obj_set_width(dot, i == page ? 22 : 10);  // the current page is a short bar
     lv_obj_set_style_bg_color(dot, lv_color_hex(i == page ? macros::PageAt(page).color : kBorder), 0);
   }
 }
@@ -485,17 +636,17 @@ void BuildMacros() {
   g.macro_title = Header(screen, "");
   lv_obj_align(g.macro_title, LV_ALIGN_TOP_LEFT, kMargin + kHomeWidth + 16, kMargin + 6);
 
-  lv_obj_t* next = Button(screen, kControl, kHomeHeight);
+  lv_obj_t* next = Button(screen, kControl, kControl);
   lv_obj_align(next, LV_ALIGN_TOP_RIGHT, -kMargin, kMargin);
   lv_obj_center(Label(next, kTitle, kText, LV_SYMBOL_RIGHT));
   lv_obj_add_event_cb(next, OnNextPage, LV_EVENT_CLICKED, nullptr);
 
   const int pages = macros::PageCount();  // the table is bounded at compile time
   g.macro_dots = Plain(screen);
-  lv_obj_set_size(g.macro_dots, LV_SIZE_CONTENT, 12);
+  lv_obj_set_size(g.macro_dots, LV_SIZE_CONTENT, 10);
   lv_obj_set_flex_flow(g.macro_dots, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(g.macro_dots, 8, 0);
-  lv_obj_set_pos(g.macro_dots, kMargin + kHomeWidth + 18, kMargin + 50);
+  lv_obj_set_style_pad_column(g.macro_dots, 6, 0);
+  lv_obj_set_pos(g.macro_dots, kMargin + kHomeWidth + 18, kMargin + 52);
   for (int i = 0; i < pages; ++i) {
     lv_obj_t* dot = Plain(g.macro_dots);
     lv_obj_set_size(dot, 10, 10);
@@ -505,7 +656,7 @@ void BuildMacros() {
   g.macro_notice = Label(screen, kSmall, kMuted, "");
   lv_obj_set_pos(g.macro_notice, kMargin + kHomeWidth + 16, kMargin + 46);
   // Between the Home and next-page buttons; longer notices scroll.
-  lv_obj_set_width(g.macro_notice, kWidth - 2 * kMargin - kHomeWidth - kControl - 32);
+  lv_obj_set_width(g.macro_notice, kInnerWidth - kHomeWidth - kControl - 32);
   lv_label_set_long_mode(g.macro_notice, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
   lv_obj_set_hidden(g.macro_notice, true);
 
@@ -520,14 +671,14 @@ void BuildMacros() {
     const macros::Page& page = macros::PageAt(p);
     lv_obj_t* tile = lv_tileview_add_tile(g.macro_pages, static_cast<std::uint8_t>(p), 0, LV_DIR_HOR);
     lv_obj_set_scrollable(tile, false);  // horizontal drags reach the tileview
-    const int count = page.count;
-    for (int m = 0; m < count; ++m) {
+    for (int m = 0; m < page.count; ++m) {
       const macros::Macro& macro = page.macros[m];
       lv_obj_t* button = Button(tile, kHalfWidth, kButtonHeight);
       lv_obj_set_pos(button, kMargin + (m % 2) * (kHalfWidth + kGap), (m / 2) * (kButtonHeight + kGap));
       // Playing: accent border over an accent-tinted face; icon and name stay legible.
-      lv_obj_set_style_bg_color(
-          button, lv_color_mix(lv_color_hex(page.color), lv_color_hex(kSurface), 80), LV_STATE_CHECKED);
+      const lv_color_t tint = lv_color_mix(lv_color_hex(page.color), lv_color_hex(kRaisedBottom), 80);
+      lv_obj_set_style_bg_color(button, tint, LV_STATE_CHECKED);
+      lv_obj_set_style_bg_grad_color(button, tint, LV_STATE_CHECKED);
       lv_obj_set_style_border_color(button, lv_color_hex(page.color), LV_STATE_CHECKED);
       lv_obj_set_style_border_width(button, 4, LV_STATE_CHECKED);
       IconAndName(button, macro.symbol, macros::NameFor(macro, g.config.host), page.color, false);
@@ -546,7 +697,8 @@ void BuildMacros() {
 void BuildKeyferry() {
   lv_obj_t* screen = NewScreen(Screen::kKeyferry);
   Header(screen, "Keyferry");
-  lv_obj_t* card = Card(screen, kMargin, kContentTop, kWidth - 2 * kMargin, kHeight - kContentTop - kMargin);
+  lv_obj_t* card = Card(screen, kInnerWidth, kHeight - kContentTop - kMargin);
+  lv_obj_set_pos(card, kMargin, kContentTop);
   g.keyferry_text = Label(card, kBody, kText, "Starting...");
   lv_obj_set_width(g.keyferry_text, LV_PCT(100));
 }
@@ -619,32 +771,60 @@ void RefreshHome(const HomeView& view) {
 }
 
 void RefreshCheck(const CheckView& view) {
-  if (g.buttons_label == nullptr) return;
-  lv_label_set_text(g.buttons_label, view.buttons);
-  lv_label_set_text(g.power_label, view.power);
-  lv_label_set_text(g.storage_label, view.storage);
-  lv_label_set_text(g.memory_label, view.memory);
+  if (g.check_values[0] == nullptr) return;
+  const char* values[4] = {view.buttons, view.power, view.storage, view.memory};
+  for (int i = 0; i < 4; ++i) lv_label_set_text(g.check_values[i], values[i]);
 }
 
 void RefreshKeepAwake(const KeepAwakeView& view) {
   if (g.awake_button == nullptr) return;
-  lv_label_set_text(g.awake_icon, view.running ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+  const bool timed = view.running && view.seconds_left >= 0 && view.timer_seconds > 0;
+  if (timed) {
+    // The time left fills the button; the ring drains with it.
+    const int h = view.seconds_left / 3600;
+    const int m = view.seconds_left / 60 % 60;
+    const int s = view.seconds_left % 60;
+    lv_obj_set_style_text_font(g.awake_icon, kTitle, 0);
+    lv_obj_set_style_text_color(g.awake_icon, lv_color_hex(kText), 0);
+    if (h > 0) {
+      lv_label_set_text_fmt(g.awake_icon, "%d:%02d:%02d", h, m, s);
+    } else {
+      lv_label_set_text_fmt(g.awake_icon, "%d:%02d", m, s);
+    }
+    lv_obj_set_style_text_font(g.awake_label, kBody, 0);
+    lv_obj_set_style_text_color(g.awake_label, lv_color_hex(kMuted), 0);
+    lv_arc_set_range(g.awake_arc, 0, view.timer_seconds);
+    lv_arc_set_value(g.awake_arc, view.seconds_left);
+  } else {
+    lv_obj_set_style_text_font(g.awake_icon, kLarge, 0);
+    lv_obj_set_style_text_color(g.awake_icon, lv_color_hex(kKeepAwakeColor), 0);
+    lv_label_set_text(g.awake_icon, view.running ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+    lv_obj_set_style_text_font(g.awake_label, kTitle, 0);
+    lv_obj_set_style_text_color(g.awake_label, lv_color_hex(kText), 0);
+    // Until stopped: the ring counts down to the next nudge.
+    lv_arc_set_range(g.awake_arc, 0, view.interval_seconds);
+    lv_arc_set_value(g.awake_arc, view.running && view.seconds_to_next >= 0
+                                      ? view.interval_seconds - view.seconds_to_next
+                                      : 0);
+  }
   lv_label_set_text(g.awake_label, view.running ? "Stop" : "Start");
   lv_obj_set_style_border_color(g.awake_button, lv_color_hex(view.running ? kKeepAwakeColor : kBorder), 0);
   lv_obj_set_style_text_color(g.awake_state, lv_color_hex(view.stopped_by_fault ? kError : kText), 0);
-  lv_arc_set_range(g.awake_arc, 0, view.interval_seconds);
   if (view.running && view.seconds_to_next >= 0) {
-    lv_arc_set_value(g.awake_arc, view.interval_seconds - view.seconds_to_next);
-    lv_label_set_text_fmt(g.awake_state, "%s  -  next in %d s", view.state, view.seconds_to_next);
+    lv_label_set_text_fmt(g.awake_state, "%s   " LV_SYMBOL_BULLET "   next nudge in %d s", view.state,
+                          view.seconds_to_next);
   } else {
-    lv_arc_set_value(g.awake_arc, 0);
     lv_label_set_text(g.awake_state, view.state);
   }
-  lv_label_set_text_fmt(g.awake_detail,
-                        "%s   |   %u nudge%s\nNudges the pointer 1 px every %d s",
-                        view.usb ? LV_SYMBOL_USB " Connected" : "Not connected",
-                        static_cast<unsigned>(view.nudges), view.nudges == 1 ? "" : "s",
-                        view.interval_seconds);
+  if (!view.usb) {
+    lv_label_set_text(g.awake_detail, "Not connected to a computer");
+  } else if (view.running || view.nudges > 0) {
+    lv_label_set_text_fmt(g.awake_detail, LV_SYMBOL_USB " Connected   " LV_SYMBOL_BULLET "   %u nudge%s",
+                          static_cast<unsigned>(view.nudges), view.nudges == 1 ? "" : "s");
+  } else {
+    lv_label_set_text_fmt(g.awake_detail, "Nudges the pointer 1 px every %d s",
+                          view.interval_seconds);
+  }
   if (view.nudges > g.awake_nudges) Pulse();
   g.awake_nudges = view.nudges;
 }
