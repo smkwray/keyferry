@@ -253,6 +253,7 @@ int g_screen_off = 1;      // index into ui::kScreenOffSeconds
 int g_mic_gain = 5;        // index into ui::kMicGainDb
 macros::Host g_host = macros::Host::kWindows;
 bool g_blanked = false;
+bool g_dimmed = false;  // Microphone: dimmed, not blanked, while live
 bool g_boot_down = false;
 bool g_boot_long = false;
 std::int64_t g_boot_down_since = 0;
@@ -278,6 +279,7 @@ bool UsbFunction() {
 void StopInput() {
   if (g_function == Function::kKeepAwake) KeepAwakeStop();
   if (g_function == Function::kMacros) MacroPadClose();
+  if (g_function == Function::kMic) MicStop();
 }
 
 // Leaving Keep Awake or Macros: a pre-created worker stops input and restarts to Home only once
@@ -862,8 +864,22 @@ void OnTick(lv_timer_t*) {
     }
   }
 
+  // A live microphone keeps its Live state in sight: the screen dims instead of blanking.
   const std::uint32_t blank_after_ms = ui::kScreenOffSeconds[g_screen_off] * 1000U;
-  if (!g_blanked && lv_display_get_inactive_time(nullptr) >= blank_after_ms) Blank();
+  const std::uint32_t idle_ms = lv_display_get_inactive_time(nullptr);
+  if (g_dimmed && idle_ms < blank_after_ms) {
+    g_dimmed = false;
+    bsp_display_brightness_set(g_brightness);
+  }
+  if (!g_blanked && idle_ms >= blank_after_ms) {
+    if (g_function == Function::kMic && MicLive()) {
+      if (!g_dimmed) bsp_display_brightness_set(kMinBrightness);
+      g_dimmed = true;
+    } else {
+      g_dimmed = false;
+      Blank();
+    }
+  }
 }
 
 void OnRenderReady(lv_event_t*) { g_renders.fetch_add(1); }

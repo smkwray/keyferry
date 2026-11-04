@@ -1,7 +1,8 @@
-// Microphone (ADR 0018 rule 14). The ES8311 codec runs in recording mode only (its DAC and the
-// speaker amplifier stay off); a capture task reads it over I2S in 2 ms blocks, applies the
-// computer's volume and both mutes, and queues samples for TinyUSB's UAC2 driver only while the
-// computer has the stream open. Nothing is stored or sent anywhere else.
+// Microphone (ADR 0018 rule 14). The ES8311 codec runs in recording mode only (its DAC off and the
+// speaker amplifier driven off); a capture task reads it over I2S in 2 ms blocks and applies the
+// computer's volume and both mutes. Blocks reach TinyUSB's UAC2 FIFO only on the TinyUSB task,
+// which also opens, closes and resets the stream, so a block can never land in a stream other
+// than the one open when it is written. Nothing is stored or sent anywhere else.
 #include "mic.h"
 
 #include <algorithm>
@@ -16,7 +17,9 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
+#include "device/usbd_pvt.h"  // usbd_defer_func: run on the TinyUSB task (pinned TinyUSB 0.21)
 #include "freertos/FreeRTOS.h"
+#include "freertos/message_buffer.h"
 #include "freertos/task.h"
 #include "tusb.h"
 #include "usb_device.h"
@@ -27,7 +30,8 @@ namespace {
 constexpr char kTag[] = "mic";
 constexpr std::uint32_t kSampleRate = 48000;
 constexpr int kBlockSamples = 96;  // 2 ms
-constexpr int kFaultReads = 3;     // consecutive failed reads before the chip counts as failed
+constexpr int kFaultReads = 3;     // consecutive failed reads: the chip counts as failed for this boot
+constexpr int kReadyBlocks = 100;  // startup: 200 ms to see a non-silent block
 
 // Entity IDs of TUD_AUDIO20_MIC_ONE_CH_DESCRIPTOR, and its streaming interface (usb_device.cpp
 // puts the control interface at 0).
@@ -45,6 +49,9 @@ constexpr std::uint16_t kVolumeStep = 256;
 esp_codec_dev_handle_t g_codec = nullptr;
 i2s_chan_handle_t g_rx = nullptr;
 std::atomic<bool> g_fault{false};
+std::atomic<bool> g_stopped{false};          // leaving the function: no more samples this boot
+MessageBufferHandle_t g_blocks = nullptr;    // capture task -> TinyUSB task, whole blocks only
+std::atomic<bool> g_submit_pending{false};
 std::atomic<bool> g_board_mute{false};
 std::atomic<int> g_peak{0};
 // TinyUSB task: the computer's controls (index 0 master, 1 the one channel) and the stream.
@@ -99,7 +106,7 @@ bool StartCodec(int gain_db) {
   es8311.ctrl_if = control;
   es8311.gpio_if = gpio;
   es8311.codec_mode = ESP_CODEC_DEV_WORK_MODE_ADC;  // no DAC, so the speaker amplifier stays off
-  es8311.pa_pin = -1;
+  es8311.pa_pin = BSP_POWER_AMP_IO;  // ADC mode drives it off at open and never turns it on
   es8311.use_mclk = true;
   const audio_codec_if_t* codec = es8311_codec_new(&es8311);
   if (codec == nullptr) return false;
@@ -117,15 +124,40 @@ bool StartCodec(int gain_db) {
   return esp_codec_dev_set_in_gain(g_codec, static_cast<float>(gain_db)) == ESP_CODEC_DEV_OK;
 }
 
+// TinyUSB task: queued blocks into the driver's FIFO, in order with stream open/close and bus
+// resets (all on this task), so the stream decision and the write are one step. A block that
+// would overwrite unread audio is dropped instead.
+void Submit(void*) {
+  g_submit_pending.store(false);
+  std::int16_t block[kBlockSamples];
+  while (xMessageBufferReceive(g_blocks, block, sizeof(block), 0) == sizeof(block)) {
+    if (g_stopped.load() || g_fault.load() || !Streaming()) continue;
+    tu_fifo_t* fifo = tud_audio_get_ep_in_ff();
+    if (fifo == nullptr || tu_fifo_remaining(fifo) < sizeof(block)) continue;
+    tud_audio_write(block, sizeof(block));
+  }
+}
+
+// Reads one block; false on an error.
+bool ReadBlock(std::int16_t* block) {
+  return esp_codec_dev_read(g_codec, block, kBlockSamples * sizeof(std::int16_t)) == ESP_CODEC_DEV_OK;
+}
+
 void CaptureTask(void*) {
   static std::int16_t block[kBlockSamples];
   int failures = 0;
   bool was_streaming = false;
   for (;;) {
-    if (esp_codec_dev_read(g_codec, block, sizeof(block)) != ESP_CODEC_DEV_OK) {
-      if (++failures >= kFaultReads && !g_fault.exchange(true)) ESP_LOGE(kTag, "no samples from the codec");
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
+    if (!ReadBlock(block)) {
+      if (++failures < kFaultReads) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
+      // Terminal for this boot: no further samples, and the screen says so until Microphone is
+      // opened again.
+      g_fault.store(true);
+      ESP_LOGE(kTag, "no samples from the codec; microphone stopped");
+      vTaskDelete(nullptr);
     }
     failures = 0;
     int peak = 0;
@@ -133,12 +165,12 @@ void CaptureTask(void*) {
     int seen = g_peak.load();
     while (peak > seen && !g_peak.compare_exchange_weak(seen, peak)) {
     }
-    const bool streaming = Streaming();
+    const bool streaming = Streaming();  // a hint; Submit() decides on the TinyUSB task
     if (streaming != was_streaming) {
       ESP_LOGI(kTag, "computer %s the stream", streaming ? "opened" : "closed");
       was_streaming = streaming;
     }
-    if (!streaming) continue;
+    if (!streaming || g_stopped.load()) continue;
     if (g_board_mute.load() || g_host_mute[0].load() || g_host_mute[1].load()) {
       std::memset(block, 0, sizeof(block));
     } else {
@@ -147,26 +179,48 @@ void CaptureTask(void*) {
         for (std::int16_t& sample : block) sample = static_cast<std::int16_t>((sample * gain) >> 16);
       }
     }
-    // The driver's FIFO keeps the newest samples if the computer falls behind.
-    tud_audio_write(block, sizeof(block));
+    xMessageBufferSend(g_blocks, block, sizeof(block), 0);  // full: this block is dropped
+    if (!g_submit_pending.exchange(true)) usbd_defer_func(Submit, nullptr, false);
   }
+}
+
+// Startup: the codec answers over I2C with the gain just written, and I2S delivers sound (a live
+// microphone is never exactly silent). Only then is a microphone presented to the computer.
+bool CaptureReady(int gain_db) {
+  int gain_register = -1;
+  if (esp_codec_dev_read_reg(g_codec, 0x16, &gain_register) != ESP_CODEC_DEV_OK ||  // ADC PGA gain
+      gain_register != std::clamp(gain_db / 6, 0, 7)) {
+    ESP_LOGE(kTag, "codec gain did not read back (%d)", gain_register);
+    return false;
+  }
+  std::int16_t block[kBlockSamples];
+  for (int i = 0; i < kReadyBlocks; ++i) {
+    if (!ReadBlock(block)) return false;
+    for (const std::int16_t sample : block) {
+      if (sample != 0) return true;
+    }
+  }
+  ESP_LOGE(kTag, "codec delivered only silence");
+  return false;
 }
 
 }  // namespace
 
 bool MicStart(int gain_db) {
   UpdateGain();
-  if (!StartCodec(gain_db)) {
+  g_blocks = xMessageBufferCreate(4 * (kBlockSamples * sizeof(std::int16_t) + sizeof(std::size_t)));
+  if (g_blocks == nullptr || !StartCodec(gain_db) || !CaptureReady(gain_db) ||
+      xTaskCreate(CaptureTask, "kf_mic", 3072, nullptr, 6, nullptr) != pdPASS) {
     ESP_LOGE(kTag, "audio chip did not start");
     g_fault.store(true);
     return true;  // the screen says so; no microphone is presented to the computer
   }
-  if (xTaskCreate(CaptureTask, "kf_mic", 3072, nullptr, 6, nullptr) != pdPASS) {
-    g_fault.store(true);
-    return true;
-  }
   return UsbDeviceStart(UsbPersonality::kMic);
 }
+
+void MicStop() { g_stopped.store(true); }
+
+bool MicLive() { return !g_stopped.load() && !g_fault.load() && Streaming(); }
 
 void MicSetMuted(bool muted) { g_board_mute.store(muted); }
 
@@ -177,7 +231,7 @@ void MicSetGain(int gain_db) {
 MicStatus MicStatusNow() {
   MicStatus status;
   status.usb = tud_mounted() && !tud_suspended();
-  status.live = Streaming();
+  status.live = MicLive();
   status.muted = g_board_mute.load();
   status.host_muted = g_host_mute[0].load() || g_host_mute[1].load();
   status.fault = g_fault.load();

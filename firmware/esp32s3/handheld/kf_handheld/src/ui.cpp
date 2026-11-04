@@ -1406,20 +1406,27 @@ void RefreshMic(const MicView& view) {
   lv_arc_set_value(g.mic_arc, view.fault ? 0 : view.level);
   lv_obj_set_style_arc_color(g.mic_arc, lv_color_hex(silent ? kMuted : kMicColor), LV_PART_INDICATOR);
   lv_obj_set_style_border_color(g.mic_button, lv_color_hex(view.live && !silent ? kMicColor : kBorder), 0);
+  // Live is shown whenever the computer has the stream open, muted or not.
   std::uint32_t color = kText;
   const char* state = "Ready";
   const char* detail = "Choose it as the computer's microphone.";
   if (view.fault) {
     color = kError;
     state = "Microphone not responding";
-    detail = "Go Home and open Microphone again.";
+    detail = "It is off. Go Home and open Microphone again.";
   } else if (!view.usb) {
     state = "Not connected";
     detail = "Plug the board into a computer.";
+  } else if (view.live) {
+    color = silent ? kKeepAwakeColor : kMicColor;
+    state = view.muted        ? LV_SYMBOL_BULLET " Live, muted here"
+            : view.host_muted ? LV_SYMBOL_BULLET " Live, muted on the computer"
+                              : LV_SYMBOL_BULLET " Live";
+    detail = silent ? "The computer hears silence." : "The computer is listening.";
   } else if (view.muted) {
     color = kKeepAwakeColor;
     state = "Muted";
-    detail = view.live ? "The computer hears silence." : "Tap the microphone to unmute.";
+    detail = "Tap the microphone to unmute.";
   } else if (view.host_muted) {
     color = kKeepAwakeColor;
     state = "Muted on the computer";
