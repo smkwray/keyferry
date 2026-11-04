@@ -6,7 +6,9 @@ param(
     [ValidateRange(0, 256)]
     [int]$Jobs = 0,
 
-    [switch]$NoCcache
+    [switch]$NoCcache,
+
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +36,7 @@ try {
     . (Join-Path $PSScriptRoot 'idf_env.ps1') -ToolchainRoot $projectRoot -NoCcache:$NoCcache
     $cacheArgument = if ($NoCcache) { '--no-ccache' } else { '--ccache' }
     idf.py $cacheArgument -C firmware/esp32s3/handheld/check -B $BuildDir `
-        "-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON" build
+        "-DCMAKE_NINJA_FORCE_RESPONSE_FILE=ON" "-DKEYFERRY_HANDHELD_SELFTEST=$(if ($SelfTest) { 'ON' } else { 'OFF' })" build
     if ($LASTEXITCODE -ne 0) { throw 'Handheld firmware build failed.' }
 } finally {
     Pop-Location

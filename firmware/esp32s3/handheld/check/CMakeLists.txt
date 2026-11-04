@@ -10,5 +10,10 @@ set(SDKCONFIG_DEFAULTS
     "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults"
     "${KEYFERRY_BOARD_DIR}/sdkconfig.defaults"
     "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.partitions.defaults")
+option(KEYFERRY_HANDHELD_SELFTEST "Bench image that cycles Home and Keep Awake unattended" OFF)
+if(KEYFERRY_HANDHELD_SELFTEST)
+    add_compile_definitions(KEYFERRY_HANDHELD_SELFTEST=1)
+    set(PROJECT_VER "0.0.1-handheld-selftest")
+endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(keyferry_handheld_check)
