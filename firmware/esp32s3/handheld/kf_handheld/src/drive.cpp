@@ -68,7 +68,8 @@ FIL g_image;
 bool g_open = false;
 std::atomic<bool> g_writable{false};
 std::atomic<std::uint64_t> g_bytes{0};
-bool g_prevent_removal = false;  // TinyUSB task only
+bool g_prevent_removal = false;  // TinyUSB task only; held for the USB session that set it
+std::uint32_t g_prevent_session = 0;
 char g_marker[64] = {};
 DWORD g_linkmap[64];  // fast-seek cluster map: up to 31 fragments
 std::atomic<ExportState> g_export{ExportState::kNone};
@@ -137,16 +138,24 @@ bool IsOwnTemp(const char* name) {
 
 sdmmc_card_t* g_sd = nullptr;
 std::uint8_t* g_verify = nullptr;
+// Latched by any failed card read or write. FatFs ignores some write results (the second FAT copy,
+// FSInfo), so the fault is kept here and reported through CTRL_SYNC, serving and admission.
+std::atomic<bool> g_card_fault{false};
+
+DRESULT Fault() {
+  g_card_fault.store(true);
+  return RES_ERROR;
+}
 
 DSTATUS CardInit(unsigned char) { return 0; }
 DSTATUS CardStatus(unsigned char) { return 0; }
 
 DRESULT CardRead(unsigned char, unsigned char* buffer, uint32_t sector, unsigned count) {
-  return sdmmc_read_sectors(g_sd, buffer, sector, count) == ESP_OK ? RES_OK : RES_ERROR;
+  return sdmmc_read_sectors(g_sd, buffer, sector, count) == ESP_OK ? RES_OK : Fault();
 }
 
 DRESULT CardWrite(unsigned char, const unsigned char* buffer, uint32_t sector, unsigned count) {
-  if (sdmmc_write_sectors(g_sd, buffer, sector, count) != ESP_OK) return RES_ERROR;
+  if (sdmmc_write_sectors(g_sd, buffer, sector, count) != ESP_OK) return Fault();
   if (count == 1) return RES_OK;
   constexpr unsigned kPerRead = kVerifyChunk / kSector;
   for (unsigned done = 0; done < count;) {
@@ -154,7 +163,7 @@ DRESULT CardWrite(unsigned char, const unsigned char* buffer, uint32_t sector, u
     if (sdmmc_read_sectors(g_sd, g_verify, sector + done, now) != ESP_OK ||
         std::memcmp(g_verify, buffer + static_cast<std::size_t>(done) * kSector, now * kSector) != 0) {
       ESP_LOGE(kTag, "card write of %u blocks at %u did not read back", count, static_cast<unsigned>(sector));
-      return RES_ERROR;
+      return Fault();
     }
     done += now;
   }
@@ -163,7 +172,7 @@ DRESULT CardWrite(unsigned char, const unsigned char* buffer, uint32_t sector, u
 
 DRESULT CardIoctl(unsigned char, unsigned char command, void* buffer) {
   switch (command) {
-    case CTRL_SYNC: return RES_OK;  // the SD host has no write cache
+    case CTRL_SYNC: return g_card_fault.load() ? RES_ERROR : RES_OK;  // no write cache to flush
     case GET_SECTOR_COUNT: *static_cast<DWORD*>(buffer) = g_sd->csd.capacity; return RES_OK;
     case GET_SECTOR_SIZE: *static_cast<WORD*>(buffer) = g_sd->csd.sector_size; return RES_OK;
     default: return RES_PARERR;  // no TRIM: nothing on the card is discarded
@@ -235,7 +244,13 @@ void ScanLocked() {
     char marker[64];
     MarkerPath(marker, sizeof(marker), drive.name);
     FILINFO marker_info;
-    drive.dirty = f_stat(marker, &marker_info) != FR_NO_FILE;  // unknown counts as marked
+    const FRESULT marked = f_stat(marker, &marker_info);
+    if (marked != FR_OK && marked != FR_NO_FILE) {
+      result = marked;  // the marker could not be read: a card error, not a listing
+      ok = false;
+      break;
+    }
+    drive.dirty = marked == FR_OK;
   }
   if (opened) f_closedir(&dir);
   if (!ok) {
@@ -258,7 +273,7 @@ void ScanLocked() {
     g_free.store(0);  // unknown: creation refuses
     ESP_LOGW(kTag, "free space unknown");
   }
-  Publish(found, count, CardState::kReady);
+  Publish(found, count, g_card_fault.load() ? CardState::kError : CardState::kReady);
 }
 
 void ScanTask(void*) {
@@ -298,33 +313,22 @@ void FailLocked(const char* what, FRESULT result) {
   g_export.store(ExportState::kFailed);
 }
 
-// TinyUSB derives each READ(10)/WRITE(10) block size from the CBW (bytes / blocks) and steps the
-// callback LBA by it. Valid commands use 512-byte blocks: every chunk is whole sectors at offset 0
-// and the next chunk of the same command starts where the last ended. Anything else is rejected.
-std::int64_t g_next_lba = -1;     // TinyUSB task only; -1 between commands
-std::uint32_t g_command_session = 0;
-
-void EndCommand() { g_next_lba = -1; }
-
+// TinyUSB derives each READ(10)/WRITE(10) block size from the CBW (bytes / blocks, truncated) and
+// keeps the CBW to itself, so a host whose byte count disagrees with its block count cannot be
+// caught here in general (ADR 0018 rule 4 records this). Every chunk must still be whole sectors
+// at offset 0, and every byte stays inside the selected image either way.
 int32_t Transfer(std::uint32_t lba, std::uint32_t offset, void* buffer, std::uint32_t size, bool write) {
-  const std::uint32_t session = UsbDeviceSession();
-  if (session != g_command_session) {
-    g_command_session = session;  // a reset or reattach ended any command in progress
-    g_next_lba = -1;
-  }
-  if (offset != 0 || size == 0 || size % kSector != 0 ||
-      (g_next_lba >= 0 && static_cast<std::int64_t>(lba) != g_next_lba)) {
-    EndCommand();
+  if (offset != 0 || size == 0 || size % kSector != 0) {
     tud_msc_set_sense(0, SCSI_SENSE_ILLEGAL_REQUEST, 0x24, 0x00);  // invalid field in CDB
     return -1;
   }
   const std::uint64_t at = static_cast<std::uint64_t>(lba) * kSector;
   Lock();
   const std::uint64_t bytes = g_bytes.load();
+  if (g_card_fault.load() && g_open) FailLocked("card", FR_DISK_ERR);
   if (!g_open || g_export.load() != ExportState::kServing || (write && !g_writable.load()) ||
       at > bytes || size > bytes - at) {
     Unlock();
-    EndCommand();
     return -1;  // TinyUSB fails the command
   }
   UINT moved = 0;
@@ -333,29 +337,33 @@ int32_t Transfer(std::uint32_t lba, std::uint32_t offset, void* buffer, std::uin
     result = write ? f_write(&g_image, buffer, size, &moved) : f_read(&g_image, buffer, size, &moved);
   }
   if (result == FR_OK && write) result = f_sync(&g_image);  // on the card before acknowledged
-  if (result != FR_OK || moved != size) {
+  if (result != FR_OK || moved != size || g_card_fault.load()) {
     FailLocked(write ? "write" : "read", result != FR_OK ? result : FR_DISK_ERR);
     Unlock();
-    EndCommand();
     return -1;
   }
   Unlock();
-  g_next_lba = static_cast<std::int64_t>(lba) + size / kSector;
   (write ? g_written : g_read).fetch_add(size);
   g_last_io.store(esp_timer_get_time());
   return static_cast<int32_t>(size);
 }
 
 // The computer ejected the disk. True only when the image is synced and closed; the marker is
-// removed only then. A failed sync or close is a failed eject: the drive stops being served.
+// removed only then. A failed sync or close is a failed eject: the drive stops being served, and
+// every later eject request fails too. Repeating a clean eject succeeds.
 bool Eject() {
   Lock();
-  bool clean = true;
+  const ExportState state = g_export.load();
+  if (state != ExportState::kServing) {
+    Unlock();
+    return state == ExportState::kEjected;
+  }
+  bool clean = !g_card_fault.load();
   if (g_open) {
     const FRESULT synced = f_sync(&g_image);
     const FRESULT closed = f_close(&g_image);
     g_open = false;
-    clean = synced == FR_OK && closed == FR_OK;
+    clean = clean && synced == FR_OK && closed == FR_OK && !g_card_fault.load();
     if (clean && g_writable.load()) {
       const FRESULT cleared = f_unlink(g_marker);
       if (cleared != FR_OK) {
@@ -365,9 +373,7 @@ bool Eject() {
     }
     if (!clean) ESP_LOGE(kTag, "eject: sync %d, close %d", synced, closed);
   }
-  if (g_export.load() == ExportState::kServing) {
-    g_export.store(clean ? ExportState::kEjected : ExportState::kFailed);
-  }
+  g_export.store(clean ? ExportState::kEjected : ExportState::kFailed);
   Unlock();
   ESP_LOGI(kTag, "eject from the computer: %s", clean ? "clean" : "failed");
   return clean;
@@ -578,7 +584,7 @@ bool DriveExport(int index, bool writable) {
   taskEXIT_CRITICAL(&g_list_mux);
   if (!listed) return false;
   Lock();
-  if (g_closed.load() || g_export.load() != ExportState::kNone) {
+  if (g_closed.load() || g_card_fault.load() || g_export.load() != ExportState::kNone) {
     Unlock();
     return false;
   }
@@ -673,6 +679,10 @@ bool DriveCreate(int mib) {
   Progress(0, "Preparing...");
   if (xTaskCreate(CreateTask, "kf_drive_new", 6144, reinterpret_cast<void*>(static_cast<std::intptr_t>(mib)),
                   3, nullptr) != pdPASS) {
+    // Accepted but never started: still a finished, failed creation the screen can show.
+    Progress(0, "Could not start: out of memory");
+    g_create_result.store(-1);
+    g_create_finished.fetch_add(1);
     g_creating.store(false);
     return false;
   }
@@ -726,11 +736,21 @@ extern "C" void msc_storage_mount_to_app(void) {}
 
 extern "C" std::uint8_t tud_msc_get_maxlun_cb(void) { return 1; }
 
-extern "C" void tud_msc_inquiry_cb(std::uint8_t, std::uint8_t vendor[8], std::uint8_t product[16],
-                                   std::uint8_t revision[4]) {
-  std::memcpy(vendor, "Keyferry", 8);
-  std::memcpy(product, "USB Drive       ", 16);
-  std::memcpy(revision, "1.0 ", 4);
+// LUN 0 is the drive. Any other LUN answers "no device here" (qualifier 011b, type 1Fh).
+extern "C" std::uint32_t tud_msc_inquiry2_cb(std::uint8_t lun, scsi_inquiry_resp_t* response, std::uint32_t) {
+  if (lun != 0) {
+    std::memset(response, 0, sizeof(*response));
+    response->peripheral_qualifier = 3;
+    response->peripheral_device_type = 0x1F;
+    response->version = 2;
+    response->response_data_format = 2;
+    response->additional_length = sizeof(scsi_inquiry_resp_t) - 5;
+    return sizeof(scsi_inquiry_resp_t);
+  }
+  std::memcpy(response->vendor_id, "Keyferry", 8);
+  std::memcpy(response->product_id, "USB Drive       ", 16);
+  std::memcpy(response->product_rev, "1.0 ", 4);
+  return sizeof(scsi_inquiry_resp_t);
 }
 
 extern "C" bool tud_msc_test_unit_ready_cb(std::uint8_t lun) { return KnownLun(lun) && MediumPresent(lun); }
@@ -751,13 +771,15 @@ extern "C" bool tud_msc_is_writable_cb(std::uint8_t lun) {
 extern "C" bool tud_msc_prevent_allow_medium_removal_cb(std::uint8_t lun, std::uint8_t prohibit, std::uint8_t) {
   if (!KnownLun(lun)) return false;
   keyferry::handheld::g_prevent_removal = (prohibit & 0x01) != 0;
+  keyferry::handheld::g_prevent_session = keyferry::handheld::UsbDeviceSession();
   return true;
 }
 
 extern "C" bool tud_msc_start_stop_cb(std::uint8_t lun, std::uint8_t, bool start, bool load_eject) {
   if (!KnownLun(lun)) return false;
   if (!load_eject || start) return true;  // spin up/down and load: nothing to do
-  if (keyferry::handheld::g_prevent_removal) {
+  if (keyferry::handheld::g_prevent_removal &&
+      keyferry::handheld::g_prevent_session == keyferry::handheld::UsbDeviceSession()) {
     tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x53, 0x02);  // medium removal prevented
     return false;
   }
@@ -778,8 +800,6 @@ extern "C" std::int32_t tud_msc_write10_cb(std::uint8_t lun, std::uint32_t lba, 
   return keyferry::handheld::Transfer(lba, offset, buffer, size, true);
 }
 
-extern "C" void tud_msc_read10_complete_cb(std::uint8_t) { keyferry::handheld::EndCommand(); }
-extern "C" void tud_msc_write10_complete_cb(std::uint8_t) { keyferry::handheld::EndCommand(); }
 
 extern "C" std::int32_t tud_msc_scsi_cb(std::uint8_t lun, std::uint8_t const command[16], void* buffer,
                                         std::uint16_t size) {
