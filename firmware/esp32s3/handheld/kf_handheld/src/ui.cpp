@@ -3,6 +3,7 @@
 #include "ui.h"
 
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 
 namespace keyferry::handheld::ui {
@@ -295,10 +296,14 @@ lv_obj_t* RowButton(lv_obj_t* row, int width, int x_from_right, const char* text
 
 void ShowBrightness() { lv_label_set_text_fmt(g.brightness_value, "%d%%", g.brightness); }
 
+// A tap stores its new value at once. A long press steps repeatedly and stores once on release;
+// LVGL sends RELEASED before SHORT_CLICKED, so a tap's release has nothing pending to store.
 void OnBrightnessStep(lv_event_t* event) {
+  static bool pending = false;
   const lv_event_code_t code = lv_event_get_code(event);
   if (code == LV_EVENT_RELEASED) {
-    Emit(Action::kBrightnessCommit, g.brightness);
+    if (pending) Emit(Action::kBrightnessCommit, g.brightness);
+    pending = false;
     return;
   }
   const int step = Unpack(event);
@@ -310,6 +315,11 @@ void OnBrightnessStep(lv_event_t* event) {
   g.brightness = value;
   ShowBrightness();
   Emit(Action::kBrightness, value);
+  if (code == LV_EVENT_SHORT_CLICKED) {
+    Emit(Action::kBrightnessCommit, value);
+  } else {
+    pending = true;
+  }
 }
 
 void ShowHost() {
@@ -494,6 +504,9 @@ void BuildMacros() {
   }
   g.macro_notice = Label(screen, kSmall, kMuted, "");
   lv_obj_set_pos(g.macro_notice, kMargin + kHomeWidth + 16, kMargin + 46);
+  // Between the Home and next-page buttons; longer notices scroll.
+  lv_obj_set_width(g.macro_notice, kWidth - 2 * kMargin - kHomeWidth - kControl - 32);
+  lv_label_set_long_mode(g.macro_notice, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
   lv_obj_set_hidden(g.macro_notice, true);
 
   g.macro_pages = lv_tileview_create(screen);
@@ -657,7 +670,10 @@ void RefreshMacros(const MacrosView& view) {
   lv_obj_set_hidden(g.macro_notice, !notice);
   lv_obj_set_hidden(g.macro_dots, notice);
   if (notice) {
-    lv_label_set_text(g.macro_notice, view.notice);
+    // Setting the same text again would restart the scroll of a long notice.
+    if (std::strcmp(lv_label_get_text(g.macro_notice), view.notice) != 0) {
+      lv_label_set_text(g.macro_notice, view.notice);
+    }
     lv_obj_set_style_text_color(g.macro_notice, lv_color_hex(view.notice_is_error ? kError : kMuted), 0);
   }
 }

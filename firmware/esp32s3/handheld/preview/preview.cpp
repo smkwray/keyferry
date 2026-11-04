@@ -28,7 +28,8 @@ void Settle() {
 
 const char* const kScenes[] = {
     "home", "check", "settings", "keep-awake", "keep-awake-running", "macros-0", "macros-1",
-    "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "keyferry",
+    "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
+    "keyferry",
 };
 
 bool Scene(const char* name) {
@@ -71,6 +72,10 @@ bool Scene(const char* name) {
     if (std::strstr(name, "-busy") != nullptr) {
       view.busy = config.macro_page << 8 | 2;
       view.notice = "Sent: Screenshot";
+    }
+    if (std::strstr(name, "-releasing") != nullptr) {
+      view.notice = "Releasing keys - wake or unplug the computer";
+      view.notice_is_error = true;
     }
     ui::RefreshMacros(view);
   } else if (std::strcmp(name, "keyferry") == 0) {

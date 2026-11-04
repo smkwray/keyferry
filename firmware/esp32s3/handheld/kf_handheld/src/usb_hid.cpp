@@ -9,6 +9,7 @@
 #include "class/hid/hid_device.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "tinyusb.h"
@@ -19,6 +20,7 @@ namespace {
 
 constexpr char kTag[] = "usb_hid";
 constexpr TickType_t kReportTimeout = pdMS_TO_TICKS(500);
+constexpr std::int64_t kReadyWaitUs = 100000;
 
 constexpr std::uint8_t kMouseDescriptor[] = {TUD_HID_REPORT_DESC_MOUSE()};
 constexpr std::uint8_t kMacroPadDescriptor[] = {
@@ -52,6 +54,7 @@ const char* g_macro_strings[] = {"\x09\x04", "Keyferry", "Keyferry Macros", g_se
 
 SemaphoreHandle_t g_report_done = nullptr;
 std::atomic<bool> g_usb_owned{false};
+std::atomic<bool> g_in_flight{false};
 std::atomic<UsbPersonality> g_personality{UsbPersonality::kKeepAwakeMouse};
 
 }  // namespace
@@ -81,20 +84,34 @@ bool UsbHidStart(UsbPersonality personality) {
   return true;
 }
 
+// One report in flight at a time. A report whose confirmation timed out stays in flight until its
+// completion arrives or the host drops the device, so a late completion can never be taken as the
+// confirmation of a later report. TinyUSB frees the endpoint before calling the completion
+// callback, so endpoint readiness alone does not mark that boundary.
 bool UsbHidSend(std::uint8_t report_id, const void* report, std::uint16_t length) {
-  // Wait briefly for the endpoint (a previous report may still be in flight).
-  for (int waited = 0; !tud_hid_ready(); ++waited) {
-    if (waited >= 100 || !tud_mounted() || tud_suspended()) return false;
-    vTaskDelay(pdMS_TO_TICKS(1));
+  const std::int64_t deadline = esp_timer_get_time() + kReadyWaitUs;
+  for (;;) {
+    if (!tud_mounted()) {
+      g_in_flight.store(false);  // no transfer survives the host dropping the device
+      return false;
+    }
+    if (tud_suspended()) return false;
+    if (!g_in_flight.load() && tud_hid_ready()) break;
+    if (esp_timer_get_time() >= deadline) return false;
+    vTaskDelay(1);  // at least one tick: the bridge runs FreeRTOS at 100 Hz
   }
-  xSemaphoreTake(g_report_done, 0);  // drop any stale completion
-  if (!tud_hid_report(report_id, report, length)) return false;
+  xSemaphoreTake(g_report_done, 0);  // the retired transfer's completion, if it is still counted
+  g_in_flight.store(true);
+  if (!tud_hid_report(report_id, report, length)) {
+    g_in_flight.store(false);
+    return false;
+  }
   return xSemaphoreTake(g_report_done, kReportTimeout) == pdTRUE;
 }
 
 bool UsbHidMounted() { return tud_mounted(); }
 bool UsbHidSuspended() { return tud_suspended(); }
-bool UsbHidReady() { return tud_hid_ready(); }
+bool UsbHidReady() { return !g_in_flight.load() && tud_hid_ready(); }
 
 bool UsbOwnedByHandheld() { return g_usb_owned.load(); }
 
@@ -104,6 +121,7 @@ const std::uint8_t* HandheldHidReportDescriptor(std::uint8_t) {
 
 void HandheldHidReportComplete(std::uint8_t) {
   if (g_report_done != nullptr) xSemaphoreGive(g_report_done);
+  g_in_flight.store(false);  // after the give: the next send drains this completion first
 }
 
 }  // namespace keyferry::handheld

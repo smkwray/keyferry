@@ -240,10 +240,47 @@ bool g_notice_error = false;
 
 bool UsbFunction() { return g_function == Function::kKeepAwake || g_function == Function::kMacros; }
 
-// Stops any input a handheld USB function is producing; safe from any task.
+// Stops any input a handheld USB function is producing; safe from any task. For Macros it is
+// final for this boot: the only way on is the exit worker's restart.
 void StopInput() {
   if (g_function == Function::kKeepAwake) KeepAwakeSetRunning(false);
-  if (g_function == Function::kMacros) MacroPadStop();
+  if (g_function == Function::kMacros) MacroPadClose();
+}
+
+// Leaving Keep Awake or Macros: a pre-created worker stops input and restarts to Home only once
+// nothing may be held (Keep Awake's nudges hold nothing) and BOOT is up, so GPIO0 cannot select
+// ROM download. Home, BOOT and the stall supervisor all go through it.
+constexpr std::int64_t kExitWaitNoticeUs = 1500000;
+TaskHandle_t g_usb_exit_worker = nullptr;
+std::atomic<bool> g_usb_exit_requested{false};
+std::atomic<bool> g_usb_exit_waiting{false};
+
+void UsbExitWorker(void*) {
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  StopInput();
+  const std::int64_t started = esp_timer_get_time();
+  for (;;) {
+    const bool neutral = g_function != Function::kMacros || MacroPadNeutral();
+    if (neutral && gpio_get_level(kBootGpio) != 0) Launch(Function::kHome);
+    if (!neutral && esp_timer_get_time() - started > kExitWaitNoticeUs) {
+      if (!g_usb_exit_waiting.exchange(true)) ESP_LOGW(kTag, "exit waiting for a confirmed release");
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+void StartUsbExitWorker() {
+  static StaticTask_t control;
+  static StackType_t stack[3072 / sizeof(StackType_t)];
+  g_usb_exit_worker = xTaskCreateStatic(UsbExitWorker, "kf_usb_leave", std::size(stack), nullptr, 5,
+                                        stack, &control);
+}
+
+void RequestUsbExit() {
+  StopInput();
+  if (g_usb_exit_worker != nullptr && !g_usb_exit_requested.exchange(true)) {
+    xTaskNotifyGive(g_usb_exit_worker);
+  }
 }
 
 bool PmuRead(std::uint8_t reg, std::uint8_t* out, std::size_t length) {
@@ -441,8 +478,7 @@ void OnAction(ui::Action action, int value) {
       if (g_function == Function::kKeyferry) {
         RequestKeyferryExit();
       } else {
-        StopInput();
-        Launch(Function::kHome);
+        RequestUsbExit();
       }
       break;
     case ui::Action::kWake: Wake(); break;
@@ -513,6 +549,7 @@ void RefreshMacros() {
       case MacroResult::kSent: std::snprintf(g_notice, sizeof(g_notice), "Sent: %s", name); break;
       case MacroResult::kNotConnected: std::snprintf(g_notice, sizeof(g_notice), "No computer connected"); break;
       case MacroResult::kNotConfirmed: std::snprintf(g_notice, sizeof(g_notice), "Not confirmed: %s", name); break;
+      case MacroResult::kReleasing: std::snprintf(g_notice, sizeof(g_notice), "Releasing keys, try again"); break;
       default: std::snprintf(g_notice, sizeof(g_notice), "Stopped"); break;
     }
     g_notice_error = result != MacroResult::kSent;
@@ -521,7 +558,10 @@ void RefreshMacros() {
   ui::MacrosView view;
   view.usb = UsbHidMounted();
   view.busy = MacroPadBusy();
-  if (now < g_notice_until) {
+  if (g_usb_exit_waiting.load()) {
+    view.notice = "Releasing keys - wake or unplug the computer";
+    view.notice_is_error = true;
+  } else if (now < g_notice_until) {
     view.notice = g_notice;
     view.notice_is_error = g_notice_error;
   } else if (!view.usb) {
@@ -607,7 +647,12 @@ void OnTick(lv_timer_t*) {
   }
   if (!boot_down && g_boot_down) {
     ESP_LOGI(kTag, "BOOT up%s", g_boot_long ? " (long)" : "");
-    if (UsbFunction()) Launch(Function::kHome);  // after release: no ROM strap
+    if (UsbFunction()) {
+      RequestUsbExit();
+      Wake();
+      g_boot_down = boot_down;
+      return;
+    }
     if (g_function == Function::kKeyferry) {
       if (g_boot_long) RequestKeyferryExit();
       Wake();
@@ -678,11 +723,10 @@ void Supervise(void*) {
   if (boot_down && !boot_was_down) boot_down_since = now;
   if (UsbFunction()) {
     if (boot_down) StopInput();
-    if (boot_was_down && !boot_down) Launch(Function::kHome);  // after release: no ROM strap
-    if (now - last_progress > 5000000) {
+    if (boot_was_down && !boot_down) RequestUsbExit();
+    if (now - last_progress > 5000000 && !g_usb_exit_requested.load()) {
       ESP_LOGE(kTag, "UI stalled for 5 s inside a function; returning Home");
-      StopInput();
-      Launch(Function::kHome);
+      RequestUsbExit();
     }
   }
   if (g_function == Function::kKeyferry && now > 60000000 && g_keyferry_starts.count != 0) {
@@ -771,6 +815,8 @@ void StartUi() {
       g_keyferry.begin_leave(g_keyferry.context);
     }
   }
+
+  if (UsbFunction()) StartUsbExitWorker();  // before any input can start
 
   ResetPanelAndTouch();
   if (bsp_display_start() == nullptr) {
