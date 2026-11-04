@@ -1,0 +1,2 @@
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../boards/waveshare_amoled_1_8/partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="../boards/waveshare_amoled_1_8/partitions.csv"
