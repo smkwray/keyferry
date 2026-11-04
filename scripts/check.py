@@ -449,20 +449,49 @@ def run_cpp_check(compiler: str) -> None:
              ROOT / "firmware/esp32s3/components/kf_discovery/src/discovery.cpp",
              transport / "test/esp_transport_test.cpp"],
         ))
+        msvc = Path(compiler).name.lower() in {"cl", "cl.exe"}
+        # USB Drive: production drive.cpp on the pinned ESP-IDF's own FatFs (C sources, built
+        # without warnings as errors); only the platform headers are substituted.
+        idf = Path(os.environ.get("IDF_PATH") or ROOT / ".tools/esp-idf-v6.0.3")
+        version = idf / "version.txt"
+        if not version.is_file() or version.read_text(encoding="utf-8").strip() != "v6.0.3":
+            print(f"ERROR: handheld-drive-test needs the pinned ESP-IDF v6.0.3 at {idf} "
+                  "(run the project toolchain setup, or set IDF_PATH)", file=sys.stderr)
+            raise SystemExit(1)
+        fatfs = idf / "components/fatfs"
+        handheld = ROOT / "firmware/esp32s3/handheld/kf_handheld"
+        drive_shims = tmp / "idf-drive"
+        headers = ["bsp/esp-bsp.h", "esp_err.h", "esp_heap_caps.h", "esp_log.h", "esp_timer.h",
+                   "freertos/FreeRTOS.h", "freertos/semphr.h", "freertos/task.h",
+                   "sd_protocol_types.h", "sdkconfig.h", "sdmmc_cmd.h", "tusb.h"]
+        if sys.platform == "win32":
+            headers.append("windows.h")  # ff.h takes its integer types from it there
+        if msvc:
+            headers += ["strings.h", "sys/param.h", "sys/time.h"]
+        for header in headers:
+            path = drive_shims / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('#include "drive_test_stubs.h"\n', encoding="utf-8")
+        checks.append((
+            "handheld-drive-test",
+            [drive_shims, handheld / "test", handheld / "src", fatfs / "diskio", fatfs / "src"],
+            [fatfs / "src/ff.c", fatfs / "src/ffunicode.c", fatfs / "diskio/diskio.c",
+             fatfs / "port/freertos/ffsystem.c", handheld / "src/drive.cpp",
+             handheld / "test/drive_test.cpp"],
+        ))
         for name, includes, sources in checks:
             executable = tmp / (f"{name}.exe" if sys.platform == "win32" else name)
-            if Path(compiler).name.lower() in {"cl", "cl.exe"}:
+            if msvc:
                 objects = []
                 for index, source in enumerate(sources):
                     object_path = tmp / f"{name}-{index}-{source.stem}.obj"
+                    flags = (["/std:c11", "/W1"] if source.suffix == ".c"
+                             else ["/std:c++17", "/W4", "/WX", "/EHsc"])
                     run(
                         [
                             compiler,
                             "/nologo",
-                            "/std:c++17",
-                            "/W4",
-                            "/WX",
-                            "/EHsc",
+                            *flags,
                             *(f"/I{include}" for include in includes),
                             "/c",
                             str(source),
@@ -478,14 +507,22 @@ def run_cpp_check(compiler: str) -> None:
                     f"/Fe:{executable}",
                 ]
             else:
+                objects = []
+                for index, source in enumerate(s for s in sources if s.suffix == ".c"):
+                    object_path = tmp / f"{name}-{index}-{source.stem}.o"
+                    run([compiler, "-x", "c", *(f"-I{include}" for include in includes),
+                         "-c", str(source), "-o", str(object_path)], cwd=tmp)
+                    objects.append(object_path)
                 command = [
                     compiler,
                     "-std=c++17",
                     "-Wall",
                     "-Wextra",
                     "-Werror",
+                    "-pthread",
                     *(f"-I{include}" for include in includes),
-                    *(str(source) for source in sources),
+                    *(str(source) for source in sources if source.suffix != ".c"),
+                    *(str(path) for path in objects),
                     "-o",
                     str(executable),
                 ]
