@@ -134,6 +134,12 @@ Function TakeSelection(bool* deliberate) {
   g_keyferry_starts = KeyferryStarts{kStartsMagic, 0};
   ESP_LOGI("handheld", "restarting into function %u", static_cast<unsigned>(value));
   vTaskDelay(pdMS_TO_TICKS(50));
+  // GPIO0 (BOOT) is the ROM download strap: reset only once it has read high for 50 ms straight,
+  // checked here, immediately before the reset, so a press during the delay cannot slip through.
+  for (int high_ms = 0; high_ms < 50;) {
+    high_ms = gpio_get_level(kBootGpio) != 0 ? high_ms + 10 : 0;
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
   // Full digital-system reset (RTC memory kept). A CPU-only esp_restart() left the display's
   // SPI/DMA state behind and the next panel reset hung on the bench (2026-11-04).
   esp_rom_software_reset_system();

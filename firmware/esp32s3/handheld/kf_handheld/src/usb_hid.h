@@ -17,8 +17,16 @@ constexpr std::uint8_t kReportMedia = 3;
 // Installs TinyUSB with that personality, after claiming the HID callbacks.
 bool UsbHidStart(UsbPersonality personality);
 // Sends one report and waits for the host to take it (500 ms). False: refused or unconfirmed.
-// One sending task per boot.
-bool UsbHidSend(std::uint8_t report_id, const void* report, std::uint16_t length);
+// One sending task per boot. A press (anything that is not an all-released report) is refused
+// once UsbHidClosePresses() has returned; releases are always allowed.
+bool UsbHidSend(std::uint8_t report_id, const void* report, std::uint16_t length, bool press = false);
+// From any task; after it returns no further press is submitted this boot.
+void UsbHidClosePresses();
+// Changes whenever the host configures or drops the device: a new session holds nothing from an
+// earlier one.
+std::uint32_t UsbHidSession();
+// The session of the most recently submitted report.
+std::uint32_t UsbHidLastSubmittedSession();
 bool UsbHidMounted();
 bool UsbHidSuspended();
 bool UsbHidReady();

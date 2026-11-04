@@ -31,6 +31,7 @@ QueueHandle_t g_requests = nullptr;
 std::atomic<int> g_busy{-1};
 std::atomic<bool> g_closed{false};  // latched by MacroPadClose(); the boot ends in a restart
 std::atomic<bool> g_dirty{false};   // a press may still be held on the computer
+std::atomic<std::uint32_t> g_dirty_session{0};  // USB session of the last press submitted
 std::atomic<MacroResult> g_result{MacroResult::kNone};
 std::atomic<int> g_result_which{-1};
 std::atomic<std::uint32_t> g_result_serial{0};
@@ -41,21 +42,29 @@ void Record(MacroResult result, int which) {
   g_result_serial.fetch_add(1);
 }
 
+// Every non-neutral report goes through here: refused after MacroPadClose(), and it records the
+// USB session that may now hold it.
+bool Send(std::uint8_t report_id, const void* report, std::uint16_t length, bool press) {
+  const bool confirmed = UsbHidSend(report_id, report, length, press);
+  if (press) g_dirty_session.store(UsbHidLastSubmittedSession());
+  return confirmed;
+}
+
 bool Keyboard(std::uint8_t modifiers, std::uint8_t key) {
   hid_keyboard_report_t report{};
   report.modifier = modifiers;
   report.keycode[0] = key;
-  return UsbHidSend(kReportKeyboard, &report, sizeof(report));
+  return Send(kReportKeyboard, &report, sizeof(report), modifiers != 0 || key != 0);
 }
 
 bool Mouse(std::uint8_t buttons, std::int8_t wheel) {
   hid_mouse_report_t report{};  // x and y stay 0: the pointer never moves
   report.buttons = buttons;
   report.wheel = wheel;
-  return UsbHidSend(kReportMouse, &report, sizeof(report));
+  return Send(kReportMouse, &report, sizeof(report), buttons != 0 || wheel != 0);
 }
 
-bool Media(std::uint16_t usage) { return UsbHidSend(kReportMedia, &usage, sizeof(usage)); }
+bool Media(std::uint16_t usage) { return Send(kReportMedia, &usage, sizeof(usage), usage != 0); }
 
 // Checked before every press; releases are always allowed.
 bool Open() { return !g_closed.load(); }
@@ -103,10 +112,10 @@ bool Play(const macros::Step& step) {
 }
 
 // While something may be held: all-released reports until one set is confirmed. A computer that
-// dropped the device (unplug, re-enumeration) no longer holds anything from it.
+// dropped or re-enumerated the device since the last press holds nothing from it.
 void Neutralize() {
   if (!g_dirty.load()) return;
-  if (!UsbHidMounted()) {
+  if (!UsbHidMounted() || UsbHidSession() != g_dirty_session.load()) {
     g_dirty.store(false);
     ESP_LOGI(kTag, "computer dropped the device: nothing held");
     return;
@@ -126,9 +135,12 @@ void Player(void*) {
       continue;
     }
     MacroResult result = MacroResult::kStopped;
-    if (Open()) {
+    if (Open() && g_dirty.load()) {
+      result = MacroResult::kReleasing;  // never play over an unconfirmed release
+    } else if (Open()) {
       const macros::Page& page = macros::PageAt(request.which >> 8);
       const macros::Step* steps = macros::StepsFor(page.macros[request.which & 0xFF], request.host);
+      g_dirty_session.store(UsbHidSession());
       g_dirty.store(true);
       bool ok = true;
       for (int i = 0; ok && i < macros::kMaxSteps && steps[i].kind != macros::Kind::kNone; ++i) {
@@ -160,21 +172,28 @@ bool MacroPadStart() {
 }
 
 bool MacroPadRun(int page, int index, macros::Host host) {
-  if (g_requests == nullptr || !Open() || page < 0 || page >= macros::PageCount() || index < 0 ||
+  if (g_requests == nullptr || page < 0 || page >= macros::PageCount() || index < 0 ||
       index >= macros::PageAt(page).count) {
     return false;
   }
   const int which = page << 8 | index;
-  if (g_dirty.load()) {
-    Record(MacroResult::kReleasing, which);
-    return false;
-  }
-  if (!UsbHidMounted() || UsbHidSuspended()) {
-    Record(MacroResult::kNotConnected, which);
-    return false;
-  }
+  // Reserve the player first, then check: a release outstanding from the previous preset is
+  // visible once its busy flag is clear, so no check can pass on stale state.
   int idle = -1;
   if (!g_busy.compare_exchange_strong(idle, which)) return false;
+  MacroResult refusal = MacroResult::kNone;
+  if (!Open()) {
+    refusal = MacroResult::kStopped;
+  } else if (g_dirty.load()) {
+    refusal = MacroResult::kReleasing;
+  } else if (!UsbHidMounted() || UsbHidSuspended()) {
+    refusal = MacroResult::kNotConnected;
+  }
+  if (refusal != MacroResult::kNone) {
+    g_busy.store(-1);
+    Record(refusal, which);
+    return false;
+  }
   const Request request{which, host};
   if (xQueueSend(g_requests, &request, 0) != pdTRUE) {
     g_busy.store(-1);
@@ -183,7 +202,10 @@ bool MacroPadRun(int page, int index, macros::Host host) {
   return true;
 }
 
-void MacroPadClose() { g_closed.store(true); }
+void MacroPadClose() {
+  g_closed.store(true);
+  UsbHidClosePresses();  // a press already past Open() is refused at submission
+}
 
 bool MacroPadNeutral() { return g_busy.load() == -1 && !g_dirty.load(); }
 

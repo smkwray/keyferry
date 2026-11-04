@@ -3229,8 +3229,15 @@ extern "C" void tud_hid_report_complete_cb(
 }
 
 extern "C" void tud_hid_report_failed_cb(
-    const std::uint8_t instance, hid_report_type_t, const std::uint8_t*,
-    std::uint16_t) {
+    const std::uint8_t instance, hid_report_type_t report_type,
+    const std::uint8_t*, std::uint16_t) {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  if (keyferry::handheld::UsbOwnedByHandheld()) {
+    keyferry::handheld::HandheldHidReportFailed(
+        instance, report_type == HID_REPORT_TYPE_INPUT);
+    return;
+  }
+#endif
   const bool control_only = g_ble_control_usb.load(std::memory_order_acquire);
   const auto provisioning_instance =
       control_only ? keyferry::hil::kBleControlProvisioningHidInstance

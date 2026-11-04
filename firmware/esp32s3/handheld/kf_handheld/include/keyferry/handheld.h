@@ -29,5 +29,6 @@ void StartKeyferryShell(const KeyferryHooks& hooks);
 bool UsbOwnedByHandheld();
 const std::uint8_t* HandheldHidReportDescriptor(std::uint8_t instance);
 void HandheldHidReportComplete(std::uint8_t instance);
+void HandheldHidReportFailed(std::uint8_t instance, bool input_report);
 
 }  // namespace keyferry::handheld
