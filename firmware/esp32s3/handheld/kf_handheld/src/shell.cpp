@@ -206,7 +206,14 @@ int FlightVprintf(const char* format, va_list args) {
   return g_console_vprintf != nullptr ? g_console_vprintf(format, args) : n;
 }
 
-char g_previous_flight[sizeof(FlightLog::text)];
+// A function's working memory is claimed when it starts, from PSRAM when there is some, so
+// Keyferry (one image with every function) carries none of it.
+void* Claim(std::size_t count, std::size_t size) {
+  void* memory = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  return memory != nullptr ? memory : heap_caps_calloc(count, size, MALLOC_CAP_8BIT);
+}
+
+char* g_previous_flight = nullptr;  // Home only: claimed at boot, freed once printed
 std::uint32_t g_previous_flight_length = 0;
 
 // Home prints the previous boot's log a few seconds in, once the host has re-enumerated the
@@ -219,12 +226,18 @@ void PrintPreviousFlightLog() {
   std::printf("--- end flight log ---\n");
   std::fflush(stdout);
   g_previous_flight_length = 0;
+  heap_caps_free(g_previous_flight);
+  g_previous_flight = nullptr;
 }
 
 void StartFlightLog(bool keep_previous) {
-  if (keep_previous && g_flight.magic == kFlightMagic && g_flight.length <= sizeof(g_flight.text)) {
-    std::memcpy(g_previous_flight, g_flight.text, g_flight.length);
-    g_previous_flight_length = g_flight.length;
+  if (keep_previous && g_flight.magic == kFlightMagic && g_flight.length > 0 &&
+      g_flight.length <= sizeof(g_flight.text)) {
+    g_previous_flight = static_cast<char*>(Claim(1, g_flight.length));
+    if (g_previous_flight != nullptr) {
+      std::memcpy(g_previous_flight, g_flight.text, g_flight.length);
+      g_previous_flight_length = g_flight.length;
+    }
   }
   g_flight.magic = kFlightMagic;
   g_flight.length = 0;
@@ -317,11 +330,10 @@ void UsbExitWorker(void*) {
   }
 }
 
-void StartUsbExitWorker() {
-  static StaticTask_t control;
-  static StackType_t stack[3072 / sizeof(StackType_t)];
-  g_usb_exit_worker = xTaskCreateStatic(UsbExitWorker, "kf_usb_leave", std::size(stack), nullptr, 5,
-                                        stack, &control);
+// Created when a USB function starts, before any input can, so a failure only means Home. Its
+// stack comes from the heap: Keyferry, which never uses it, carries none of it.
+bool StartUsbExitWorker() {
+  return xTaskCreate(UsbExitWorker, "kf_usb_leave", 3072, nullptr, 5, &g_usb_exit_worker) == pdPASS;
 }
 
 void RequestUsbExit(Function target = Function::kHome) {
@@ -795,8 +807,9 @@ void RefreshMic() {
   ui::RefreshMic(view);
 }
 
-Message g_message_copy[kMaxMessages];
-ui::MessageRow g_message_rows[kMaxMessages];
+// Messages only: claimed when it starts (see StartUi), so Keyferry carries none of it.
+Message* g_message_copy = nullptr;
+ui::MessageRow* g_message_rows = nullptr;
 std::uint32_t g_messages_received_seen = 0;
 
 // Every second for ages and connection state, at once when the messages change.
@@ -1041,7 +1054,7 @@ void StartUi() {
     }
   }
 
-  if (UsbFunction()) StartUsbExitWorker();  // before any input can start
+  if (UsbFunction() && !StartUsbExitWorker()) Launch(Function::kHome);  // before any input can start
 
   ResetPanelAndTouch();
   if (bsp_display_start() == nullptr) {
@@ -1053,7 +1066,11 @@ void StartUi() {
   if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
   if (g_function == Function::kDrive) DriveScan();  // the USB disk attaches only on Connect
   if (g_function == Function::kMic && !MicStart(ui::kMicGainDb[g_mic_gain])) Launch(Function::kHome);
-  if (g_function == Function::kMessages && !MessagesStart()) Launch(Function::kHome);
+  if (g_function == Function::kMessages) {
+    g_message_copy = static_cast<Message*>(Claim(kMaxMessages, sizeof(Message)));
+    g_message_rows = static_cast<ui::MessageRow*>(Claim(kMaxMessages, sizeof(ui::MessageRow)));
+    if (g_message_copy == nullptr || g_message_rows == nullptr || !MessagesStart()) Launch(Function::kHome);
+  }
   ui::Config config;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
   config.keyferry = true;

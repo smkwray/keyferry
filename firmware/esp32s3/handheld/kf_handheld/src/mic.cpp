@@ -144,7 +144,7 @@ bool ReadBlock(std::int16_t* block) {
 }
 
 void CaptureTask(void*) {
-  static std::int16_t block[kBlockSamples];
+  std::int16_t block[kBlockSamples];
   int failures = 0;
   bool was_streaming = false;
   for (;;) {

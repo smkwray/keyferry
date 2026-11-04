@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "device/usbd_pvt.h"  // usbd_defer_func: run on the TinyUSB task (pinned TinyUSB 0.21)
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -25,18 +26,23 @@ constexpr tinyusb_cdcacm_itf_t kPort = TINYUSB_CDC_ACM_0;
 constexpr std::size_t kMaxLine = 512;  // longer input lines are cut at kMaxText anyway
 constexpr int kReplySlots = 8;
 
+// Claimed when Messages starts (PSRAM when there is some), so Keyferry and the other functions
+// carry none of it.
+struct Store {
+  Message messages[kMaxMessages];  // oldest first
+  char replies[kReplySlots][24];
+  char line[kMaxLine + 1];         // receive state: TinyUSB task only
+};
+
 SemaphoreHandle_t g_lock = nullptr;       // guards the messages and the reply queue
-Message g_messages[kMaxMessages];         // oldest first
+Store* g_store = nullptr;
 int g_count = 0;
 std::uint32_t g_next_id = 1;
 std::atomic<std::uint32_t> g_serial{0};
 std::atomic<std::uint32_t> g_received{0};
 std::atomic<bool> g_listening{false};
-char g_replies[kReplySlots][24];
 int g_reply_count = 0;
-// Receive state: TinyUSB task only.
-char g_line[kMaxLine + 1];
-std::size_t g_line_length = 0;
+std::size_t g_line_length = 0;  // TinyUSB task only
 
 struct Lock {
   Lock() { xSemaphoreTake(g_lock, portMAX_DELAY); }
@@ -51,7 +57,7 @@ void FlushReplies(void*) {
   {
     Lock lock;
     count = g_reply_count;
-    std::memcpy(lines, g_replies, sizeof(lines));
+    std::memcpy(lines, g_store->replies, sizeof(lines));
     g_reply_count = 0;
   }
   if (!g_listening.load()) return;
@@ -67,9 +73,10 @@ void Reply(const char* word, std::uint32_t id) {
     Lock lock;
     if (g_reply_count == kReplySlots) return;  // a program that never reads loses replies, not messages
     if (id == 0) {
-      std::snprintf(g_replies[g_reply_count], sizeof(g_replies[0]), "%s\r\n", word);
+      std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s\r\n", word);
     } else {
-      std::snprintf(g_replies[g_reply_count], sizeof(g_replies[0]), "%s %u\r\n", word, static_cast<unsigned>(id));
+      std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s %u\r\n", word,
+                    static_cast<unsigned>(id));
     }
     ++g_reply_count;
   }
@@ -145,10 +152,10 @@ void Accept(const char* line, std::size_t length) {
   {
     Lock lock;
     if (g_count == kMaxMessages) {  // the oldest makes room
-      std::memmove(&g_messages[0], &g_messages[1], sizeof(Message) * (kMaxMessages - 1));
+      std::memmove(&g_store->messages[0], &g_store->messages[1], sizeof(Message) * (kMaxMessages - 1));
       --g_count;
     }
-    Message& message = g_messages[g_count++];
+    Message& message = g_store->messages[g_count++];
     id = g_next_id++;
     message.id = id;
     message.kind = kind;
@@ -171,10 +178,10 @@ void OnReceive(int, cdcacm_event_t*) {
     for (std::size_t i = 0; i < received; ++i) {
       const char c = static_cast<char>(chunk[i]);
       if (c == '\n') {
-        Accept(g_line, g_line_length);
+        Accept(g_store->line, g_line_length);
         g_line_length = 0;
       } else if (c != '\r' && g_line_length < kMaxLine) {
-        g_line[g_line_length++] = c;
+        g_store->line[g_line_length++] = c;
       }
     }
   }
@@ -191,7 +198,7 @@ void OnLineState(int, cdcacm_event_t* event) {
 
 Message* FindLocked(std::uint32_t id) {
   for (int i = 0; i < g_count; ++i) {
-    if (g_messages[i].id == id) return &g_messages[i];
+    if (g_store->messages[i].id == id) return &g_store->messages[i];
   }
   return nullptr;
 }
@@ -199,8 +206,12 @@ Message* FindLocked(std::uint32_t id) {
 }  // namespace
 
 bool MessagesStart() {
+  void* store = heap_caps_calloc(1, sizeof(Store), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (store == nullptr) store = heap_caps_calloc(1, sizeof(Store), MALLOC_CAP_8BIT);
+  g_store = static_cast<Store*>(store);
   g_lock = xSemaphoreCreateMutex();
-  if (g_lock == nullptr || !UsbDeviceStart(UsbPersonality::kMessages)) return false;
+  if (g_store == nullptr || g_lock == nullptr) return false;
+  if (!UsbDeviceStart(UsbPersonality::kMessages)) return false;
   tinyusb_config_cdcacm_t config{};
   config.cdc_port = kPort;
   config.callback_rx = OnReceive;
@@ -217,7 +228,7 @@ int MessagesList(Message* out, int max, std::uint32_t* serial) {
   Lock lock;
   *serial = g_serial.load();
   const int count = std::min(g_count, max);
-  for (int i = 0; i < count; ++i) out[i] = g_messages[g_count - 1 - i];
+  for (int i = 0; i < count; ++i) out[i] = g_store->messages[g_count - 1 - i];
   return count;
 }
 
