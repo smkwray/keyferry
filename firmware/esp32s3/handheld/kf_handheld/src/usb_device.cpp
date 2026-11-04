@@ -1,4 +1,4 @@
-// The handheld's own USB device (Keep Awake, Macros, USB Drive): descriptors, install and, for the
+// The handheld's own USB device (Keep Awake, Macros, USB Drive, Microphone): descriptors, install and, for the
 // HID personalities, confirmed report sends. Keyferry's bridge never runs in the same boot.
 #include "usb_device.h"
 #include "keyferry/handheld.h"
@@ -41,17 +41,29 @@ constexpr std::uint8_t kMacroPadConfig[] = {
     TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE, sizeof(kMacroPadDescriptor), 0x81, 16, 5),
 };
 
-tusb_desc_device_t Device(std::uint16_t pid) {
-  return {sizeof(tusb_desc_device_t), TUSB_DESC_DEVICE, 0x0200, 0x00, 0x00, 0x00,
+tusb_desc_device_t Device(std::uint16_t pid, std::uint8_t device_class = 0, std::uint8_t subclass = 0,
+                          std::uint8_t protocol = 0) {
+  return {sizeof(tusb_desc_device_t), TUSB_DESC_DEVICE, 0x0200, device_class, subclass, protocol,
           CFG_TUD_ENDPOINT0_SIZE, TINYUSB_ESPRESSIF_VID, pid, 0x0100, 1, 2, 3, 1};
 }
 const tusb_desc_device_t kMouseDevice = Device(0x4010);  // distinct from every keyferry personality
 const tusb_desc_device_t kMacroPadDevice = Device(0x4011);
 const tusb_desc_device_t kDriveDevice = Device(0x4012);
+// The audio function's two interfaces are grouped by an interface association.
+const tusb_desc_device_t kMicDevice = Device(0x4013, TUSB_CLASS_MISC, MISC_SUBCLASS_COMMON, MISC_PROTOCOL_IAD);
 
 constexpr std::uint8_t kDriveConfig[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN, 0, 100),
     TUD_MSC_DESCRIPTOR(0, 4, 0x01, 0x81, 64),
+};
+
+// 48 kHz mono 16-bit: up to 49 samples in a 1 ms frame. The build sets TinyUSB's audio buffers
+// (cmake/handheld_usb_audio.cmake) from the same numbers.
+constexpr std::uint16_t kMicPacketMax = TUD_AUDIO_EP_SIZE(false, 48000, 2, 1);
+static_assert(kMicPacketMax == CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX, "audio endpoint size");
+constexpr std::uint8_t kMicConfig[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUD_CONFIG_DESC_LEN + TUD_AUDIO20_MIC_ONE_CH_DESC_LEN, 0, 100),
+    TUD_AUDIO20_MIC_ONE_CH_DESCRIPTOR(0, 4, 2, 16, 0x81, kMicPacketMax),
 };
 
 char g_serial[13] = "000000000000";
@@ -59,6 +71,8 @@ const char* g_mouse_strings[] = {"\x09\x04", "Keyferry", "Keyferry Keep Awake", 
                                  "Keep Awake mouse"};
 const char* g_macro_strings[] = {"\x09\x04", "Keyferry", "Keyferry Macros", g_serial,
                                  "Macros keyboard and mouse"};
+const char* g_mic_strings[] = {"\x09\x04", "Keyferry", "Keyferry Microphone", g_serial,
+                               "Keyferry Microphone"};
 const char* g_drive_strings[] = {"\x09\x04", "Keyferry", "Keyferry USB Drive", g_serial, "USB Drive"};
 
 enum : int { kDelivered, kFailed };
@@ -155,6 +169,11 @@ bool UsbDeviceStart(UsbPersonality personality) {
       config.descriptor.device = &kDriveDevice;
       config.descriptor.full_speed_config = kDriveConfig;
       config.descriptor.string = g_drive_strings;
+      break;
+    case UsbPersonality::kMic:
+      config.descriptor.device = &kMicDevice;
+      config.descriptor.full_speed_config = kMicConfig;
+      config.descriptor.string = g_mic_strings;
       break;
   }
   config.descriptor.string_count = 5;

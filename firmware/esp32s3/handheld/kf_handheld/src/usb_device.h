@@ -9,6 +9,7 @@ enum class UsbPersonality : std::uint8_t {
   kKeepAwakeMouse,  // 303A:4010, relative mouse without report IDs
   kMacroPad,        // 303A:4011, keyboard + mouse + media keys in one HID interface
   kDrive,           // 303A:4012, one mass-storage interface (drive.cpp serves it)
+  kMic,             // 303A:4013, UAC2 microphone, 48 kHz mono 16-bit (mic.cpp serves it)
 };
 
 // Macro pad report IDs.

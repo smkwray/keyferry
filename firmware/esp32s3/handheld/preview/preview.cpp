@@ -31,7 +31,7 @@ const char* const kScenes[] = {
     "keep-awake-done", "macros-0", "macros-1",
     "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
     "keyferry", "keyferry-stopped", "drive-list", "drive-empty", "drive-nocard", "drive-detail",
-    "drive-detail-dirty", "drive-create",
+    "drive-detail-dirty", "drive-create", "mic", "mic-live", "mic-muted",
     "drive-waiting", "drive-connected", "drive-ejected", "drive-confirm",
 };
 
@@ -99,6 +99,14 @@ bool Scene(const char* name) {
     ui::Build(config, ui::Screen::kKeyferry);
     ui::SetKeyferryText("Unplug to finish\nKeyferry is stopped, but the computer did not confirm every key "
                         "was released.");
+  } else if (std::strncmp(name, "mic", 3) == 0) {
+    ui::Build(config, ui::Screen::kMic);
+    ui::MicView view;
+    view.usb = true;
+    view.live = std::strcmp(name, "mic") != 0;
+    view.muted = std::strcmp(name, "mic-muted") == 0;
+    view.level = view.live ? 64 : 22;
+    ui::RefreshMic(view);
   } else if (std::strncmp(name, "drive-", 6) == 0) {
     ui::Build(config, ui::Screen::kDrive);
     ui::DriveListView list;

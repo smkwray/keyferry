@@ -30,6 +30,7 @@ constexpr std::uint32_t kMacrosColor = 0xA970FF;
 constexpr std::uint32_t kDriveColor = 0x2ECC8F;
 constexpr std::uint32_t kCheckColor = 0x22C3E6;
 constexpr std::uint32_t kSettingsColor = 0x8C96A8;
+constexpr std::uint32_t kMicColor = 0xFF5C7A;
 
 const lv_font_t* const kSmall = &lv_font_montserrat_16;
 const lv_font_t* const kBody = &lv_font_montserrat_20;
@@ -112,6 +113,17 @@ struct State {
   lv_obj_t* create_message = nullptr;
   lv_obj_t* create_button = nullptr;
   bool create_busy = false;
+  // Microphone
+  lv_obj_t* mic_arc = nullptr;
+  lv_obj_t* mic_button = nullptr;
+  lv_obj_t* mic_glyph[4] = {};  // capsule, holder, stem, base
+  lv_obj_t* mic_slash = nullptr;
+  lv_obj_t* mic_label = nullptr;
+  lv_obj_t* mic_state = nullptr;
+  lv_obj_t* mic_detail = nullptr;
+  lv_obj_t* mic_gain_value = nullptr;
+  bool mic_muted = false;
+  int mic_gain = 5;
 };
 
 State g;
@@ -275,10 +287,59 @@ lv_obj_t* Header(lv_obj_t* screen, const char* title) {
 void OnAction(lv_event_t* event) { Emit(static_cast<Action>(Unpack(event)), 0); }
 void OnShow(lv_event_t* event) { Show(static_cast<Screen>(Unpack(event))); }
 
+// --- Microphone glyph ----------------------------------------------------------------------------
+
+lv_obj_t* GlyphPart(lv_obj_t* parent, int x, int y, int w, int h, int radius) {
+  lv_obj_t* part = Plain(parent);
+  lv_obj_set_pos(part, x, y);
+  lv_obj_set_size(part, w, h);
+  lv_obj_set_style_radius(part, radius, 0);
+  lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
+  return part;
+}
+
+// LVGL's symbol font has no microphone, so it is drawn: capsule, holder, stem and base, scaled
+// from a 72 x 80 design by `unit`/32 (the capsule's width). parts[]: capsule, holder, stem, base.
+lv_obj_t* MicGlyph(lv_obj_t* parent, int unit, lv_obj_t* parts[4]) {
+  const auto at = [unit](int v) { return v * unit / 32; };
+  lv_obj_t* glyph = Plain(parent);
+  lv_obj_set_size(glyph, at(72), at(80));
+  parts[0] = GlyphPart(glyph, at(20), 0, at(32), at(52), at(16));
+  lv_obj_t* holder = lv_arc_create(glyph);
+  lv_obj_set_size(holder, at(56), at(56));
+  lv_obj_set_pos(holder, at(8), at(6));
+  lv_arc_set_bg_angles(holder, 0, 180);  // the lower half: a cup under the capsule
+  lv_obj_remove_style(holder, nullptr, LV_PART_KNOB);
+  lv_obj_remove_style(holder, nullptr, LV_PART_INDICATOR);
+  lv_obj_set_clickable(holder, false);
+  lv_obj_set_style_arc_width(holder, at(5) > 2 ? at(5) : 2, LV_PART_MAIN);
+  lv_obj_set_style_arc_rounded(holder, true, LV_PART_MAIN);
+  parts[1] = holder;
+  parts[2] = GlyphPart(glyph, at(34), at(62), at(5) > 2 ? at(5) : 2, at(12), 0);
+  parts[3] = GlyphPart(glyph, at(22), at(73), at(28), at(5) > 2 ? at(5) : 2, at(2));
+  return glyph;
+}
+
+void SetGlyphColor(lv_obj_t* const parts[4], std::uint32_t color) {
+  for (int i : {0, 2, 3}) lv_obj_set_style_bg_color(parts[i], lv_color_hex(color), 0);
+  lv_obj_set_style_arc_color(parts[1], lv_color_hex(color), LV_PART_MAIN);
+}
+
+void BuildMicGlyph(lv_obj_t* parent) {
+  lv_obj_t* glyph = MicGlyph(parent, 32, g.mic_glyph);
+  static lv_point_precise_t slash[2] = {{6, 2}, {66, 78}};
+  g.mic_slash = lv_line_create(glyph);
+  lv_line_set_points(g.mic_slash, slash, 2);
+  lv_obj_set_style_line_width(g.mic_slash, 6, 0);
+  lv_obj_set_style_line_rounded(g.mic_slash, true, 0);
+  lv_obj_set_style_line_color(g.mic_slash, lv_color_hex(kError), 0);
+  lv_obj_set_hidden(g.mic_slash, true);
+}
+
 // --- Home ----------------------------------------------------------------------------------------
 
-void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, std::uint32_t color,
-             lv_event_cb_t callback, int data, bool enabled) {
+lv_obj_t* AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, std::uint32_t color,
+                  lv_event_cb_t callback, int data, bool enabled) {
   constexpr int kTop = 72;
   constexpr int kTileHeight = (kHeight - kTop - kMargin - 2 * kGap) / 3;
   lv_obj_t* tile = Button(parent, kHalfWidth, kTileHeight);
@@ -287,12 +348,13 @@ void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, 
   IconAndName(tile, symbol, name, color, true);
   if (enabled) {
     lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, Pack(data));
-    return;
+    return tile;
   }
   lv_obj_add_state(tile, LV_STATE_DISABLED);
   lv_obj_t* soon = Label(tile, kSmall, kMuted, "Soon");
   lv_obj_set_ignore_layout(soon, true);
   lv_obj_align(soon, LV_ALIGN_TOP_RIGHT, -12, 8);
+  return tile;
 }
 
 void BuildHome() {
@@ -309,8 +371,11 @@ void BuildHome() {
           static_cast<int>(Action::kLaunchMacros), true);
   AddTile(screen, 3, LV_SYMBOL_SD_CARD, "USB Drive", kDriveColor, OnAction,
           static_cast<int>(Action::kLaunchDrive), true);
-  AddTile(screen, 4, LV_SYMBOL_LIST, "Board Check", kCheckColor, OnShow,
-          static_cast<int>(Screen::kCheck), true);
+  lv_obj_t* mic = AddTile(screen, 4, "", "Microphone", kMicColor, OnAction,
+                          static_cast<int>(Action::kLaunchMic), true);
+  lv_obj_t* parts[4];
+  lv_obj_center(MicGlyph(lv_obj_get_child(mic, 0), 15, parts));
+  SetGlyphColor(parts, kMicColor);
   AddTile(screen, 5, LV_SYMBOL_SETTINGS, "Settings", kSettingsColor, OnShow,
           static_cast<int>(Screen::kSettings), true);
 }
@@ -376,6 +441,25 @@ void BuildCheck() {
 }
 
 // --- Settings ------------------------------------------------------------------------------------
+
+// A tappable list row: badge, name, detail line and a chevron.
+lv_obj_t* RowButtonWithDetail(lv_obj_t* parent, const char* symbol, std::uint32_t color,
+                              const char* name, const char* detail, std::uint32_t detail_color) {
+  lv_obj_t* row = Button(parent, kInnerWidth, 84);
+  lv_obj_t* badge = Badge(row, symbol, color, 48, kBody);
+  lv_obj_align(badge, LV_ALIGN_LEFT_MID, 14, 0);
+  lv_obj_t* label = Label(row, kBody, kText, name);
+  lv_obj_set_width(label, kInnerWidth - 76 - 48);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_height(label, lv_font_get_line_height(kBody));
+  lv_obj_set_pos(label, 76, 14);
+  lv_obj_t* line = Label(row, kSmall, detail_color, detail);
+  lv_obj_set_size(line, kInnerWidth - 76 - 48, lv_font_get_line_height(kSmall));
+  lv_label_set_long_mode(line, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_pos(line, 76, 46);
+  lv_obj_align(Label(row, kBody, kMuted, LV_SYMBOL_RIGHT), LV_ALIGN_RIGHT_MID, -18, 0);
+  return row;
+}
 
 constexpr int kRowHeight = 96;
 
@@ -529,6 +613,10 @@ void BuildSettings() {
     lv_obj_add_event_cb(button, OnHost, LV_EVENT_CLICKED, Pack(value));
   }
   ShowHost();
+
+  lv_obj_t* check = RowButtonWithDetail(list, LV_SYMBOL_LIST, kCheckColor, "Board Check",
+                                        "Touch, buttons, power, SD card", kMuted);
+  lv_obj_add_event_cb(check, OnShow, LV_EVENT_CLICKED, Pack(static_cast<int>(Screen::kCheck)));
 
   lv_obj_t* hint = Label(list, kSmall, kMuted,
                          "A touch wakes the screen.\n"
@@ -767,6 +855,84 @@ void BuildKeyferry() {
                       Pack(static_cast<int>(Action::kLeave)));
 }
 
+// --- Microphone ----------------------------------------------------------------------------------
+
+void ShowMicGain() { lv_label_set_text_fmt(g.mic_gain_value, "%d dB", kMicGainDb[g.mic_gain]); }
+
+void OnMicGainStep(lv_event_t* event) {
+  const int index = g.mic_gain + Unpack(event);
+  if (index < 0 || index >= kMicGainChoices) return;
+  g.mic_gain = index;
+  ShowMicGain();
+  Emit(Action::kMicGain, index);
+}
+
+void OnMicMute(lv_event_t*) {
+  g.mic_muted = !g.mic_muted;
+  lv_label_set_text(g.mic_label, g.mic_muted ? "Unmute" : "Mute");
+  Emit(Action::kMicMute, g.mic_muted ? 1 : 0);
+}
+
+void BuildMic() {
+  lv_obj_t* screen = NewScreen(Screen::kMic);
+  Header(screen, "Microphone");
+  g.mic_gain = g.config.mic_gain >= 0 && g.config.mic_gain < kMicGainChoices ? g.config.mic_gain : 5;
+
+  // The ring is a level meter: how loud the microphone hears the room.
+  constexpr int kArc = 196;
+  constexpr int kCircle = 152;
+  constexpr int kArcTop = kContentTop;
+  g.mic_arc = lv_arc_create(screen);
+  lv_obj_set_size(g.mic_arc, kArc, kArc);
+  lv_obj_align(g.mic_arc, LV_ALIGN_TOP_MID, 0, kArcTop);
+  lv_arc_set_rotation(g.mic_arc, 135);
+  lv_arc_set_bg_angles(g.mic_arc, 0, 270);
+  lv_arc_set_range(g.mic_arc, 0, 100);
+  lv_arc_set_value(g.mic_arc, 0);
+  lv_obj_remove_style(g.mic_arc, nullptr, LV_PART_KNOB);
+  lv_obj_set_clickable(g.mic_arc, false);
+  lv_obj_set_style_arc_width(g.mic_arc, 10, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(g.mic_arc, lv_color_hex(kDivider), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(g.mic_arc, 10, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(g.mic_arc, lv_color_hex(kMicColor), LV_PART_INDICATOR);
+
+  g.mic_button = Button(screen, kCircle, kCircle);
+  lv_obj_set_style_radius(g.mic_button, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_border_width(g.mic_button, 3, 0);
+  lv_obj_align(g.mic_button, LV_ALIGN_TOP_MID, 0, kArcTop + (kArc - kCircle) / 2);
+  lv_obj_set_flex_flow(g.mic_button, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(g.mic_button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(g.mic_button, 6, 0);
+  BuildMicGlyph(g.mic_button);
+  g.mic_label = Label(g.mic_button, kBody, kText, "Mute");
+  lv_obj_add_event_cb(g.mic_button, OnMicMute, LV_EVENT_CLICKED, nullptr);
+
+  g.mic_state = Label(screen, kBody, kText, "Starting...");
+  lv_obj_set_width(g.mic_state, kInnerWidth);
+  lv_obj_set_style_text_align(g.mic_state, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(g.mic_state, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 2);
+  g.mic_detail = Label(screen, kSmall, kMuted, "");
+  lv_obj_set_width(g.mic_detail, kInnerWidth);
+  lv_obj_set_style_text_align(g.mic_detail, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(g.mic_detail, LV_ALIGN_TOP_MID, 0, kArcTop + kArc + 28);
+
+  // Sensitivity: caption over the value on the left, - and + on the right.
+  constexpr int kRow = kControl + 12;
+  lv_obj_t* row = Card(screen, kInnerWidth, kRow);
+  lv_obj_set_pos(row, kMargin, kHeight - kMargin - kRow);
+  lv_obj_set_style_pad_all(row, 6, 0);
+  lv_obj_set_style_pad_left(row, 18, 0);
+  lv_obj_align(Label(row, kSmall, kMuted, "Sensitivity"), LV_ALIGN_TOP_LEFT, 0, 6);
+  g.mic_gain_value = Label(row, kTitle, kMicColor, "");
+  lv_obj_align(g.mic_gain_value, LV_ALIGN_BOTTOM_LEFT, 0, -4);
+  lv_obj_t* plus = RowButton(row, kControl, 0, LV_SYMBOL_PLUS);
+  lv_obj_t* minus = RowButton(row, kControl, kControl + 8, LV_SYMBOL_MINUS);
+  lv_obj_add_event_cb(minus, OnMicGainStep, LV_EVENT_CLICKED, Pack(-1));
+  lv_obj_add_event_cb(plus, OnMicGainStep, LV_EVENT_CLICKED, Pack(1));
+  ShowMicGain();
+  SetGlyphColor(g.mic_glyph, kText);
+}
+
 // --- USB Drive -----------------------------------------------------------------------------------
 
 enum DriveView : int { kDriveListView, kDriveDetailView, kDriveExportView, kDriveCreateView };
@@ -898,25 +1064,6 @@ lv_obj_t* DriveView(lv_obj_t* screen) {
   return view;
 }
 
-// A row in the drive list: badge, name, detail line and a chevron.
-lv_obj_t* DriveRowButton(lv_obj_t* parent, const char* symbol, std::uint32_t color, const char* name,
-                         const char* detail, std::uint32_t detail_color) {
-  lv_obj_t* row = Button(parent, kInnerWidth, 84);
-  lv_obj_t* badge = Badge(row, symbol, color, 48, kBody);
-  lv_obj_align(badge, LV_ALIGN_LEFT_MID, 14, 0);
-  lv_obj_t* label = Label(row, kBody, kText, name);
-  lv_obj_set_width(label, kInnerWidth - 76 - 48);
-  lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
-  lv_obj_set_height(label, lv_font_get_line_height(kBody));
-  lv_obj_set_pos(label, 76, 14);
-  lv_obj_t* line = Label(row, kSmall, detail_color, detail);
-  lv_obj_set_size(line, kInnerWidth - 76 - 48, lv_font_get_line_height(kSmall));
-  lv_label_set_long_mode(line, LV_LABEL_LONG_MODE_DOTS);
-  lv_obj_set_pos(line, 76, 46);
-  lv_obj_align(Label(row, kBody, kMuted, LV_SYMBOL_RIGHT), LV_ALIGN_RIGHT_MID, -18, 0);
-  return row;
-}
-
 void BuildDriveList(lv_obj_t* view) {
   lv_obj_t* list = ScrollList(view);
   g.drive_status = Label(list, kBody, kMuted, "Looking for the SD card...");
@@ -931,7 +1078,7 @@ void BuildDriveList(lv_obj_t* view) {
   lv_obj_set_size(g.drive_rows, kInnerWidth, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(g.drive_rows, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(g.drive_rows, 8, 0);
-  g.drive_new = DriveRowButton(list, LV_SYMBOL_PLUS, kDriveColor, "New drive", "", kMuted);
+  g.drive_new = RowButtonWithDetail(list, LV_SYMBOL_PLUS, kDriveColor, "New drive", "", kMuted);
   g.drive_new_detail = lv_obj_get_child(g.drive_new, 2);
   lv_obj_add_event_cb(g.drive_new, OnOpenCreate, LV_EVENT_CLICKED, nullptr);
   lv_obj_set_hidden(g.drive_new, true);
@@ -1095,6 +1242,7 @@ void Build(const Config& config, Screen first) {
     case Screen::kMacros: BuildMacros(); break;
     case Screen::kKeyferry: BuildKeyferry(); break;
     case Screen::kDrive: BuildDrive(); break;
+    case Screen::kMic: BuildMic(); break;
     default:
       BuildHome();
       BuildCheck();
@@ -1248,6 +1396,44 @@ void SetKeyferryText(const char* text) {
   lv_label_set_text(g.keyferry_detail, detail);
 }
 
+void RefreshMic(const MicView& view) {
+  if (g.mic_button == nullptr) return;
+  g.mic_muted = view.muted;
+  const bool silent = view.muted || view.host_muted;
+  SetGlyphColor(g.mic_glyph, view.fault || silent ? kMuted : view.live ? kMicColor : kText);
+  lv_obj_set_hidden(g.mic_slash, !silent);
+  lv_label_set_text(g.mic_label, view.muted ? "Unmute" : "Mute");
+  lv_arc_set_value(g.mic_arc, view.fault ? 0 : view.level);
+  lv_obj_set_style_arc_color(g.mic_arc, lv_color_hex(silent ? kMuted : kMicColor), LV_PART_INDICATOR);
+  lv_obj_set_style_border_color(g.mic_button, lv_color_hex(view.live && !silent ? kMicColor : kBorder), 0);
+  std::uint32_t color = kText;
+  const char* state = "Ready";
+  const char* detail = "Choose it as the computer's microphone.";
+  if (view.fault) {
+    color = kError;
+    state = "Microphone not responding";
+    detail = "Go Home and open Microphone again.";
+  } else if (!view.usb) {
+    state = "Not connected";
+    detail = "Plug the board into a computer.";
+  } else if (view.muted) {
+    color = kKeepAwakeColor;
+    state = "Muted";
+    detail = view.live ? "The computer hears silence." : "Tap the microphone to unmute.";
+  } else if (view.host_muted) {
+    color = kKeepAwakeColor;
+    state = "Muted on the computer";
+    detail = "Unmute it in the computer's sound settings.";
+  } else if (view.live) {
+    color = kMicColor;
+    state = LV_SYMBOL_BULLET " Live";
+    detail = "The computer is listening.";
+  }
+  lv_obj_set_style_text_color(g.mic_state, lv_color_hex(color), 0);
+  lv_label_set_text(g.mic_state, state);
+  lv_label_set_text(g.mic_detail, detail);
+}
+
 void SetDriveList(const DriveListView& view) {
   if (g.drive_rows == nullptr) return;
   g.drive_free = view.free_bytes;
@@ -1282,7 +1468,7 @@ void SetDriveList(const DriveListView& view) {
     } else {
       std::snprintf(detail, sizeof(detail), "%s", size);
     }
-    lv_obj_t* button = DriveRowButton(g.drive_rows, LV_SYMBOL_DRIVE, kDriveColor, row.name, detail,
+    lv_obj_t* button = RowButtonWithDetail(g.drive_rows, LV_SYMBOL_DRIVE, kDriveColor, row.name, detail,
                                       row.dirty ? kKeepAwakeColor : kMuted);
     lv_obj_add_event_cb(button, OnDriveRow, LV_EVENT_CLICKED, Pack(i));
   }

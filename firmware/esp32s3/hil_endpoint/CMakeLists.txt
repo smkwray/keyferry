@@ -175,6 +175,8 @@ if(KEYFERRY_BOARD_HANDHELD)
     # The shell's managed display/touch stack is locked per board so other boards' lock is untouched.
     set(COMPONENTS main kf_handheld)
     idf_build_set_property(DEPENDENCIES_LOCK "${KEYFERRY_BOARD_DIR}/dependencies.lock")
+    include("${CMAKE_CURRENT_LIST_DIR}/../cmake/handheld_usb_audio.cmake")
+    keyferry_enable_handheld_usb_audio()  # the handheld's Microphone function
 else()
     idf_build_set_property(MINIMAL_BUILD ON)
 endif()

@@ -16,6 +16,8 @@ if(KEYFERRY_HANDHELD_SELFTEST)
     set(PROJECT_VER "0.0.1-handheld-selftest")
 endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/handheld_usb_audio.cmake")
+keyferry_enable_handheld_usb_audio()  # the Microphone function
 project(keyferry_handheld_check)
 # The USB Drive function serves mass storage itself (kf_handheld/src/drive.cpp).
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_tinyusb_without_msc_adapter.cmake")

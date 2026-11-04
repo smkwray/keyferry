@@ -1,5 +1,6 @@
 // Handheld shell (ADR 0018): boot selection, power and buttons, the supervisor and the glue
-// between the screens (ui.cpp) and the functions (Keep Awake, Macros, Keyferry).
+// between the screens (ui.cpp) and the functions (Keep Awake, Macros, USB Drive, Microphone,
+// Keyferry).
 // Functions are mutually exclusive: launching one records it in RTC memory and restarts, and
 // leaving it restarts to Home. Home has no radio, no application USB class and no SD writes.
 #include "keyferry/handheld.h"
@@ -31,6 +32,7 @@
 #include "macro_pad.h"
 #include "drive.h"
 #include "macros.h"
+#include "mic.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
@@ -50,6 +52,7 @@ constexpr char kHostKey[] = "host";         // macros::Host for Macros shortcuts
 constexpr char kMacroPageKey[] = "mpage";   // last Macros page shown
 constexpr char kAwakeKey[] = "kadur";       // Keep Awake timer, index into ui::kKeepAwakeMinutes
 constexpr char kBlankKey[] = "blank";       // screen off after, index into ui::kScreenOffSeconds
+constexpr char kMicGainKey[] = "micg";      // Microphone sensitivity, index into ui::kMicGainDb
 constexpr int kDefaultBrightness = 60;
 constexpr int kMinBrightness = 5;
 constexpr std::int64_t kBootLongHoldUs = 2000000;
@@ -84,6 +87,7 @@ enum class Function : std::uint32_t {
   kKeyferry = 2,
   kMacros = 3,
   kDrive = 4,
+  kMic = 5,
 };
 
 struct BootSelection {
@@ -127,6 +131,7 @@ Function TakeSelection() {
     case static_cast<std::uint32_t>(Function::kKeepAwake): return Function::kKeepAwake;
     case static_cast<std::uint32_t>(Function::kMacros): return Function::kMacros;
     case static_cast<std::uint32_t>(Function::kDrive): return Function::kDrive;
+    case static_cast<std::uint32_t>(Function::kMic): return Function::kMic;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
     case static_cast<std::uint32_t>(Function::kKeyferry): return Function::kKeyferry;
 #endif
@@ -245,6 +250,7 @@ i2c_master_dev_handle_t g_pmu = nullptr;
 int g_brightness = kDefaultBrightness;
 int g_awake_duration = 1;  // index into ui::kKeepAwakeMinutes
 int g_screen_off = 1;      // index into ui::kScreenOffSeconds
+int g_mic_gain = 5;        // index into ui::kMicGainDb
 macros::Host g_host = macros::Host::kWindows;
 bool g_blanked = false;
 bool g_boot_down = false;
@@ -264,7 +270,7 @@ bool g_notice_error = false;
 // worker owns their restart.
 bool UsbFunction() {
   return g_function == Function::kKeepAwake || g_function == Function::kMacros ||
-         g_function == Function::kDrive;
+         g_function == Function::kDrive || g_function == Function::kMic;
 }
 
 // Stops any input a handheld USB function is producing; safe from any task. For Macros it is
@@ -578,6 +584,7 @@ void OnAction(ui::Action action, int value) {
     case ui::Action::kLaunchKeepAwake: Launch(Function::kKeepAwake);
     case ui::Action::kLaunchMacros: Launch(Function::kMacros);
     case ui::Action::kLaunchDrive: Launch(Function::kDrive);
+    case ui::Action::kLaunchMic: Launch(Function::kMic);
     case ui::Action::kLaunchKeyferry:
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
       Launch(Function::kKeyferry);
@@ -640,6 +647,13 @@ void OnAction(ui::Action action, int value) {
       if (value >= 0 && value < ui::kDriveSizeChoices) DriveCreate(ui::kDriveSizesMiB[value]);
       break;
     case ui::Action::kDriveCancelCreate: DriveCancelCreate(); break;
+    case ui::Action::kMicMute: MicSetMuted(value == 1); break;
+    case ui::Action::kMicGain:
+      if (value < 0 || value >= ui::kMicGainChoices) break;
+      g_mic_gain = value;
+      StoreSetting(kMicGainKey, static_cast<std::uint8_t>(value));
+      MicSetGain(ui::kMicGainDb[value]);
+      break;
   }
 }
 
@@ -757,6 +771,18 @@ void RefreshHome() {
   ui::RefreshHome(view);
 }
 
+void RefreshMic() {
+  const MicStatus status = MicStatusNow();
+  ui::MicView view;
+  view.usb = status.usb;
+  view.live = status.live;
+  view.muted = status.muted;
+  view.host_muted = status.host_muted;
+  view.fault = status.fault;
+  view.level = status.level;
+  ui::RefreshMic(view);
+}
+
 void RefreshKeyferry() {
   if (g_leaving.load() || g_keyferry.status == nullptr) return;
   char text[256] = {};
@@ -826,6 +852,7 @@ void OnTick(lv_timer_t*) {
         case ui::Screen::kKeepAwake: RefreshKeepAwake(); break;
         case ui::Screen::kMacros: RefreshMacros(); break;
         case ui::Screen::kDrive: RefreshDrive(); break;
+        case ui::Screen::kMic: RefreshMic(); break;
         case ui::Screen::kKeyferry: RefreshKeyferry(); break;
         case ui::Screen::kHome:
           if (divider % 50 == 0) RefreshHome();
@@ -925,6 +952,7 @@ ui::Screen FirstScreen() {
     case Function::kKeepAwake: return ui::Screen::kKeepAwake;
     case Function::kMacros: return ui::Screen::kMacros;
     case Function::kDrive: return ui::Screen::kDrive;
+    case Function::kMic: return ui::Screen::kMic;
     case Function::kKeyferry: return ui::Screen::kKeyferry;
     default: return ui::Screen::kHome;
   }
@@ -964,6 +992,7 @@ void StartUi() {
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
   if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
   if (g_function == Function::kDrive) DriveScan();  // the USB disk attaches only on Connect
+  if (g_function == Function::kMic && !MicStart(ui::kMicGainDb[g_mic_gain])) Launch(Function::kHome);
   ui::Config config;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
   config.keyferry = true;
@@ -973,6 +1002,7 @@ void StartUi() {
   config.host = g_host;
   config.keep_awake_duration = g_awake_duration;
   config.screen_off = g_screen_off;
+  config.mic_gain = g_mic_gain;
   config.macro_page = LoadSetting(kMacroPageKey, 0);
   config.action = OnAction;
   bsp_display_lock(0);
@@ -1043,6 +1073,7 @@ void RunShellUnlessKeyferry() {
   LoadDisplaySettings();
   g_host = LoadHost();
   g_awake_duration = LoadChoice(kAwakeKey, ui::kKeepAwakeChoices, 1);
+  g_mic_gain = LoadChoice(kMicGainKey, ui::kMicGainChoices, 5);
   StartUi();
   const PowerStatus power = ReadPower();
   ESP_LOGI(kTag, "shell ready: pmu=%d vbus=%d battery=%d mv=%d pct=%d charge=%d internal_free=%u largest=%u",

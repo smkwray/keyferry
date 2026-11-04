@@ -16,18 +16,21 @@ constexpr int kHeight = 448;
 inline constexpr int kKeepAwakeMinutes[] = {30, 60, 120, 0};  // 0: until stopped
 inline constexpr int kScreenOffSeconds[] = {15, 30, 60, 120, 300};
 inline constexpr int kDriveSizesMiB[] = {64, 256, 1024};
+inline constexpr int kMicGainDb[] = {0, 6, 12, 18, 24, 30, 36, 42};  // the codec's mic gain steps
 constexpr int kKeepAwakeChoices = static_cast<int>(std::size(kKeepAwakeMinutes));
 constexpr int kScreenOffChoices = static_cast<int>(std::size(kScreenOffSeconds));
 constexpr int kDriveSizeChoices = static_cast<int>(std::size(kDriveSizesMiB));
+constexpr int kMicGainChoices = static_cast<int>(std::size(kMicGainDb));
 
-enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry, kDrive };
-constexpr int kScreenCount = 7;
+enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry, kDrive, kMic };
+constexpr int kScreenCount = 8;
 
 enum class Action : std::uint8_t {
   kLaunchKeyferry,
   kLaunchKeepAwake,
   kLaunchMacros,
   kLaunchDrive,
+  kLaunchMic,
   kLeave,               // Home from inside a function
   kWake,                // a touch on the blanked panel
   kShown,               // value: Screen
@@ -45,6 +48,8 @@ enum class Action : std::uint8_t {
   kDriveDisconnect,     // value: 1 back to the drive list, 0 Home
   kDriveCreate,         // value: index into kDriveSizesMiB
   kDriveCancelCreate,
+  kMicMute,             // value: 1 muted, 0 not
+  kMicGain,             // value: index into kMicGainDb
 };
 
 struct Config {
@@ -55,6 +60,7 @@ struct Config {
   int keep_awake_duration = 1;  // index into kKeepAwakeMinutes
   macros::Host host = macros::Host::kWindows;
   int macro_page = 0;
+  int mic_gain = 5;             // index into kMicGainDb
   void (*action)(Action action, int value) = nullptr;
 };
 
@@ -150,5 +156,17 @@ struct DriveCreateView {
   const char* message = "";
 };
 void RefreshDriveCreate(const DriveCreateView& view);
+
+// --- Microphone ---
+
+struct MicView {
+  bool usb = false;         // a computer has configured the device
+  bool live = false;        // the computer has the microphone open
+  bool muted = false;       // muted here (the board's button)
+  bool host_muted = false;  // muted on the computer
+  bool fault = false;       // the audio chip did not start or stopped answering
+  int level = 0;            // input level, 0-100 (-60 to 0 dBFS)
+};
+void RefreshMic(const MicView& view);
 
 }  // namespace keyferry::handheld::ui
