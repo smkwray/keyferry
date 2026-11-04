@@ -293,13 +293,12 @@ void UsbExitWorker(void*) {
     // Stop serving and close the image: every acknowledged write is already on the card, and a
     // writable session the computer never ejected keeps its marker. A drive being created is
     // cancelled and its partial file removed before the restart.
-    DriveCancelCreate();
-    DriveStop();
+    DriveClose();
   }
   const std::int64_t started = esp_timer_get_time();
   for (;;) {
     const bool neutral = g_function == Function::kMacros  ? MacroPadNeutral()
-                         : g_function == Function::kDrive ? !DriveCreateStatus().busy
+                         : g_function == Function::kDrive ? DriveIdle()
                                                           : true;
     if (neutral && gpio_get_level(kBootGpio) != 0) Launch(g_exit_target.load());
     if (!neutral && esp_timer_get_time() - started > kExitWaitNoticeUs) {
@@ -513,7 +512,7 @@ std::uint32_t g_drive_serial_seen = 0;
 CardState g_drive_card_seen = CardState::kChecking;
 DriveInfo g_drive_info[kMaxDrives];
 int g_drive_count = 0;
-bool g_drive_creating_seen = false;
+std::uint32_t g_drive_finished_seen = 0;
 
 ui::DriveCard UiCard(CardState state) {
   switch (state) {
@@ -525,10 +524,10 @@ ui::DriveCard UiCard(CardState state) {
 }
 
 void RefreshDrive() {
-  std::uint32_t serial = 0;
   const CardState card = DriveCard();
-  g_drive_count = DriveList(g_drive_info, kMaxDrives, &serial);
-  if (serial != g_drive_serial_seen || card != g_drive_card_seen) {
+  if (DriveListSerial() != g_drive_serial_seen || card != g_drive_card_seen) {
+    std::uint32_t serial = 0;
+    g_drive_count = DriveList(g_drive_info, kMaxDrives, &serial);
     g_drive_serial_seen = serial;
     g_drive_card_seen = card;
     ui::DriveRow rows[kMaxDrives];
@@ -555,19 +554,22 @@ void RefreshDrive() {
       default: view.link = status.connected ? ui::DriveLink::kConnected : ui::DriveLink::kWaiting; break;
     }
     view.busy = status.busy;
+    view.marker_kept = status.marker_kept;
     view.read_bytes = status.read_bytes;
     view.written_bytes = status.written_bytes;
     ui::ShowDriveExport(view);
   }
+  // While one runs, and once for every creation that finished (even one too quick to be seen).
   const CreateStatus create = DriveCreateStatus();
-  if (create.busy || g_drive_creating_seen) {
+  if (create.busy || create.finished != g_drive_finished_seen) {
     ui::DriveCreateView view;
     view.busy = create.busy;
     view.percent = create.percent;
     view.result = create.result;
+    view.finished = create.finished != g_drive_finished_seen;
     view.message = create.message;
     ui::RefreshDriveCreate(view);
-    g_drive_creating_seen = create.busy;
+    if (!create.busy) g_drive_finished_seen = create.finished;
   }
 }
 

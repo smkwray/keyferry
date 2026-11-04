@@ -208,7 +208,7 @@ void UsbHidClosePresses() {
   xSemaphoreGive(g_submit_lock);
 }
 
-std::uint32_t UsbHidSession() { return g_session.load(); }
+std::uint32_t UsbDeviceSession() { return g_session.load(); }
 std::uint32_t UsbHidLastSubmittedSession() { return g_last_session.load(); }
 
 bool UsbDeviceMounted() { return tud_mounted(); }

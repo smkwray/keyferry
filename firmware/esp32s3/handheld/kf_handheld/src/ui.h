@@ -133,6 +133,7 @@ struct DriveExportView {
   bool writable = false;
   DriveLink link = DriveLink::kWaiting;
   bool busy = false;  // reading or writing right now
+  bool marker_kept = false;  // ejected, but its not-ejected mark could not be cleared
   std::uint64_t read_bytes = 0;
   std::uint64_t written_bytes = 0;
 };
@@ -145,7 +146,8 @@ void ShowDisconnectConfirm();
 struct DriveCreateView {
   bool busy = false;
   int percent = 0;
-  int result = 0;  // 1 created, -1 failed or cancelled
+  bool finished = false;  // a creation ended since the last refresh
+  int result = 0;         // of that creation: 1 created, -1 failed or cancelled
   const char* message = "";
 };
 void RefreshDriveCreate(const DriveCreateView& view);

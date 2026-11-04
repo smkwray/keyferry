@@ -695,6 +695,9 @@ def build_checks(build: Path) -> None:
         )
 
 
+HANDHELD_DRIVE_OBJECT = "esp-idf/kf_handheld/libkf_handheld.a(drive.cpp.obj)"
+
+
 def check_handheld_msc(build: Path, cache: str, board: str) -> None:
     """Mass storage passes only on a handheld board, served by its USB Drive function alone.
 
@@ -710,12 +713,17 @@ def check_handheld_msc(build: Path, cache: str, board: str) -> None:
     if not link_map.is_file():
         fail("linker map is missing: cannot tell who serves mass storage")
     text = link_map.read_text(encoding="utf-8", errors="replace")
+    # Only the memory map lists what was linked; "Discarded input sections" comes before it.
+    marker = "Linker script and memory map"
+    if marker not in text:
+        fail("linker map has no memory map section")
+    linked = text.split(marker, 1)[1]
     for callback in ("tud_msc_read10_cb", "tud_msc_write10_cb", "tud_msc_scsi_cb"):
-        owners = set(
-            re.findall(rf"\.text\.{callback}\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+(\S+)", text)
+        owners = re.findall(
+            rf"^ \.text\.{callback}\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+(\S+)$", linked, re.MULTILINE
         )
-        if not owners or any("libkf_handheld.a" not in owner for owner in owners):
-            fail(f"{callback} must come only from the handheld USB Drive: {sorted(owners)}")
+        if owners != [HANDHELD_DRIVE_OBJECT]:
+            fail(f"{callback} must come only from the handheld USB Drive: {owners}")
 
 
 def main() -> int:

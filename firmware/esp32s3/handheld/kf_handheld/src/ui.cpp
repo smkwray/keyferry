@@ -1326,6 +1326,8 @@ void ShowDriveExport(const DriveExportView& view) {
   if (view.link == DriveLink::kWaiting) {
     lv_label_set_text_fmt(g.export_detail, "%s   " LV_SYMBOL_BULLET "   plug into a computer",
                           view.writable ? "Writable" : "Read-only");
+  } else if (view.marker_kept) {
+    lv_label_set_text(g.export_detail, "Saved, but its not-ejected mark could not be cleared");
   } else if (view.writable) {
     lv_label_set_text_fmt(g.export_detail, "Writable   " LV_SYMBOL_BULLET "   read %s, wrote %s", read, written);
   } else {
@@ -1342,7 +1344,7 @@ void ShowDisconnectConfirm() {
 
 void RefreshDriveCreate(const DriveCreateView& view) {
   if (g.create_button == nullptr) return;
-  const bool finished = g.create_busy && !view.busy;
+  const bool finished = view.finished && !view.busy;
   g.create_busy = view.busy;
   lv_obj_set_hidden(g.create_bar, !view.busy);
   lv_bar_set_value(g.create_bar, view.percent, LV_ANIM_OFF);

@@ -28,7 +28,7 @@ bool UsbHidSend(std::uint8_t report_id, const void* report, std::uint16_t length
 void UsbHidClosePresses();
 // Changes whenever the host configures or drops the device: a new session holds nothing from an
 // earlier one.
-std::uint32_t UsbHidSession();
+std::uint32_t UsbDeviceSession();
 // The session of the most recently submitted report.
 std::uint32_t UsbHidLastSubmittedSession();
 bool UsbHidReady();

@@ -115,7 +115,7 @@ bool Play(const macros::Step& step) {
 // dropped or re-enumerated the device since the last press holds nothing from it.
 void Neutralize() {
   if (!g_dirty.load()) return;
-  if (!UsbDeviceMounted() || UsbHidSession() != g_dirty_session.load()) {
+  if (!UsbDeviceMounted() || UsbDeviceSession() != g_dirty_session.load()) {
     g_dirty.store(false);
     ESP_LOGI(kTag, "computer dropped the device: nothing held");
     return;
@@ -140,7 +140,7 @@ void Player(void*) {
     } else if (Open()) {
       const macros::Page& page = macros::PageAt(request.which >> 8);
       const macros::Step* steps = macros::StepsFor(page.macros[request.which & 0xFF], request.host);
-      g_dirty_session.store(UsbHidSession());
+      g_dirty_session.store(UsbDeviceSession());
       g_dirty.store(true);
       bool ok = true;
       for (int i = 0; ok && i < macros::kMaxSteps && steps[i].kind != macros::Kind::kNone; ++i) {
