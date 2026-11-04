@@ -17,3 +17,6 @@ if(KEYFERRY_HANDHELD_SELFTEST)
 endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(keyferry_handheld_check)
+# The USB Drive function serves mass storage itself (kf_handheld/src/drive.cpp).
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/esp_tinyusb_without_msc_adapter.cmake")
+keyferry_strip_esp_tinyusb_msc_adapter()

@@ -188,9 +188,13 @@ if((KEYFERRY_MSC_SIZE_PROBE OR KEYFERRY_FILE_HANDOFF) AND
    NOT CONFIG_TINYUSB_MSC_ENABLED)
     message(FATAL_ERROR "MSC build requires an MSC-enabled sdkconfig")
 elseif(NOT KEYFERRY_MSC_SIZE_PROBE AND NOT KEYFERRY_FILE_HANDOFF AND
-       CONFIG_TINYUSB_MSC_ENABLED)
+       NOT KEYFERRY_BOARD_HANDHELD AND CONFIG_TINYUSB_MSC_ENABLED)
     message(FATAL_ERROR
         "MSC sdkconfig cannot be reused as a production HIL image")
+elseif(KEYFERRY_BOARD_HANDHELD AND NOT CONFIG_TINYUSB_MSC_ENABLED)
+    # The handheld's USB Drive function serves mass storage; the bridge's own file handoff
+    # stays gated off on this board (above).
+    message(FATAL_ERROR "Handheld builds need the board's MSC-enabled sdkconfig")
 endif()
 if(KEYFERRY_MSC_MEMORY_PROBE OR KEYFERRY_FILE_HANDOFF)
     if(NOT CONFIG_PARTITION_TABLE_FILENAME STREQUAL
@@ -224,41 +228,8 @@ if(KEYFERRY_FILE_HANDOFF)
     endif()
 endif()
 
-if(KEYFERRY_MSC_SIZE_PROBE OR KEYFERRY_FILE_HANDOFF)
-    # ESP TinyUSB's managed MSC adapter brings flash/SD storage callbacks and
-    # mount behavior. Exclude that adapter in the opt-in MSC builds; app_main
-    # supplies read-only synthetic-medium callbacks instead.
-    idf_component_get_property(KEYFERRY_ESP_TINYUSB_LIB
-        espressif__esp_tinyusb COMPONENT_LIB)
-    get_target_property(KEYFERRY_ESP_TINYUSB_SOURCES
-        ${KEYFERRY_ESP_TINYUSB_LIB} SOURCES)
-    foreach(KEYFERRY_MSC_ADAPTER_SOURCE IN ITEMS
-            tinyusb_msc storage_spiflash storage_sdmmc)
-        set(KEYFERRY_MSC_ADAPTER_MATCHES
-            "${KEYFERRY_ESP_TINYUSB_SOURCES}")
-        list(FILTER KEYFERRY_MSC_ADAPTER_MATCHES INCLUDE REGEX
-            "[/\\\\]${KEYFERRY_MSC_ADAPTER_SOURCE}\\.c$")
-        list(LENGTH KEYFERRY_MSC_ADAPTER_MATCHES
-            KEYFERRY_MSC_ADAPTER_MATCH_COUNT)
-        if(NOT KEYFERRY_MSC_ADAPTER_MATCH_COUNT EQUAL 1)
-            message(FATAL_ERROR
-                "Pinned ESP TinyUSB MSC adapter source changed: "
-                "${KEYFERRY_MSC_ADAPTER_SOURCE}")
-        endif()
-    endforeach()
-    list(FILTER KEYFERRY_ESP_TINYUSB_SOURCES EXCLUDE REGEX
-        "[/\\\\](tinyusb_msc|storage_spiflash|storage_sdmmc)\\.c$")
-    foreach(KEYFERRY_MSC_ADAPTER_SOURCE IN ITEMS
-            tinyusb_msc storage_spiflash storage_sdmmc)
-        set(KEYFERRY_MSC_ADAPTER_MATCHES
-            "${KEYFERRY_ESP_TINYUSB_SOURCES}")
-        list(FILTER KEYFERRY_MSC_ADAPTER_MATCHES INCLUDE REGEX
-            "[/\\\\]${KEYFERRY_MSC_ADAPTER_SOURCE}\\.c$")
-        if(KEYFERRY_MSC_ADAPTER_MATCHES)
-            message(FATAL_ERROR
-                "ESP TinyUSB MSC adapter remains in unflashed probe")
-        endif()
-    endforeach()
-    set_property(TARGET ${KEYFERRY_ESP_TINYUSB_LIB} PROPERTY SOURCES
-        "${KEYFERRY_ESP_TINYUSB_SOURCES}")
+if(KEYFERRY_MSC_SIZE_PROBE OR KEYFERRY_FILE_HANDOFF OR KEYFERRY_BOARD_HANDHELD)
+    # app_main (synthetic read-only medium) or the handheld's USB Drive serves mass storage.
+    include("${CMAKE_CURRENT_LIST_DIR}/../cmake/esp_tinyusb_without_msc_adapter.cmake")
+    keyferry_strip_esp_tinyusb_msc_adapter()
 endif()

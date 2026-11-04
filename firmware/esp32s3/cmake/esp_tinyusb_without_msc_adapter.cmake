@@ -1,0 +1,25 @@
+# ESP TinyUSB's managed MSC adapter brings its own flash/SD storage callbacks and mount
+# behaviour. Builds that serve mass storage themselves (the bridge's synthetic read-only medium,
+# the handheld's USB Drive) leave it out of the link and define the tud_msc_* callbacks.
+# Call after project(); fails if the pinned component's sources no longer match.
+function(keyferry_strip_esp_tinyusb_msc_adapter)
+    idf_component_get_property(esp_tinyusb_lib espressif__esp_tinyusb COMPONENT_LIB)
+    get_target_property(sources ${esp_tinyusb_lib} SOURCES)
+    foreach(adapter IN ITEMS tinyusb_msc storage_spiflash storage_sdmmc)
+        set(matches "${sources}")
+        list(FILTER matches INCLUDE REGEX "[/\\\\]${adapter}\\.c$")
+        list(LENGTH matches match_count)
+        if(NOT match_count EQUAL 1)
+            message(FATAL_ERROR "Pinned ESP TinyUSB MSC adapter source changed: ${adapter}")
+        endif()
+    endforeach()
+    list(FILTER sources EXCLUDE REGEX "[/\\\\](tinyusb_msc|storage_spiflash|storage_sdmmc)\\.c$")
+    foreach(adapter IN ITEMS tinyusb_msc storage_spiflash storage_sdmmc)
+        set(matches "${sources}")
+        list(FILTER matches INCLUDE REGEX "[/\\\\]${adapter}\\.c$")
+        if(matches)
+            message(FATAL_ERROR "ESP TinyUSB MSC adapter remains in the link: ${adapter}")
+        endif()
+    endforeach()
+    set_property(TARGET ${esp_tinyusb_lib} PROPERTY SOURCES "${sources}")
+endfunction()

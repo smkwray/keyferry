@@ -29,13 +29,14 @@
 #include "keep_awake.h"
 #include "lvgl.h"
 #include "macro_pad.h"
+#include "drive.h"
 #include "macros.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
 #include "soc/reset_reasons.h"
 #include "ui.h"
-#include "usb_hid.h"
+#include "usb_device.h"
 
 namespace keyferry::handheld {
 namespace {
@@ -78,7 +79,13 @@ struct PowerStatus {
   int battery_percent = -1;
 };
 
-enum class Function : std::uint32_t { kHome = 0, kKeepAwake = 1, kKeyferry = 2, kMacros = 3 };
+enum class Function : std::uint32_t {
+  kHome = 0,
+  kKeepAwake = 1,
+  kKeyferry = 2,
+  kMacros = 3,
+  kDrive = 4,
+};
 
 struct BootSelection {
   std::uint32_t magic;
@@ -122,6 +129,7 @@ Function TakeSelection(bool* deliberate) {
   switch (selection.function) {
     case static_cast<std::uint32_t>(Function::kKeepAwake): return Function::kKeepAwake;
     case static_cast<std::uint32_t>(Function::kMacros): return Function::kMacros;
+    case static_cast<std::uint32_t>(Function::kDrive): return Function::kDrive;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
     case static_cast<std::uint32_t>(Function::kKeyferry): return Function::kKeyferry;
 #endif
@@ -255,7 +263,12 @@ std::int64_t g_notice_until = 0;
 char g_notice[48] = {};
 bool g_notice_error = false;
 
-bool UsbFunction() { return g_function == Function::kKeepAwake || g_function == Function::kMacros; }
+// The handheld's own USB functions: BOOT leaves them, a stalled UI returns Home, and the exit
+// worker owns their restart.
+bool UsbFunction() {
+  return g_function == Function::kKeepAwake || g_function == Function::kMacros ||
+         g_function == Function::kDrive;
+}
 
 // Stops any input a handheld USB function is producing; safe from any task. For Macros it is
 // final for this boot: the only way on is the exit worker's restart.
@@ -271,14 +284,24 @@ constexpr std::int64_t kExitWaitNoticeUs = 1500000;
 TaskHandle_t g_usb_exit_worker = nullptr;
 std::atomic<bool> g_usb_exit_requested{false};
 std::atomic<bool> g_usb_exit_waiting{false};
+std::atomic<Function> g_exit_target{Function::kHome};  // USB Drive's Disconnect returns to its list
 
 void UsbExitWorker(void*) {
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   StopInput();
+  if (g_function == Function::kDrive) {
+    // Stop serving and close the image: every acknowledged write is already on the card, and a
+    // writable session the computer never ejected keeps its marker. A drive being created is
+    // cancelled and its partial file removed before the restart.
+    DriveCancelCreate();
+    DriveStop();
+  }
   const std::int64_t started = esp_timer_get_time();
   for (;;) {
-    const bool neutral = g_function != Function::kMacros || MacroPadNeutral();
-    if (neutral && gpio_get_level(kBootGpio) != 0) Launch(Function::kHome);
+    const bool neutral = g_function == Function::kMacros  ? MacroPadNeutral()
+                         : g_function == Function::kDrive ? !DriveCreateStatus().busy
+                                                          : true;
+    if (neutral && gpio_get_level(kBootGpio) != 0) Launch(g_exit_target.load());
     if (!neutral && esp_timer_get_time() - started > kExitWaitNoticeUs) {
       if (!g_usb_exit_waiting.exchange(true)) ESP_LOGW(kTag, "exit waiting for a confirmed release");
     }
@@ -293,7 +316,8 @@ void StartUsbExitWorker() {
                                         stack, &control);
 }
 
-void RequestUsbExit() {
+void RequestUsbExit(Function target = Function::kHome) {
+  if (!g_usb_exit_requested.load()) g_exit_target.store(target);
   StopInput();
   if (g_usb_exit_worker != nullptr && !g_usb_exit_requested.exchange(true)) {
     xTaskNotifyGive(g_usb_exit_worker);
@@ -482,6 +506,71 @@ void RequestKeyferryExit() {
   xTaskNotifyGive(g_exit_worker);
 }
 
+// --- USB Drive status -------------------------------------------------------------------------
+
+int g_drive_index = -1;
+std::uint32_t g_drive_serial_seen = 0;
+CardState g_drive_card_seen = CardState::kChecking;
+DriveInfo g_drive_info[kMaxDrives];
+int g_drive_count = 0;
+bool g_drive_creating_seen = false;
+
+ui::DriveCard UiCard(CardState state) {
+  switch (state) {
+    case CardState::kReady: return ui::DriveCard::kReady;
+    case CardState::kNoCard: return ui::DriveCard::kNoCard;
+    case CardState::kError: return ui::DriveCard::kError;
+    default: return ui::DriveCard::kChecking;
+  }
+}
+
+void RefreshDrive() {
+  std::uint32_t serial = 0;
+  const CardState card = DriveCard();
+  g_drive_count = DriveList(g_drive_info, kMaxDrives, &serial);
+  if (serial != g_drive_serial_seen || card != g_drive_card_seen) {
+    g_drive_serial_seen = serial;
+    g_drive_card_seen = card;
+    ui::DriveRow rows[kMaxDrives];
+    for (int i = 0; i < g_drive_count; ++i) {
+      rows[i] = ui::DriveRow{g_drive_info[i].name, g_drive_info[i].bytes, g_drive_info[i].dirty};
+    }
+    ui::DriveListView list;
+    list.card = UiCard(card);
+    list.rows = rows;
+    list.count = g_drive_count;
+    list.free_bytes = DriveFreeBytes();
+    ui::SetDriveList(list);
+  }
+  const ExportStatus status = DriveExportStatus();
+  if (status.state != ExportState::kNone && g_drive_index >= 0 && g_drive_index < g_drive_count) {
+    ui::DriveExportView view;
+    view.name = g_drive_info[g_drive_index].name;
+    view.bytes = g_drive_info[g_drive_index].bytes;
+    view.writable = status.writable;
+    switch (status.state) {
+      case ExportState::kEjected: view.link = ui::DriveLink::kEjected; break;
+      case ExportState::kStopped: view.link = ui::DriveLink::kStopped; break;
+      case ExportState::kFailed: view.link = ui::DriveLink::kFailed; break;
+      default: view.link = status.connected ? ui::DriveLink::kConnected : ui::DriveLink::kWaiting; break;
+    }
+    view.busy = status.busy;
+    view.read_bytes = status.read_bytes;
+    view.written_bytes = status.written_bytes;
+    ui::ShowDriveExport(view);
+  }
+  const CreateStatus create = DriveCreateStatus();
+  if (create.busy || g_drive_creating_seen) {
+    ui::DriveCreateView view;
+    view.busy = create.busy;
+    view.percent = create.percent;
+    view.result = create.result;
+    view.message = create.message;
+    ui::RefreshDriveCreate(view);
+    g_drive_creating_seen = create.busy;
+  }
+}
+
 // --- Screen actions (LVGL task, display lock held) -----------------------------------------------
 
 const char* ScreenName(ui::Screen screen) {
@@ -497,6 +586,7 @@ void OnAction(ui::Action action, int value) {
   switch (action) {
     case ui::Action::kLaunchKeepAwake: Launch(Function::kKeepAwake);
     case ui::Action::kLaunchMacros: Launch(Function::kMacros);
+    case ui::Action::kLaunchDrive: Launch(Function::kDrive);
     case ui::Action::kLaunchKeyferry:
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
       Launch(Function::kKeyferry);
@@ -550,6 +640,20 @@ void OnAction(ui::Action action, int value) {
       break;
     case ui::Action::kMacroPage: StoreSetting(kMacroPageKey, static_cast<std::uint8_t>(value)); break;
     case ui::Action::kRunMacro: MacroPadRun(value >> 8, value & 0xFF, g_host); break;
+    case ui::Action::kDriveRescan: DriveScan(); break;
+    case ui::Action::kDriveConnect:
+      if (DriveExport(value & 0xFF, (value >> 8) != 0)) {
+        g_drive_index = value & 0xFF;
+        RefreshDrive();
+      } else {
+        ui::ShowDriveError("Could not open this drive on the card.");
+      }
+      break;
+    case ui::Action::kDriveDisconnect: RequestUsbExit(value == 1 ? Function::kDrive : Function::kHome); break;
+    case ui::Action::kDriveCreate:
+      if (value >= 0 && value < ui::kDriveSizeChoices) DriveCreate(ui::kDriveSizesMiB[value]);
+      break;
+    case ui::Action::kDriveCancelCreate: DriveCancelCreate(); break;
   }
 }
 
@@ -573,7 +677,7 @@ void RefreshKeepAwake() {
   view.running = KeepAwakeRunning();
   view.stopped_by_fault = state != KeepAwakeState::kReady && state != KeepAwakeState::kRunning &&
                           state != KeepAwakeState::kFinished;
-  view.usb = UsbHidMounted();
+  view.usb = UsbDeviceMounted();
   view.nudges = KeepAwakeNudges();
   view.seconds_to_next = KeepAwakeSecondsToNext();
   view.interval_seconds = kKeepAwakeIntervalSeconds;
@@ -603,7 +707,7 @@ void RefreshMacros() {
     g_notice_until = now + kNoticeUs;
   }
   ui::MacrosView view;
-  view.usb = UsbHidMounted();
+  view.usb = UsbDeviceMounted();
   view.busy = MacroPadBusy();
   if (g_usb_exit_waiting.load()) {
     view.notice = "Releasing keys - wake or unplug the computer";
@@ -735,6 +839,7 @@ void OnTick(lv_timer_t*) {
         case ui::Screen::kCheck: RefreshCheck(); break;
         case ui::Screen::kKeepAwake: RefreshKeepAwake(); break;
         case ui::Screen::kMacros: RefreshMacros(); break;
+        case ui::Screen::kDrive: RefreshDrive(); break;
         case ui::Screen::kKeyferry: RefreshKeyferry(); break;
         case ui::Screen::kHome:
           if (divider % 50 == 0) RefreshHome();
@@ -787,7 +892,7 @@ void Supervise(void*) {
     ESP_LOGI(kTag, "status fn=%u ui_ticks=%u renders=%u blanked=%d bright=%d usb=%d run=%d nudges=%u macro=%d",
              static_cast<unsigned>(g_function), static_cast<unsigned>(ticks),
              static_cast<unsigned>(g_renders.load()), g_blanked, g_brightness,
-             UsbFunction() && UsbHidMounted(), KeepAwakeRunning(),
+             UsbFunction() && UsbDeviceMounted(), KeepAwakeRunning(),
              static_cast<unsigned>(KeepAwakeNudges()), MacroPadBusy());
   }
 #if defined(KEYFERRY_HANDHELD_SELFTEST)
@@ -800,7 +905,7 @@ void Supervise(void*) {
   }
   if (g_function == Function::kKeepAwake) {
     if (seconds >= 4 && !KeepAwakeRunning() && KeepAwakeNudges() == 0 &&
-        KeepAwakeStateNow() == KeepAwakeState::kReady && UsbHidMounted()) {
+        KeepAwakeStateNow() == KeepAwakeState::kReady && UsbDeviceMounted()) {
       KeepAwakeStart(0);
     }
     if (seconds >= 20) {
@@ -833,6 +938,7 @@ ui::Screen FirstScreen() {
   switch (g_function) {
     case Function::kKeepAwake: return ui::Screen::kKeepAwake;
     case Function::kMacros: return ui::Screen::kMacros;
+    case Function::kDrive: return ui::Screen::kDrive;
     case Function::kKeyferry: return ui::Screen::kKeyferry;
     default: return ui::Screen::kHome;
   }
@@ -871,6 +977,7 @@ void StartUi() {
   PmuInit();  // key-event latching and measurement only; PWR blanks/wakes in every function
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
   if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
+  if (g_function == Function::kDrive) DriveScan();  // the USB disk attaches only on Connect
   ui::Config config;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
   config.keyferry = true;

@@ -15,15 +15,19 @@ constexpr int kHeight = 448;
 // Choices the screens offer; the shell applies them by the same index.
 inline constexpr int kKeepAwakeMinutes[] = {30, 60, 120, 0};  // 0: until stopped
 inline constexpr int kScreenOffSeconds[] = {15, 30, 60, 120, 300};
+inline constexpr int kDriveSizesMiB[] = {64, 256, 1024};
 constexpr int kKeepAwakeChoices = static_cast<int>(std::size(kKeepAwakeMinutes));
 constexpr int kScreenOffChoices = static_cast<int>(std::size(kScreenOffSeconds));
+constexpr int kDriveSizeChoices = static_cast<int>(std::size(kDriveSizesMiB));
 
-enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry };
+enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry, kDrive };
+constexpr int kScreenCount = 7;
 
 enum class Action : std::uint8_t {
   kLaunchKeyferry,
   kLaunchKeepAwake,
   kLaunchMacros,
+  kLaunchDrive,
   kLeave,               // Home from inside a function
   kWake,                // a touch on the blanked panel
   kShown,               // value: Screen
@@ -37,6 +41,11 @@ enum class Action : std::uint8_t {
   kMacroHost,           // value: macros::Host
   kRunMacro,            // value: page << 8 | index
   kMacroPage,           // value: page now showing
+  kDriveRescan,         // look for the SD card and its drives again
+  kDriveConnect,        // value: index | writable << 8
+  kDriveDisconnect,     // value: 1 back to the drive list, 0 Home
+  kDriveCreate,         // value: index into kDriveSizesMiB
+  kDriveCancelCreate,
 };
 
 struct Config {
@@ -95,5 +104,50 @@ struct MacrosView {
 void RefreshMacros(const MacrosView& view);
 
 void SetKeyferryText(const char* text);
+
+// --- USB Drive ---
+
+enum class DriveCard : std::uint8_t { kChecking, kReady, kNoCard, kError };
+struct DriveRow {
+  const char* name;
+  std::uint64_t bytes;
+  bool dirty;  // not ejected cleanly last time
+};
+struct DriveListView {
+  DriveCard card = DriveCard::kChecking;
+  const DriveRow* rows = nullptr;
+  int count = 0;
+  std::uint64_t free_bytes = 0;
+};
+void SetDriveList(const DriveListView& view);
+// Opens one drive's page, or the New drive page (also used by the host preview).
+void ShowDriveDetail(int index);
+void ShowDriveCreate();
+// Shown on the drive's page when connecting fails.
+void ShowDriveError(const char* text);
+
+enum class DriveLink : std::uint8_t { kWaiting, kConnected, kEjected, kStopped, kFailed };
+struct DriveExportView {
+  const char* name = "";
+  std::uint64_t bytes = 0;
+  bool writable = false;
+  DriveLink link = DriveLink::kWaiting;
+  bool busy = false;  // reading or writing right now
+  std::uint64_t read_bytes = 0;
+  std::uint64_t written_bytes = 0;
+};
+// Switches to the connected view on first call; later calls refresh it.
+void ShowDriveExport(const DriveExportView& view);
+// The question asked before disconnecting a writable drive the computer has not ejected (also
+// used by the host preview).
+void ShowDisconnectConfirm();
+
+struct DriveCreateView {
+  bool busy = false;
+  int percent = 0;
+  int result = 0;  // 1 created, -1 failed or cancelled
+  const char* message = "";
+};
+void RefreshDriveCreate(const DriveCreateView& view);
 
 }  // namespace keyferry::handheld::ui

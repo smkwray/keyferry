@@ -1,6 +1,6 @@
-// The handheld's own USB HID device (Keep Awake, Macros): descriptors, install and confirmed
-// report sends. Keyferry's bridge never runs in the same boot.
-#include "usb_hid.h"
+// The handheld's own USB device (Keep Awake, Macros, USB Drive): descriptors, install and, for the
+// HID personalities, confirmed report sends. Keyferry's bridge never runs in the same boot.
+#include "usb_device.h"
 #include "keyferry/handheld.h"
 
 #include <atomic>
@@ -20,7 +20,7 @@
 namespace keyferry::handheld {
 namespace {
 
-constexpr char kTag[] = "usb_hid";
+constexpr char kTag[] = "usb_device";
 constexpr std::int64_t kReportTimeoutUs = 500000;
 constexpr std::int64_t kReadyWaitUs = 100000;
 
@@ -47,12 +47,19 @@ tusb_desc_device_t Device(std::uint16_t pid) {
 }
 const tusb_desc_device_t kMouseDevice = Device(0x4010);  // distinct from every keyferry personality
 const tusb_desc_device_t kMacroPadDevice = Device(0x4011);
+const tusb_desc_device_t kDriveDevice = Device(0x4012);
+
+constexpr std::uint8_t kDriveConfig[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN, 0, 100),
+    TUD_MSC_DESCRIPTOR(0, 4, 0x01, 0x81, 64),
+};
 
 char g_serial[13] = "000000000000";
 const char* g_mouse_strings[] = {"\x09\x04", "Keyferry", "Keyferry Keep Awake", g_serial,
                                  "Keep Awake mouse"};
 const char* g_macro_strings[] = {"\x09\x04", "Keyferry", "Keyferry Macros", g_serial,
                                  "Macros keyboard and mouse"};
+const char* g_drive_strings[] = {"\x09\x04", "Keyferry", "Keyferry USB Drive", g_serial, "USB Drive"};
 
 enum : int { kDelivered, kFailed };
 enum : int { kSubmitted, kNotReady, kRefused };
@@ -118,7 +125,7 @@ void OnUsbEvent(tinyusb_event_t* event, void*) {
 
 }  // namespace
 
-bool UsbHidStart(UsbPersonality personality) {
+bool UsbDeviceStart(UsbPersonality personality) {
   std::uint8_t mac[6] = {};
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
     std::snprintf(g_serial, sizeof(g_serial), "%02X%02X%02X%02X%02X%02X", mac[0], mac[1],
@@ -132,11 +139,24 @@ bool UsbHidStart(UsbPersonality personality) {
   // Claim the HID callbacks before TinyUSB starts: its task can serve descriptor requests before
   // tinyusb_driver_install() returns. A failed install restarts to Home, so the claim never leaks.
   g_usb_owned.store(true);
-  const bool macro_pad = personality == UsbPersonality::kMacroPad;
   tinyusb_config_t config = TINYUSB_DEFAULT_CONFIG();
-  config.descriptor.device = macro_pad ? &kMacroPadDevice : &kMouseDevice;
-  config.descriptor.full_speed_config = macro_pad ? kMacroPadConfig : kMouseConfig;
-  config.descriptor.string = macro_pad ? g_macro_strings : g_mouse_strings;
+  switch (personality) {
+    case UsbPersonality::kKeepAwakeMouse:
+      config.descriptor.device = &kMouseDevice;
+      config.descriptor.full_speed_config = kMouseConfig;
+      config.descriptor.string = g_mouse_strings;
+      break;
+    case UsbPersonality::kMacroPad:
+      config.descriptor.device = &kMacroPadDevice;
+      config.descriptor.full_speed_config = kMacroPadConfig;
+      config.descriptor.string = g_macro_strings;
+      break;
+    case UsbPersonality::kDrive:
+      config.descriptor.device = &kDriveDevice;
+      config.descriptor.full_speed_config = kDriveConfig;
+      config.descriptor.string = g_drive_strings;
+      break;
+  }
   config.descriptor.string_count = 5;
   config.event_cb = OnUsbEvent;
   if (tinyusb_driver_install(&config) != ESP_OK) {
@@ -191,8 +211,8 @@ void UsbHidClosePresses() {
 std::uint32_t UsbHidSession() { return g_session.load(); }
 std::uint32_t UsbHidLastSubmittedSession() { return g_last_session.load(); }
 
-bool UsbHidMounted() { return tud_mounted(); }
-bool UsbHidSuspended() { return tud_suspended(); }
+bool UsbDeviceMounted() { return tud_mounted(); }
+bool UsbDeviceSuspended() { return tud_suspended(); }
 bool UsbHidReady() { return !g_in_flight.load() && tud_hid_ready(); }
 
 bool UsbOwnedByHandheld() { return g_usb_owned.load(); }

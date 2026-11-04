@@ -10,7 +10,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "usb_hid.h"
+#include "usb_device.h"
 
 namespace keyferry::handheld {
 namespace {
@@ -55,11 +55,11 @@ void NudgeTask(void*) {
       StopWith(KeepAwakeState::kFinished);
       continue;
     }
-    if (!UsbHidMounted()) {
+    if (!UsbDeviceMounted()) {
       StopWith(KeepAwakeState::kStoppedUnplugged);
       continue;
     }
-    if (UsbHidSuspended()) {
+    if (UsbDeviceSuspended()) {
       StopWith(KeepAwakeState::kStoppedSuspended);
       continue;
     }
@@ -81,7 +81,7 @@ void NudgeTask(void*) {
 }  // namespace
 
 bool KeepAwakeStartUsb() {
-  if (!UsbHidStart(UsbPersonality::kKeepAwakeMouse)) return false;
+  if (!UsbDeviceStart(UsbPersonality::kKeepAwakeMouse)) return false;
   return xTaskCreate(NudgeTask, "kf_keep_awake", 3072, nullptr, 4, nullptr) == pdPASS;
 }
 

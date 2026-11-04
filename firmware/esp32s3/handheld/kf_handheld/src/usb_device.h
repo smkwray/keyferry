@@ -3,10 +3,12 @@
 
 namespace keyferry::handheld {
 
-// One USB personality per boot (ADR 0018 rule 5): each has its own PID and report descriptor.
+// The handheld's own USB device, one personality per boot (ADR 0018 rule 5), each with its own
+// PID and interface set.
 enum class UsbPersonality : std::uint8_t {
   kKeepAwakeMouse,  // 303A:4010, relative mouse without report IDs
-  kMacroPad,        // 303A:4011, keyboard + mouse + media keys in one interface
+  kMacroPad,        // 303A:4011, keyboard + mouse + media keys in one HID interface
+  kDrive,           // 303A:4012, one mass-storage interface (drive.cpp serves it)
 };
 
 // Macro pad report IDs.
@@ -15,7 +17,9 @@ constexpr std::uint8_t kReportMouse = 2;
 constexpr std::uint8_t kReportMedia = 3;
 
 // Installs TinyUSB with that personality, after claiming the HID callbacks.
-bool UsbHidStart(UsbPersonality personality);
+bool UsbDeviceStart(UsbPersonality personality);
+bool UsbDeviceMounted();
+bool UsbDeviceSuspended();
 // Sends one report and waits for the host to take it (500 ms). False: refused or unconfirmed.
 // One sending task per boot. A press (anything that is not an all-released report) is refused
 // once UsbHidClosePresses() has returned; releases are always allowed.
@@ -27,8 +31,6 @@ void UsbHidClosePresses();
 std::uint32_t UsbHidSession();
 // The session of the most recently submitted report.
 std::uint32_t UsbHidLastSubmittedSession();
-bool UsbHidMounted();
-bool UsbHidSuspended();
 bool UsbHidReady();
 
 }  // namespace keyferry::handheld

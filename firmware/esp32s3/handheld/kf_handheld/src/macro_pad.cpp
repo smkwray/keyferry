@@ -12,7 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "usb_hid.h"
+#include "usb_device.h"
 
 namespace keyferry::handheld {
 namespace {
@@ -115,12 +115,12 @@ bool Play(const macros::Step& step) {
 // dropped or re-enumerated the device since the last press holds nothing from it.
 void Neutralize() {
   if (!g_dirty.load()) return;
-  if (!UsbHidMounted() || UsbHidSession() != g_dirty_session.load()) {
+  if (!UsbDeviceMounted() || UsbHidSession() != g_dirty_session.load()) {
     g_dirty.store(false);
     ESP_LOGI(kTag, "computer dropped the device: nothing held");
     return;
   }
-  if (UsbHidSuspended()) return;  // wait for resume; never wake the computer for this
+  if (UsbDeviceSuspended()) return;  // wait for resume; never wake the computer for this
   if (ReleaseAll()) {
     g_dirty.store(false);
     ESP_LOGI(kTag, "release confirmed");
@@ -151,7 +151,7 @@ void Player(void*) {
         g_dirty.store(false);
       } else {
         result = !Open()            ? MacroResult::kStopped
-                 : !UsbHidMounted() ? MacroResult::kNotConnected
+                 : !UsbDeviceMounted() ? MacroResult::kNotConnected
                                     : MacroResult::kNotConfirmed;
         Neutralize();
       }
@@ -167,7 +167,7 @@ void Player(void*) {
 
 bool MacroPadStart() {
   g_requests = xQueueCreate(1, sizeof(Request));
-  if (g_requests == nullptr || !UsbHidStart(UsbPersonality::kMacroPad)) return false;
+  if (g_requests == nullptr || !UsbDeviceStart(UsbPersonality::kMacroPad)) return false;
   return xTaskCreate(Player, "kf_macros", 3072, nullptr, 4, nullptr) == pdPASS;
 }
 
@@ -186,7 +186,7 @@ bool MacroPadRun(int page, int index, macros::Host host) {
     refusal = MacroResult::kStopped;
   } else if (g_dirty.load()) {
     refusal = MacroResult::kReleasing;
-  } else if (!UsbHidMounted() || UsbHidSuspended()) {
+  } else if (!UsbDeviceMounted() || UsbDeviceSuspended()) {
     refusal = MacroResult::kNotConnected;
   }
   if (refusal != MacroResult::kNone) {

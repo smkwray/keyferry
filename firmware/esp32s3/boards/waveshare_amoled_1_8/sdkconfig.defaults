@@ -15,3 +15,8 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_20=y
+# USB Drive (ADR 0018 rule 4): the handheld serves one image file as mass storage. 4 KiB class
+# buffer (internal RAM, also present while Keyferry runs); constant-time seeks inside images.
+CONFIG_TINYUSB_MSC_ENABLED=y
+CONFIG_TINYUSB_MSC_BUFSIZE=4096
+CONFIG_FATFS_USE_FASTSEEK=y

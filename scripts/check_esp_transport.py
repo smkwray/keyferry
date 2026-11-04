@@ -635,8 +635,6 @@ def build_checks(build: Path) -> None:
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     if "KEYFERRY_MSC_SIZE_PROBE:BOOL=ON" in cache:
         fail("MSC size probe is unqualified and cannot pass production inspection")
-    if re.search(r"^CONFIG_TINYUSB_MSC_ENABLED=y$", sdkconfig, re.MULTILINE):
-        fail("MSC is unqualified and cannot pass production inspection")
     if "KEYFERRY_PRIVATE_CONFIG_DIR:" in cache:
         fail("private configuration directory became a CMake cache input")
     match = re.search(
@@ -644,6 +642,8 @@ def build_checks(build: Path) -> None:
     )
     if match is None or not (BOARDS / match.group(1) / "board.json").is_file():
         fail("build lacks a valid declarative board profile")
+    if re.search(r"^CONFIG_TINYUSB_MSC_ENABLED=y$", sdkconfig, re.MULTILINE):
+        check_handheld_msc(build, cache, match.group(1))
     generated_profile = build / "generated-board" / "board_profile.h"
     expected_id = f'inline constexpr char id[] = "{match.group(1)}"'
     if (
@@ -693,6 +693,29 @@ def build_checks(build: Path) -> None:
             "application leaves less than 32 KiB in its measured partition: "
             f"{app.stat().st_size} bytes"
         )
+
+
+def check_handheld_msc(build: Path, cache: str, board: str) -> None:
+    """Mass storage passes only on a handheld board, served by its USB Drive function alone.
+
+    The bridge's own file handoff stays unqualified and out of production images (ADR 0018
+    rules 4 and 11); the linker map shows which library defines the storage callbacks.
+    """
+    profile = json.loads((BOARDS / board / "board.json").read_text(encoding="utf-8"))
+    if "handheld" not in profile:
+        fail("MSC is unqualified and cannot pass production inspection")
+    if "KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache:
+        fail("handheld file handoff is unqualified and cannot pass production inspection")
+    link_map = build / "keyferry_hil_endpoint.map"
+    if not link_map.is_file():
+        fail("linker map is missing: cannot tell who serves mass storage")
+    text = link_map.read_text(encoding="utf-8", errors="replace")
+    for callback in ("tud_msc_read10_cb", "tud_msc_write10_cb", "tud_msc_scsi_cb"):
+        owners = set(
+            re.findall(rf"\.text\.{callback}\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+(\S+)", text)
+        )
+        if not owners or any("libkf_handheld.a" not in owner for owner in owners):
+            fail(f"{callback} must come only from the handheld USB Drive: {sorted(owners)}")
 
 
 def main() -> int:

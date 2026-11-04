@@ -46,7 +46,7 @@ constexpr int kHalfWidth = (kInnerWidth - kGap) / 2;
 
 struct State {
   Config config;
-  lv_obj_t* screens[6] = {};
+  lv_obj_t* screens[kScreenCount] = {};
   lv_obj_t* wake_shield = nullptr;
   lv_obj_t* home_status = nullptr;
   lv_obj_t* touch_dot = nullptr;
@@ -74,6 +74,42 @@ struct State {
   int macro_page = 0;
   int macro_busy = -1;
   lv_obj_t* keyferry_text = nullptr;
+  // USB Drive
+  lv_obj_t* drive_title = nullptr;
+  lv_obj_t* drive_back_icon = nullptr;
+  lv_obj_t* drive_views[4] = {};  // list, detail, connected, create
+  int drive_view = 0;
+  lv_obj_t* drive_status = nullptr;
+  lv_obj_t* drive_retry = nullptr;
+  lv_obj_t* drive_rows = nullptr;
+  lv_obj_t* drive_new = nullptr;
+  lv_obj_t* drive_new_detail = nullptr;
+  DriveRow drive_list[8] = {};
+  char drive_names[8][32] = {};
+  int drive_count = 0;
+  std::uint64_t drive_free = 0;
+  int drive_selected = -1;
+  bool drive_writable = false;
+  lv_obj_t* detail_name = nullptr;
+  lv_obj_t* detail_size = nullptr;
+  lv_obj_t* detail_warning = nullptr;
+  lv_obj_t* detail_modes[2] = {};
+  lv_obj_t* detail_hint = nullptr;
+  lv_obj_t* export_ring = nullptr;
+  lv_obj_t* export_icon = nullptr;
+  lv_obj_t* export_name = nullptr;
+  lv_obj_t* export_status = nullptr;
+  lv_obj_t* export_detail = nullptr;
+  lv_obj_t* export_confirm = nullptr;
+  bool export_shown = false;
+  bool export_needs_eject = false;
+  lv_obj_t* create_chips[kDriveSizeChoices] = {};
+  int create_size = 0;
+  lv_obj_t* create_info = nullptr;
+  lv_obj_t* create_bar = nullptr;
+  lv_obj_t* create_message = nullptr;
+  lv_obj_t* create_button = nullptr;
+  bool create_busy = false;
 };
 
 State g;
@@ -269,7 +305,8 @@ void BuildHome() {
           static_cast<int>(Action::kLaunchKeepAwake), true);
   AddTile(screen, 2, LV_SYMBOL_BARS, "Macros", kMacrosColor, OnAction,
           static_cast<int>(Action::kLaunchMacros), true);
-  AddTile(screen, 3, LV_SYMBOL_SD_CARD, "USB Drive", kDriveColor, OnAction, 0, false);
+  AddTile(screen, 3, LV_SYMBOL_SD_CARD, "USB Drive", kDriveColor, OnAction,
+          static_cast<int>(Action::kLaunchDrive), true);
   AddTile(screen, 4, LV_SYMBOL_LIST, "Board Check", kCheckColor, OnShow,
           static_cast<int>(Screen::kCheck), true);
   AddTile(screen, 5, LV_SYMBOL_SETTINGS, "Settings", kSettingsColor, OnShow,
@@ -339,6 +376,39 @@ void BuildCheck() {
 // --- Settings ------------------------------------------------------------------------------------
 
 constexpr int kRowHeight = 96;
+
+// A vertical list under the header that scrolls; rows fade out at the bottom edge instead of
+// being cut off, so it is clear there is more below.
+lv_obj_t* ScrollList(lv_obj_t* parent) {
+  lv_obj_t* list = Plain(parent);
+  lv_obj_set_pos(list, 0, kContentTop);
+  lv_obj_set_size(list, kWidth, kHeight - kContentTop);
+  lv_obj_set_scrollable(list, true);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+  lv_obj_set_style_pad_hor(list, kMargin, 0);
+  lv_obj_set_style_pad_row(list, 8, 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_bg_color(list, lv_color_hex(kSettingsColor), LV_PART_SCROLLBAR);
+  lv_obj_set_style_bg_opa(list, LV_OPA_60, LV_PART_SCROLLBAR);
+  lv_obj_set_style_width(list, 4, LV_PART_SCROLLBAR);
+  return list;
+}
+
+void AddFade(lv_obj_t* list) {
+  constexpr int kFade = 36;
+  lv_obj_set_style_pad_bottom(list, kFade, 0);
+  lv_obj_t* fade = Plain(list);
+  lv_obj_set_floating(fade, true);
+  lv_obj_set_size(fade, kWidth, kFade);
+  lv_obj_align(fade, LV_ALIGN_BOTTOM_MID, 0, kFade);  // the list's bottom padding holds it
+  lv_obj_set_style_bg_color(fade, lv_color_hex(kBlack), 0);
+  lv_obj_set_style_bg_grad_color(fade, lv_color_hex(kBlack), 0);
+  lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+  lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_bg_grad_opa(fade, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+}
 
 lv_obj_t* SettingsRow(lv_obj_t* list, const char* caption) {
   lv_obj_t* row = Card(list, kInnerWidth, kRowHeight);
@@ -441,20 +511,7 @@ void OnStartInKeyferry(lv_event_t* event) {
 void BuildSettings() {
   lv_obj_t* screen = NewScreen(Screen::kSettings);
   Header(screen, "Settings");
-  // The rows scroll under a fixed header; a partly visible last row shows there is more.
-  lv_obj_t* list = Plain(screen);
-  lv_obj_set_pos(list, 0, kContentTop);
-  lv_obj_set_size(list, kWidth, kHeight - kContentTop);
-  lv_obj_set_scrollable(list, true);
-  lv_obj_set_scroll_dir(list, LV_DIR_VER);
-  lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
-  lv_obj_set_style_pad_hor(list, kMargin, 0);
-  lv_obj_set_style_pad_bottom(list, kMargin, 0);
-  lv_obj_set_style_pad_row(list, 8, 0);
-  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_bg_color(list, lv_color_hex(kSettingsColor), LV_PART_SCROLLBAR);
-  lv_obj_set_style_bg_opa(list, LV_OPA_60, LV_PART_SCROLLBAR);
-  lv_obj_set_style_width(list, 4, LV_PART_SCROLLBAR);
+  lv_obj_t* list = ScrollList(screen);
 
   g.brightness = g.config.brightness;
   g.brightness_value = StepperRow(list, "Brightness", OnBrightnessStep, true);
@@ -492,19 +549,7 @@ void BuildSettings() {
   lv_obj_set_style_pad_left(hint, 8, 0);
   lv_obj_set_style_pad_top(hint, 4, 0);
 
-  // Rows fade out at the bottom edge instead of being cut off: there is more below.
-  constexpr int kFade = 36;
-  lv_obj_set_style_pad_bottom(list, kFade, 0);
-  lv_obj_t* fade = Plain(list);
-  lv_obj_set_floating(fade, true);
-  lv_obj_set_size(fade, kWidth, kFade);
-  lv_obj_align(fade, LV_ALIGN_BOTTOM_MID, 0, kFade);  // the list's bottom padding holds it
-  lv_obj_set_style_bg_color(fade, lv_color_hex(kBlack), 0);
-  lv_obj_set_style_bg_grad_color(fade, lv_color_hex(kBlack), 0);
-  lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
-  lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_bg_grad_opa(fade, LV_OPA_COVER, 0);
-  lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+  AddFade(list);
 }
 
 // --- Keep Awake ----------------------------------------------------------------------------------
@@ -703,6 +748,324 @@ void BuildKeyferry() {
   lv_obj_set_width(g.keyferry_text, LV_PCT(100));
 }
 
+// --- USB Drive -----------------------------------------------------------------------------------
+
+enum DriveView : int { kDriveListView, kDriveDetailView, kDriveExportView, kDriveCreateView };
+
+// Binary units with the familiar names, as computers show them: 64 MB, 1.0 GB.
+void FormatSize(char* out, std::size_t size, std::uint64_t bytes) {
+  if (bytes >= (1ULL << 30)) {
+    const auto tenths = static_cast<unsigned>((bytes * 10) >> 30);
+    std::snprintf(out, size, "%u.%u GB", tenths / 10, tenths % 10);
+  } else {
+    std::snprintf(out, size, "%u MB", static_cast<unsigned>(bytes >> 20));
+  }
+}
+
+void ShowDriveView(int view) {
+  g.drive_view = view;
+  for (int i = 0; i < 4; ++i) lv_obj_set_hidden(g.drive_views[i], i != view);
+  // The corner button goes back from a drive's page and New drive; elsewhere it is Home.
+  const bool back = view == kDriveDetailView || view == kDriveCreateView;
+  lv_label_set_text(g.drive_back_icon, back ? LV_SYMBOL_LEFT : LV_SYMBOL_HOME);
+  lv_label_set_text(g.drive_title, view == kDriveCreateView ? "New drive" : "USB Drive");
+}
+
+int g_disconnect_target = 0;
+
+void AskDisconnect(int target) {
+  if (g.export_needs_eject) {
+    g_disconnect_target = target;
+    lv_obj_set_hidden(g.export_confirm, false);
+  } else {
+    Emit(Action::kDriveDisconnect, target);
+  }
+}
+
+void OnDriveCorner(lv_event_t*) {
+  switch (g.drive_view) {
+    case kDriveDetailView: ShowDriveView(kDriveListView); break;
+    case kDriveCreateView:
+      if (!g.create_busy) ShowDriveView(kDriveListView);
+      break;
+    case kDriveExportView: AskDisconnect(0); break;
+    default: Emit(Action::kLeave, 0); break;
+  }
+}
+
+void OnConfirm(lv_event_t* event) {
+  lv_obj_set_hidden(g.export_confirm, true);
+  if (Unpack(event) == 1) Emit(Action::kDriveDisconnect, g_disconnect_target);
+}
+
+void ShowModes() {
+  SetSelected(g.detail_modes[0], !g.drive_writable, kDriveColor);
+  SetSelected(g.detail_modes[1], g.drive_writable, kDriveColor);
+  lv_label_set_text(g.detail_hint, g.drive_writable
+                                       ? "Eject it on the computer before unplugging."
+                                       : "The computer can read but not change it.");
+}
+
+void OnMode(lv_event_t* event) {
+  g.drive_writable = Unpack(event) == 1;
+  ShowModes();
+}
+
+void OnConnect(lv_event_t*) {
+  Emit(Action::kDriveConnect, g.drive_selected | (g.drive_writable ? 1 << 8 : 0));
+}
+
+void OpenDetail(int index) {
+  if (index < 0 || index >= g.drive_count) return;
+  g.drive_selected = index;
+  g.drive_writable = false;
+  const DriveRow& row = g.drive_list[index];
+  lv_label_set_text(g.detail_name, row.name);
+  char size[24];
+  FormatSize(size, sizeof(size), row.bytes);
+  lv_label_set_text(g.detail_size, size);
+  lv_obj_set_style_text_color(g.detail_warning, lv_color_hex(kKeepAwakeColor), 0);
+  lv_label_set_text(g.detail_warning,
+                    row.dirty ? "Not ejected cleanly last time. Connect it writable so the "
+                                "computer can repair it."
+                              : "");
+  ShowModes();
+  ShowDriveView(kDriveDetailView);
+}
+
+void OnDriveRow(lv_event_t* event) { OpenDetail(Unpack(event)); }
+
+void ShowCreateChoices() {
+  for (int i = 0; i < kDriveSizeChoices; ++i) {
+    SetSelected(g.create_chips[i], i == g.create_size, kDriveColor);
+  }
+  // About 2 MB/s on this card bus, plus formatting.
+  const int seconds = kDriveSizesMiB[g.create_size] / 2 + 5;
+  char free_text[24];
+  FormatSize(free_text, sizeof(free_text), g.drive_free);
+  if (seconds < 90) {
+    lv_label_set_text_fmt(g.create_info, "FAT32   " LV_SYMBOL_BULLET "   about %d s   " LV_SYMBOL_BULLET
+                                         "   %s free",
+                          seconds, free_text);
+  } else {
+    lv_label_set_text_fmt(g.create_info, "FAT32   " LV_SYMBOL_BULLET "   about %d min   " LV_SYMBOL_BULLET
+                                         "   %s free",
+                          (seconds + 30) / 60, free_text);
+  }
+}
+
+void OnCreateSize(lv_event_t* event) {
+  if (g.create_busy) return;
+  g.create_size = Unpack(event);
+  ShowCreateChoices();
+}
+
+void OnCreateButton(lv_event_t*) {
+  Emit(g.create_busy ? Action::kDriveCancelCreate : Action::kDriveCreate, g.create_size);
+}
+
+void OnOpenCreate(lv_event_t*) {
+  ShowCreateChoices();
+  lv_label_set_text(g.create_message, "");
+  ShowDriveView(kDriveCreateView);
+}
+
+lv_obj_t* DriveView(lv_obj_t* screen) {
+  lv_obj_t* view = Plain(screen);
+  lv_obj_set_pos(view, 0, 0);
+  lv_obj_set_size(view, kWidth, kHeight);
+  lv_obj_set_hidden(view, true);
+  return view;
+}
+
+// A row in the drive list: badge, name, detail line and a chevron.
+lv_obj_t* DriveRowButton(lv_obj_t* parent, const char* symbol, std::uint32_t color, const char* name,
+                         const char* detail, std::uint32_t detail_color) {
+  lv_obj_t* row = Button(parent, kInnerWidth, 84);
+  lv_obj_t* badge = Badge(row, symbol, color, 48, kBody);
+  lv_obj_align(badge, LV_ALIGN_LEFT_MID, 14, 0);
+  lv_obj_t* label = Label(row, kBody, kText, name);
+  lv_obj_set_width(label, kInnerWidth - 76 - 48);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_height(label, lv_font_get_line_height(kBody));
+  lv_obj_set_pos(label, 76, 14);
+  lv_obj_t* line = Label(row, kSmall, detail_color, detail);
+  lv_obj_set_size(line, kInnerWidth - 76 - 48, lv_font_get_line_height(kSmall));
+  lv_label_set_long_mode(line, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_pos(line, 76, 46);
+  lv_obj_align(Label(row, kBody, kMuted, LV_SYMBOL_RIGHT), LV_ALIGN_RIGHT_MID, -18, 0);
+  return row;
+}
+
+lv_obj_t* WideButton(lv_obj_t* parent, const char* text, std::uint32_t accent) {
+  lv_obj_t* button = Button(parent, kInnerWidth, 80);
+  lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -kMargin);
+  lv_obj_t* label = Label(button, kTitle, kText, text);
+  lv_obj_center(label);
+  if (accent != 0) SetSelected(button, true, accent);
+  return button;
+}
+
+void BuildDriveList(lv_obj_t* view) {
+  lv_obj_t* list = ScrollList(view);
+  g.drive_status = Label(list, kBody, kMuted, "Looking for the SD card...");
+  lv_obj_set_width(g.drive_status, kInnerWidth - 16);
+  lv_obj_set_style_pad_all(g.drive_status, 8, 0);
+  g.drive_retry = Button(list, kInnerWidth, kControl);
+  lv_obj_center(Label(g.drive_retry, kBody, kText, LV_SYMBOL_REFRESH "   Try again"));
+  lv_obj_add_event_cb(g.drive_retry, OnAction, LV_EVENT_CLICKED,
+                      Pack(static_cast<int>(Action::kDriveRescan)));
+  lv_obj_set_hidden(g.drive_retry, true);
+  g.drive_rows = Plain(list);
+  lv_obj_set_size(g.drive_rows, kInnerWidth, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(g.drive_rows, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(g.drive_rows, 8, 0);
+  g.drive_new = DriveRowButton(list, LV_SYMBOL_PLUS, kDriveColor, "New drive", "", kMuted);
+  g.drive_new_detail = lv_obj_get_child(g.drive_new, 2);
+  lv_obj_add_event_cb(g.drive_new, OnOpenCreate, LV_EVENT_CLICKED, nullptr);
+  lv_obj_set_hidden(g.drive_new, true);
+  AddFade(list);
+}
+
+void BuildDriveDetail(lv_obj_t* view) {
+  lv_obj_t* badge = Badge(view, LV_SYMBOL_DRIVE, kDriveColor, 64, kTitle);
+  lv_obj_set_pos(badge, kMargin + 4, kContentTop + 4);
+  g.detail_name = Label(view, kTitle, kText, "");
+  lv_obj_set_width(g.detail_name, kInnerWidth - 88);
+  lv_label_set_long_mode(g.detail_name, LV_LABEL_LONG_MODE_DOTS);
+  lv_obj_set_height(g.detail_name, lv_font_get_line_height(kTitle));
+  lv_obj_set_pos(g.detail_name, kMargin + 84, kContentTop + 2);
+  g.detail_size = Label(view, kBody, kMuted, "");
+  lv_obj_set_pos(g.detail_size, kMargin + 84, kContentTop + 40);
+  g.detail_warning = Label(view, kSmall, kKeepAwakeColor, "");
+  lv_obj_set_width(g.detail_warning, kInnerWidth - 8);
+  lv_obj_set_pos(g.detail_warning, kMargin + 4, kContentTop + 80);
+  const char* modes[2] = {"Read-only", "Writable"};
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_t* button = Button(view, kHalfWidth, kControl);
+    lv_obj_set_pos(button, kMargin + i * (kHalfWidth + kGap), 232);
+    lv_obj_center(Label(button, kBody, kText, modes[i]));
+    lv_obj_add_event_cb(button, OnMode, LV_EVENT_CLICKED, Pack(i));
+    g.detail_modes[i] = button;
+  }
+  g.detail_hint = Label(view, kSmall, kMuted, "");
+  lv_obj_set_width(g.detail_hint, kInnerWidth);
+  lv_obj_set_style_text_align(g.detail_hint, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.detail_hint, kMargin, 318);
+  lv_obj_add_event_cb(WideButton(view, "Connect", kDriveColor), OnConnect, LV_EVENT_CLICKED, nullptr);
+}
+
+void BuildDriveExport(lv_obj_t* view) {
+  constexpr int kRing = 140;
+  g.export_ring = Plain(view);
+  lv_obj_set_size(g.export_ring, kRing, kRing);
+  lv_obj_align(g.export_ring, LV_ALIGN_TOP_MID, 0, kContentTop + 4);
+  lv_obj_set_style_radius(g.export_ring, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(g.export_ring, lv_color_hex(kCard), 0);
+  lv_obj_set_style_bg_opa(g.export_ring, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(g.export_ring, 6, 0);
+  lv_obj_set_style_border_color(g.export_ring, lv_color_hex(kBorder), 0);
+  lv_obj_set_style_outline_color(g.export_ring, lv_color_hex(kDriveColor), 0);
+  g.export_icon = Label(g.export_ring, kLarge, kMuted, LV_SYMBOL_USB);
+  lv_obj_center(g.export_icon);
+  g.export_name = Label(view, kTitle, kText, "");
+  lv_obj_set_width(g.export_name, kInnerWidth);
+  lv_obj_set_style_text_align(g.export_name, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.export_name, kMargin, kContentTop + kRing + 12);
+  g.export_status = Label(view, kBody, kText, "");
+  lv_obj_set_width(g.export_status, kInnerWidth);
+  lv_obj_set_style_text_align(g.export_status, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.export_status, kMargin, kContentTop + kRing + 52);
+  g.export_detail = Label(view, kSmall, kMuted, "");
+  lv_obj_set_width(g.export_detail, kInnerWidth);
+  lv_obj_set_style_text_align(g.export_detail, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.export_detail, kMargin, kContentTop + kRing + 82);
+  lv_obj_add_event_cb(WideButton(view, "Disconnect", 0), [](lv_event_t*) { AskDisconnect(1); },
+                      LV_EVENT_CLICKED, nullptr);
+}
+
+// Covers the screen until answered: unplugging a writable drive the computer has not ejected
+// can lose what it has not written yet.
+void BuildDisconnectConfirm(lv_obj_t* screen) {
+  g.export_confirm = Plain(screen);
+  lv_obj_set_size(g.export_confirm, kWidth, kHeight);
+  lv_obj_set_clickable(g.export_confirm, true);  // nothing underneath takes a tap meanwhile
+  lv_obj_set_style_bg_color(g.export_confirm, lv_color_hex(kBlack), 0);
+  lv_obj_set_style_bg_opa(g.export_confirm, LV_OPA_COVER, 0);
+  lv_obj_t* text = Label(g.export_confirm, kBody, kText,
+                         "Eject the drive on the computer first.\n\n"
+                         "Disconnecting now can lose changes the computer has not saved yet.");
+  lv_obj_set_width(text, kInnerWidth - 16);
+  lv_obj_set_pos(text, kMargin + 8, 40);
+  lv_obj_t* keep = Button(g.export_confirm, kInnerWidth, 80);
+  lv_obj_align(keep, LV_ALIGN_BOTTOM_MID, 0, -kMargin - 80 - kGap);
+  lv_obj_center(Label(keep, kTitle, kText, "Keep connected"));
+  SetSelected(keep, true, kDriveColor);
+  lv_obj_add_event_cb(keep, OnConfirm, LV_EVENT_CLICKED, Pack(0));
+  lv_obj_t* leave = Button(g.export_confirm, kInnerWidth, 80);
+  lv_obj_align(leave, LV_ALIGN_BOTTOM_MID, 0, -kMargin);
+  lv_obj_t* leave_label = Label(leave, kBody, kError, "Disconnect anyway");
+  lv_obj_center(leave_label);
+  lv_obj_add_event_cb(leave, OnConfirm, LV_EVENT_CLICKED, Pack(1));
+  lv_obj_set_hidden(g.export_confirm, true);
+}
+
+void BuildDriveCreate(lv_obj_t* view) {
+  lv_obj_t* caption = Label(view, kBody, kMuted, "Size");
+  lv_obj_set_pos(caption, kMargin + 6, kContentTop + 4);
+  constexpr int kChipWidth = (kInnerWidth - (kDriveSizeChoices - 1) * 8) / kDriveSizeChoices;
+  for (int i = 0; i < kDriveSizeChoices; ++i) {
+    lv_obj_t* chip = Button(view, kChipWidth, kControl);
+    lv_obj_set_pos(chip, kMargin + i * (kChipWidth + 8), kContentTop + 36);
+    char text[16];
+    const int mib = kDriveSizesMiB[i];
+    if (mib >= 1024) {
+      std::snprintf(text, sizeof(text), "%d GB", mib / 1024);
+    } else {
+      std::snprintf(text, sizeof(text), "%d MB", mib);
+    }
+    lv_obj_center(Label(chip, kBody, kText, text));
+    lv_obj_add_event_cb(chip, OnCreateSize, LV_EVENT_CLICKED, Pack(i));
+    g.create_chips[i] = chip;
+  }
+  g.create_info = Label(view, kSmall, kMuted, "");
+  lv_obj_set_width(g.create_info, kInnerWidth);
+  lv_obj_set_style_text_align(g.create_info, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.create_info, kMargin, kContentTop + 122);
+  g.create_bar = lv_bar_create(view);
+  lv_obj_set_size(g.create_bar, kInnerWidth, 14);
+  lv_obj_set_pos(g.create_bar, kMargin, kContentTop + 172);
+  lv_bar_set_range(g.create_bar, 0, 100);
+  lv_obj_set_style_bg_color(g.create_bar, lv_color_hex(kDivider), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(g.create_bar, lv_color_hex(kDriveColor), LV_PART_INDICATOR);
+  lv_obj_set_hidden(g.create_bar, true);
+  g.create_message = Label(view, kBody, kText, "");
+  lv_obj_set_width(g.create_message, kInnerWidth);
+  lv_obj_set_style_text_align(g.create_message, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.create_message, kMargin, kContentTop + 198);
+  g.create_button = WideButton(view, "Create", kDriveColor);
+  lv_obj_add_event_cb(g.create_button, OnCreateButton, LV_EVENT_CLICKED, nullptr);
+}
+
+void BuildDrive() {
+  lv_obj_t* screen = NewScreen(Screen::kDrive);
+  for (int i = 0; i < 4; ++i) g.drive_views[i] = DriveView(screen);
+  BuildDriveList(g.drive_views[kDriveListView]);
+  BuildDriveDetail(g.drive_views[kDriveDetailView]);
+  BuildDriveExport(g.drive_views[kDriveExportView]);
+  BuildDriveCreate(g.drive_views[kDriveCreateView]);
+  // One corner button for every view: Home, or Back from a drive's page and New drive.
+  lv_obj_t* corner = Button(screen, kHomeWidth, kControl);
+  lv_obj_set_pos(corner, kMargin, kMargin);
+  g.drive_back_icon = Label(corner, kTitle, kText, LV_SYMBOL_HOME);
+  lv_obj_center(g.drive_back_icon);
+  lv_obj_add_event_cb(corner, OnDriveCorner, LV_EVENT_CLICKED, nullptr);
+  g.drive_title = Label(screen, kTitle, kText, "USB Drive");
+  lv_obj_align_to(g.drive_title, corner, LV_ALIGN_OUT_RIGHT_MID, 16, 0);
+  BuildDisconnectConfirm(screen);
+  ShowDriveView(kDriveListView);
+}
+
 void OnWakeShield(lv_event_t* event) {
   if (lv_event_get_code(event) == LV_EVENT_PRESSED) Emit(Action::kWake, 0);
   if (lv_event_get_code(event) == LV_EVENT_RELEASED) lv_obj_set_hidden(g.wake_shield, true);
@@ -720,6 +1083,7 @@ void Build(const Config& config, Screen first) {
     case Screen::kKeepAwake: BuildKeepAwake(); break;
     case Screen::kMacros: BuildMacros(); break;
     case Screen::kKeyferry: BuildKeyferry(); break;
+    case Screen::kDrive: BuildDrive(); break;
     default:
       BuildHome();
       BuildCheck();
@@ -745,7 +1109,7 @@ void Show(Screen screen) {
 
 Screen Active() {
   lv_obj_t* active = lv_screen_active();
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < kScreenCount; ++i) {
     if (g.screens[i] == active) return static_cast<Screen>(i);
   }
   return Screen::kHome;
@@ -860,6 +1224,146 @@ void RefreshMacros(const MacrosView& view) {
 
 void SetKeyferryText(const char* text) {
   if (g.keyferry_text != nullptr) lv_label_set_text(g.keyferry_text, text);
+}
+
+void SetDriveList(const DriveListView& view) {
+  if (g.drive_rows == nullptr) return;
+  g.drive_free = view.free_bytes;
+  g.drive_count = view.count < 8 ? view.count : 8;
+  for (int i = 0; i < g.drive_count; ++i) {
+    std::snprintf(g.drive_names[i], sizeof(g.drive_names[i]), "%s", view.rows[i].name);
+    g.drive_list[i] = DriveRow{g.drive_names[i], view.rows[i].bytes, view.rows[i].dirty};
+  }
+  const bool ready = view.card == DriveCard::kReady;
+  const char* status = nullptr;
+  switch (view.card) {
+    case DriveCard::kChecking: status = "Looking for the SD card..."; break;
+    case DriveCard::kNoCard: status = "No SD card found.\nInsert a card, then try again."; break;
+    case DriveCard::kError: status = "The SD card could not be read.\nIt needs to be formatted FAT32 on a computer."; break;
+    case DriveCard::kReady:
+      if (g.drive_count == 0) {
+        status = "No drives yet. Make one below, or copy .IMG files into the DRIVES folder on the card.";
+      }
+      break;
+  }
+  lv_obj_set_hidden(g.drive_status, status == nullptr);
+  if (status != nullptr) lv_label_set_text(g.drive_status, status);
+  lv_obj_set_hidden(g.drive_retry, view.card != DriveCard::kNoCard && view.card != DriveCard::kError);
+  lv_obj_clean(g.drive_rows);
+  for (int i = 0; i < g.drive_count; ++i) {
+    const DriveRow& row = g.drive_list[i];
+    char detail[64];
+    char size[24];
+    FormatSize(size, sizeof(size), row.bytes);
+    if (row.dirty) {
+      std::snprintf(detail, sizeof(detail), "%s   " LV_SYMBOL_WARNING " not ejected", size);
+    } else {
+      std::snprintf(detail, sizeof(detail), "%s", size);
+    }
+    lv_obj_t* button = DriveRowButton(g.drive_rows, LV_SYMBOL_DRIVE, kDriveColor, row.name, detail,
+                                      row.dirty ? kKeepAwakeColor : kMuted);
+    lv_obj_add_event_cb(button, OnDriveRow, LV_EVENT_CLICKED, Pack(i));
+  }
+  lv_obj_set_hidden(g.drive_new, !ready);
+  char free_text[24];
+  FormatSize(free_text, sizeof(free_text), view.free_bytes);
+  lv_label_set_text_fmt(g.drive_new_detail, "%s free on the card", free_text);
+}
+
+void ShowDriveDetail(int index) {
+  if (g.drive_rows != nullptr) OpenDetail(index);
+}
+
+void ShowDriveCreate() {
+  if (g.drive_rows != nullptr) OnOpenCreate(nullptr);
+}
+
+void ShowDriveError(const char* text) {
+  if (g.detail_warning == nullptr) return;
+  lv_obj_set_style_text_color(g.detail_warning, lv_color_hex(kError), 0);
+  lv_label_set_text(g.detail_warning, text);
+}
+
+void ShowDriveExport(const DriveExportView& view) {
+  if (g.export_ring == nullptr) return;
+  if (!g.export_shown) {
+    g.export_shown = true;
+    ShowDriveView(kDriveExportView);
+  }
+  lv_label_set_text(g.export_name, view.name);
+  std::uint32_t ring = kBorder;
+  std::uint32_t status_color = kText;
+  const char* status = "";
+  switch (view.link) {
+    case DriveLink::kWaiting: status = "Waiting for a computer"; break;
+    case DriveLink::kConnected:
+      ring = kDriveColor;
+      status = view.busy ? (view.writable ? "In use: reading or writing" : "In use: reading") : "Connected";
+      break;
+    case DriveLink::kEjected:
+      ring = kKeyferryColor;
+      status = "Ejected: safe to unplug";
+      status_color = kDriveColor;
+      break;
+    case DriveLink::kStopped: status = "Disconnected"; break;
+    case DriveLink::kFailed:
+      ring = kError;
+      status = "Card error: drive stopped";
+      status_color = kError;
+      break;
+  }
+  lv_obj_set_style_border_color(g.export_ring, lv_color_hex(ring), 0);
+  lv_obj_set_style_text_color(g.export_icon, lv_color_hex(ring == kBorder ? kMuted : ring), 0);
+  // Activity: a soft glow around the ring while data moves.
+  lv_obj_set_style_outline_width(g.export_ring, view.busy ? 8 : 0, 0);
+  lv_obj_set_style_outline_opa(g.export_ring, LV_OPA_30, 0);
+  lv_label_set_text(g.export_status, status);
+  lv_obj_set_style_text_color(g.export_status, lv_color_hex(status_color), 0);
+  char read[24];
+  char written[24];
+  FormatSize(read, sizeof(read), view.read_bytes);
+  FormatSize(written, sizeof(written), view.written_bytes);
+  if (view.link == DriveLink::kWaiting) {
+    lv_label_set_text_fmt(g.export_detail, "%s   " LV_SYMBOL_BULLET "   plug into a computer",
+                          view.writable ? "Writable" : "Read-only");
+  } else if (view.writable) {
+    lv_label_set_text_fmt(g.export_detail, "Writable   " LV_SYMBOL_BULLET "   read %s, wrote %s", read, written);
+  } else {
+    lv_label_set_text_fmt(g.export_detail, "Read-only   " LV_SYMBOL_BULLET "   read %s", read);
+  }
+  g.export_needs_eject = view.writable && view.link == DriveLink::kConnected;
+}
+
+void ShowDisconnectConfirm() {
+  if (g.export_confirm == nullptr) return;
+  g_disconnect_target = 1;
+  lv_obj_set_hidden(g.export_confirm, false);
+}
+
+void RefreshDriveCreate(const DriveCreateView& view) {
+  if (g.create_button == nullptr) return;
+  const bool finished = g.create_busy && !view.busy;
+  g.create_busy = view.busy;
+  lv_obj_set_hidden(g.create_bar, !view.busy);
+  lv_bar_set_value(g.create_bar, view.percent, LV_ANIM_OFF);
+  lv_label_set_text(lv_obj_get_child(g.create_button, 0), view.busy ? "Cancel" : "Create");
+  SetSelected(g.create_button, !view.busy, kDriveColor);
+  for (lv_obj_t* chip : g.create_chips) {
+    if (view.busy) {
+      lv_obj_add_state(chip, LV_STATE_DISABLED);
+    } else {
+      lv_obj_remove_state(chip, LV_STATE_DISABLED);
+    }
+  }
+  if (view.busy) {
+    lv_label_set_text_fmt(g.create_message, "%s  %d%%", view.message, view.percent);
+    lv_obj_set_style_text_color(g.create_message, lv_color_hex(kText), 0);
+  } else if (finished && view.result == 1) {
+    ShowDriveView(kDriveListView);  // the new drive is in the list, ready to connect
+  } else if (finished) {
+    lv_label_set_text(g.create_message, view.message);
+    lv_obj_set_style_text_color(g.create_message, lv_color_hex(kError), 0);
+  }
 }
 
 }  // namespace keyferry::handheld::ui

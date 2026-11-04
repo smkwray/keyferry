@@ -30,7 +30,14 @@ const char* const kScenes[] = {
     "home", "check", "settings", "keep-awake", "keep-awake-timer", "keep-awake-always",
     "keep-awake-done", "macros-0", "macros-1",
     "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
-    "keyferry",
+    "keyferry", "drive-list", "drive-empty", "drive-nocard", "drive-detail", "drive-create",
+    "drive-waiting", "drive-connected", "drive-ejected", "drive-confirm",
+};
+
+const ui::DriveRow kSampleDrives[] = {
+    {"DRIVE1.IMG", 64ULL << 20, false},
+    {"PRINTER.IMG", 256ULL << 20, true},
+    {"SCANS.IMG", 1024ULL << 20, false},
 };
 
 bool Scene(const char* name) {
@@ -87,6 +94,45 @@ bool Scene(const char* name) {
   } else if (std::strcmp(name, "keyferry") == 0) {
     ui::Build(config, ui::Screen::kKeyferry);
     ui::SetKeyferryText("Ready, disarmed\nWi-Fi: connected\nDaemon: authenticated\nUSB: keyboard + mouse");
+  } else if (std::strncmp(name, "drive-", 6) == 0) {
+    ui::Build(config, ui::Screen::kDrive);
+    ui::DriveListView list;
+    list.card = std::strcmp(name, "drive-nocard") == 0 ? ui::DriveCard::kNoCard : ui::DriveCard::kReady;
+    const bool empty = std::strcmp(name, "drive-empty") == 0 || list.card != ui::DriveCard::kReady;
+    list.rows = kSampleDrives;
+    list.count = empty ? 0 : 3;
+    list.free_bytes = 14ULL * 1024 * 1024 * 1024 + (200ULL << 20);
+    ui::SetDriveList(list);
+    if (std::strcmp(name, "drive-detail") == 0) ui::ShowDriveDetail(1);
+    if (std::strcmp(name, "drive-create") == 0) {
+      ui::ShowDriveCreate();
+      ui::DriveCreateView create;
+      create.busy = true;
+      create.percent = 42;
+      create.message = "Preparing...";
+      ui::RefreshDriveCreate(create);
+    }
+    ui::DriveExportView link;
+    link.name = "PRINTER.IMG";
+    link.bytes = 256ULL << 20;
+    link.writable = true;
+    link.read_bytes = 12ULL << 20;
+    link.written_bytes = 3ULL << 20;
+    if (std::strcmp(name, "drive-waiting") == 0) {
+      link.writable = false;
+      ui::ShowDriveExport(link);
+    } else if (std::strcmp(name, "drive-connected") == 0) {
+      link.link = ui::DriveLink::kConnected;
+      link.busy = true;
+      ui::ShowDriveExport(link);
+    } else if (std::strcmp(name, "drive-ejected") == 0) {
+      link.link = ui::DriveLink::kEjected;
+      ui::ShowDriveExport(link);
+    } else if (std::strcmp(name, "drive-confirm") == 0) {
+      link.link = ui::DriveLink::kConnected;
+      ui::ShowDriveExport(link);
+      ui::ShowDisconnectConfirm();
+    }
   } else {
     return false;
   }
