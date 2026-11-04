@@ -3,6 +3,8 @@
 
 namespace keyferry::handheld {
 
+constexpr int kKeepAwakeIntervalSeconds = 25;
+
 enum class KeepAwakeState : std::uint8_t {
   kReady,
   kRunning,
@@ -17,6 +19,7 @@ void KeepAwakeSetRunning(bool running);
 bool KeepAwakeRunning();
 KeepAwakeState KeepAwakeStateNow();
 std::uint32_t KeepAwakeNudges();
-bool KeepAwakeUsbMounted();
+// Whole seconds until the next nudge while running (0: due now), else -1.
+int KeepAwakeSecondsToNext();
 
 }  // namespace keyferry::handheld

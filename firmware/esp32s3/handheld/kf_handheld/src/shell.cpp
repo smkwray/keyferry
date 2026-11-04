@@ -1,13 +1,16 @@
-// Handheld touch shell (ADR 0018): Home, Board Check, Settings and the Keep Awake function.
+// Handheld shell (ADR 0018): boot selection, power and buttons, the supervisor and the glue
+// between the screens (ui.cpp) and the functions (Keep Awake, Macros, Keyferry).
 // Functions are mutually exclusive: launching one records it in RTC memory and restarts, and
 // leaving it restarts to Home. Home has no radio, no application USB class and no SD writes.
 #include "keyferry/handheld.h"
 
+#include <algorithm>
 #include <atomic>
-#include <iterator>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <iterator>
 
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
@@ -18,9 +21,6 @@
 #include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
-#include "soc/reset_reasons.h"
-#include <algorithm>
-#include <cstring>
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -28,21 +28,31 @@
 #include "hal/usb_serial_jtag_ll.h"
 #include "keep_awake.h"
 #include "lvgl.h"
+#include "macro_pad.h"
+#include "macros.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdmmc_cmd.h"
+#include "soc/reset_reasons.h"
+#include "ui.h"
+#include "usb_hid.h"
 
 namespace keyferry::handheld {
 namespace {
 
+static_assert(ui::kWidth == BSP_LCD_H_RES && ui::kHeight == BSP_LCD_V_RES, "panel size");
+
 constexpr char kTag[] = "handheld";
 constexpr char kNvsNamespace[] = "kf_hh";
 constexpr char kBrightnessKey[] = "bright";
-constexpr char kStartKey[] = "start";  // 1: power-up starts Keyferry
+constexpr char kStartKey[] = "start";       // 1: power-up starts Keyferry
+constexpr char kHostKey[] = "host";         // macros::Host for Macros shortcuts
+constexpr char kMacroPageKey[] = "mpage";   // last Macros page shown
 constexpr int kDefaultBrightness = 60;
 constexpr int kMinBrightness = 5;
 constexpr std::uint32_t kBlankAfterMs = 20000;
 constexpr std::int64_t kBootLongHoldUs = 2000000;
+constexpr std::int64_t kNoticeUs = 2500000;
 constexpr gpio_num_t kBootGpio = GPIO_NUM_0;
 
 // AXP2101 power management unit on the shared I2C bus.
@@ -67,7 +77,7 @@ struct PowerStatus {
   int battery_percent = -1;
 };
 
-enum class Function : std::uint32_t { kHome = 0, kKeepAwake = 1, kKeyferry = 2 };
+enum class Function : std::uint32_t { kHome = 0, kKeepAwake = 1, kKeyferry = 2, kMacros = 3 };
 
 struct BootSelection {
   std::uint32_t magic;
@@ -102,7 +112,7 @@ RTC_NOINIT_ATTR KeyferryStarts g_keyferry_starts;
 // *deliberate is true only for a choice recorded by Launch(); otherwise the start preference applies.
 Function TakeSelection(bool* deliberate) {
   const BootSelection selection = g_selection;
-  g_selection = BootSelection{0, 0, 0};  // a crash or reset inside Home or Keep Awake leaves it
+  g_selection = BootSelection{0, 0, 0};  // a crash or reset inside Home or a function leaves it
   *deliberate = selection.magic == kSelectionMagic &&
                 selection.check == (~selection.function ^ ImageTag());
   if (!*deliberate) {
@@ -110,6 +120,7 @@ Function TakeSelection(bool* deliberate) {
   }
   switch (selection.function) {
     case static_cast<std::uint32_t>(Function::kKeepAwake): return Function::kKeepAwake;
+    case static_cast<std::uint32_t>(Function::kMacros): return Function::kMacros;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
     case static_cast<std::uint32_t>(Function::kKeyferry): return Function::kKeyferry;
 #endif
@@ -205,26 +216,6 @@ RTC_NOINIT_ATTR SelfTest g_selftest;
 
 enum class SdState : std::uint8_t { kUnchecked, kChecking, kMounted, kFailed };
 
-struct Ui {
-  lv_obj_t* home = nullptr;
-  lv_obj_t* check = nullptr;
-  lv_obj_t* settings = nullptr;
-  lv_obj_t* touch_dot = nullptr;
-  lv_obj_t* touch_label = nullptr;
-  lv_obj_t* buttons_label = nullptr;
-  lv_obj_t* power_label = nullptr;
-  lv_obj_t* storage_label = nullptr;
-  lv_obj_t* memory_label = nullptr;
-  lv_obj_t* brightness_label = nullptr;
-  lv_obj_t* wake_shield = nullptr;
-  lv_obj_t* keep_awake = nullptr;
-  lv_obj_t* keep_awake_status = nullptr;
-  lv_obj_t* keep_awake_toggle = nullptr;
-  lv_obj_t* keyferry = nullptr;
-  lv_obj_t* keyferry_status = nullptr;
-};
-
-Ui g_ui;
 Function g_function = Function::kHome;
 std::atomic<std::uint32_t> g_ui_ticks{0};
 std::atomic<std::uint32_t> g_renders{0};
@@ -232,6 +223,7 @@ KeyferryHooks g_keyferry{};
 std::atomic<bool> g_leaving{false};
 i2c_master_dev_handle_t g_pmu = nullptr;
 int g_brightness = kDefaultBrightness;
+macros::Host g_host = macros::Host::kWindows;
 bool g_blanked = false;
 bool g_boot_down = false;
 bool g_boot_long = false;
@@ -241,6 +233,18 @@ std::uint32_t g_pwr_long_count = 0;
 volatile SdState g_sd_state = SdState::kUnchecked;
 std::uint64_t g_sd_bytes = 0;
 esp_err_t g_sd_error = ESP_OK;
+std::uint32_t g_macro_serial_seen = 0;
+std::int64_t g_notice_until = 0;
+char g_notice[48] = {};
+bool g_notice_error = false;
+
+bool UsbFunction() { return g_function == Function::kKeepAwake || g_function == Function::kMacros; }
+
+// Stops any input a handheld USB function is producing; safe from any task.
+void StopInput() {
+  if (g_function == Function::kKeepAwake) KeepAwakeSetRunning(false);
+  if (g_function == Function::kMacros) MacroPadStop();
+}
 
 bool PmuRead(std::uint8_t reg, std::uint8_t* out, std::size_t length) {
   return g_pmu != nullptr &&
@@ -303,46 +307,40 @@ std::uint8_t TakePwrEvents() {
   return status;
 }
 
-int LoadBrightness() {
+// Settings are single bytes in one NVS namespace; a missing or unreadable key gives `fallback`.
+std::uint8_t LoadSetting(const char* key, std::uint8_t fallback) {
   nvs_handle_t handle;
-  std::uint8_t value = kDefaultBrightness;
-  if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) == ESP_OK) {
-    nvs_get_u8(handle, kBrightnessKey, &value);
-    nvs_close(handle);
-  }
+  std::uint8_t value = fallback;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return fallback;
+  if (nvs_get_u8(handle, key, &value) != ESP_OK) value = fallback;
+  nvs_close(handle);
+  return value;
+}
+
+void StoreSetting(const char* key, std::uint8_t value) {
+  nvs_handle_t handle;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
+  if (nvs_set_u8(handle, key, value) == ESP_OK) nvs_commit(handle);
+  nvs_close(handle);
+}
+
+int LoadBrightness() {
+  const int value = LoadSetting(kBrightnessKey, kDefaultBrightness);
   return value < kMinBrightness || value > 100 ? kDefaultBrightness : value;
 }
 
 bool LoadStartInKeyferry() {
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
   // ADR 0018: power-up shows Home unless the owner turned "Start in Keyferry" on (stored 1).
-  nvs_handle_t handle;
-  std::uint8_t value = 0;
-  if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
-  const esp_err_t read = nvs_get_u8(handle, kStartKey, &value);
-  nvs_close(handle);
-  return read == ESP_OK && value == 1;
+  return LoadSetting(kStartKey, 0) == 1;
 #else
   return false;
 #endif
 }
 
-#if defined(KEYFERRY_HANDHELD_KEYFERRY)
-void StoreStartInKeyferry(bool value) {
-  nvs_handle_t handle;
-  if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
-  if (nvs_set_u8(handle, kStartKey, value ? 1 : 0) == ESP_OK) nvs_commit(handle);
-  nvs_close(handle);
-}
-#endif
-
-void StoreBrightness(int value) {
-  nvs_handle_t handle;
-  if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
-  if (nvs_set_u8(handle, kBrightnessKey, static_cast<std::uint8_t>(value)) == ESP_OK) {
-    nvs_commit(handle);
-  }
-  nvs_close(handle);
+macros::Host LoadHost() {
+  return LoadSetting(kHostKey, 0) == static_cast<std::uint8_t>(macros::Host::kMac) ? macros::Host::kMac
+                                                                                   : macros::Host::kWindows;
 }
 
 void SdCheckTask(void*) {
@@ -360,7 +358,7 @@ void Blank() {
   if (g_blanked) return;
   g_blanked = true;
   bsp_display_brightness_set(0);
-  lv_obj_set_hidden(g_ui.wake_shield, false);
+  ui::ShowWakeShield();
 }
 
 void Wake() {
@@ -370,129 +368,14 @@ void Wake() {
   lv_display_trigger_activity(nullptr);
 }
 
-void ShowScreen(lv_obj_t* screen) {
-  ESP_LOGI(kTag, "screen %s",
-           screen == g_ui.home ? "home" : screen == g_ui.check ? "check" : "settings");
-  lv_screen_load(screen);
-  if (screen == g_ui.check && g_sd_state == SdState::kUnchecked) {
-    g_sd_state = SdState::kChecking;
-    xTaskCreate(SdCheckTask, "kf_sd_check", 4096, nullptr, 3, nullptr);
-  }
-}
-
-// --- UI construction -------------------------------------------------------------------------
-
-lv_obj_t* NewScreen(const char* title) {
-  lv_obj_t* screen = lv_obj_create(nullptr);
-  lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
-  lv_obj_set_style_text_color(screen, lv_color_white(), 0);
-  lv_obj_set_scrollable(screen, false);
-  lv_obj_t* label = lv_label_create(screen);
-  lv_label_set_text(label, title);
-  lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
-  lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 24);
-  return screen;
-}
-
-lv_obj_t* AddButton(lv_obj_t* parent, const char* text, int y, lv_event_cb_t callback,
-                    void* target, bool enabled = true) {
-  lv_obj_t* button = lv_button_create(parent);
-  lv_obj_set_size(button, 300, 58);
-  lv_obj_align(button, LV_ALIGN_TOP_MID, 0, y);
-  lv_obj_t* label = lv_label_create(button);
-  lv_label_set_text(label, text);
-  lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-  lv_obj_center(label);
-  if (enabled) {
-    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, target);
-  } else {
-    lv_obj_add_state(button, LV_STATE_DISABLED);
-  }
-  return button;
-}
-
-// Home tiles: a 2-column grid of near-square targets (about 160 x 113 px) with an icon above
-// the name, easier to hit than full-width bars.
-constexpr int kTileWidth = 160;
-constexpr int kTileHeight = 113;
-constexpr int kTileGap = 11;
-constexpr int kTileTop = 72;
-
-void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* text,
-             lv_event_cb_t callback, void* target, bool enabled = true) {
-  lv_obj_t* tile = lv_button_create(parent);
-  lv_obj_set_size(tile, kTileWidth, kTileHeight);
-  const int column = index % 2;
-  const int row = index / 2;
-  const int left = (BSP_LCD_H_RES - 2 * kTileWidth - kTileGap) / 2;
-  lv_obj_set_pos(tile, left + column * (kTileWidth + kTileGap),
-                 kTileTop + row * (kTileHeight + kTileGap));
-  lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_row(tile, 8, 0);
-  lv_obj_t* icon = lv_label_create(tile);
-  lv_label_set_text(icon, symbol);
-  lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
-  lv_obj_t* label = lv_label_create(tile);
-  lv_label_set_text(label, text);
-  lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
-  if (enabled) {
-    lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, target);
-  } else {
-    lv_obj_add_state(tile, LV_STATE_DISABLED);
-  }
-}
-
-void OnNavigate(lv_event_t* event) {
-  ShowScreen(static_cast<lv_obj_t*>(lv_event_get_user_data(event)));
-}
-
-lv_obj_t* AddInfoLabel(lv_obj_t* parent, int y) {
-  lv_obj_t* label = lv_label_create(parent);
-  lv_obj_set_width(label, 320);
-  lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-  lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, y);
-  lv_label_set_text(label, "");
-  return label;
-}
-
-void OnCheckTouch(lv_event_t*) {
-  lv_point_t point{};
-  lv_indev_get_point(lv_indev_active(), &point);
-  lv_obj_set_pos(g_ui.touch_dot, point.x - 12, point.y - 12);
-  lv_obj_set_hidden(g_ui.touch_dot, false);
-  lv_label_set_text_fmt(g_ui.touch_label, "Touch: x %d  y %d", static_cast<int>(point.x),
-                        static_cast<int>(point.y));
-}
-
-void OnCheckPressed(lv_event_t*) {
-  lv_point_t point{};
-  lv_indev_get_point(lv_indev_active(), &point);
-  ESP_LOGI(kTag, "touch %d %d", static_cast<int>(point.x), static_cast<int>(point.y));
-}
-
-void OnLaunchKeepAwake(lv_event_t*) { Launch(Function::kKeepAwake); }
-
-void OnLeaveFunction(lv_event_t*) {
-  KeepAwakeSetRunning(false);
-  Launch(Function::kHome);
-}
-
-void OnKeepAwakeToggle(lv_event_t*) { KeepAwakeSetRunning(!KeepAwakeRunning()); }
-
-#if defined(KEYFERRY_HANDHELD_KEYFERRY)
-void OnLaunchKeyferry(lv_event_t*) { Launch(Function::kKeyferry); }
-#endif
-
 constexpr TickType_t kExitDisplayLockTicks = pdMS_TO_TICKS(50);
 constexpr std::int64_t kExitNeutralTimeoutUs = 3000000;
 TaskHandle_t g_exit_worker = nullptr;
 
 // Display text is optional during an exit and never waits long for the LVGL lock.
 void ShowExitText(const char* text) {
-  if (g_ui.keyferry_status != nullptr &&
-      bsp_display_lock(kExitDisplayLockTicks * portTICK_PERIOD_MS)) {
-    lv_label_set_text(g_ui.keyferry_status, text);
+  if (bsp_display_lock(kExitDisplayLockTicks * portTICK_PERIOD_MS)) {
+    ui::SetKeyferryText(text);
     bsp_display_unlock();
   }
 }
@@ -534,134 +417,118 @@ void RequestKeyferryExit() {
   xTaskNotifyGive(g_exit_worker);
 }
 
-void OnLeaveKeyferry(lv_event_t*) { RequestKeyferryExit(); }
+// --- Screen actions (LVGL task, display lock held) -----------------------------------------------
 
-void RefreshKeyferry() {
-  if (g_leaving.load() || g_keyferry.status == nullptr) return;
-  char text[256] = {};
-  g_keyferry.status(g_keyferry.context, text, sizeof(text));
-  lv_label_set_text(g_ui.keyferry_status, text);
-}
-
-#if defined(KEYFERRY_HANDHELD_KEYFERRY)
-void OnStartInKeyferry(lv_event_t* event) {
-  lv_obj_t* toggle = static_cast<lv_obj_t*>(lv_event_get_target(event));
-  StoreStartInKeyferry(lv_obj_has_state(toggle, LV_STATE_CHECKED));
-}
-#endif
-
-void OnBrightness(lv_event_t* event) {
-  lv_obj_t* slider = static_cast<lv_obj_t*>(lv_event_get_target(event));
-  g_brightness = lv_slider_get_value(slider);
-  bsp_display_brightness_set(g_brightness);
-  lv_label_set_text_fmt(g_ui.brightness_label, "Brightness: %d%%", g_brightness);
-  if (lv_event_get_code(event) == LV_EVENT_RELEASED) StoreBrightness(g_brightness);
-}
-
-void OnWakeShield(lv_event_t* event) {
-  // The whole gesture that wakes the screen is consumed; it never reaches a control.
-  if (lv_event_get_code(event) == LV_EVENT_PRESSED) Wake();
-  if (lv_event_get_code(event) == LV_EVENT_RELEASED) {
-    lv_obj_set_hidden(g_ui.wake_shield, true);
+const char* ScreenName(ui::Screen screen) {
+  switch (screen) {
+    case ui::Screen::kHome: return "home";
+    case ui::Screen::kCheck: return "check";
+    case ui::Screen::kSettings: return "settings";
+    default: return "function";
   }
 }
 
-void BuildUi() {
-  g_ui.home = NewScreen("Keyferry");
-  g_ui.check = NewScreen("Board Check");
-  g_ui.settings = NewScreen("Settings");
-
+void OnAction(ui::Action action, int value) {
+  switch (action) {
+    case ui::Action::kLaunchKeepAwake: Launch(Function::kKeepAwake);
+    case ui::Action::kLaunchMacros: Launch(Function::kMacros);
+    case ui::Action::kLaunchKeyferry:
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
-  AddTile(g_ui.home, 0, LV_SYMBOL_KEYBOARD, "Keyferry", OnLaunchKeyferry, nullptr);
-#else
-  AddTile(g_ui.home, 0, LV_SYMBOL_KEYBOARD, "Keyferry", OnNavigate, nullptr, false);
+      Launch(Function::kKeyferry);
 #endif
-  AddTile(g_ui.home, 1, LV_SYMBOL_EYE_OPEN, "Keep Awake", OnLaunchKeepAwake, nullptr);
-  AddTile(g_ui.home, 2, LV_SYMBOL_USB, "USB Drive", OnNavigate, nullptr, false);
-  AddTile(g_ui.home, 3, LV_SYMBOL_LIST, "Board Check", OnNavigate, g_ui.check);
-  AddTile(g_ui.home, 4, LV_SYMBOL_SETTINGS, "Settings", OnNavigate, g_ui.settings);
-
-  lv_obj_set_clickable(g_ui.check, true);
-  lv_obj_add_event_cb(g_ui.check, OnCheckTouch, LV_EVENT_PRESSING, nullptr);
-  lv_obj_add_event_cb(g_ui.check, OnCheckPressed, LV_EVENT_PRESSED, nullptr);
-  g_ui.touch_label = AddInfoLabel(g_ui.check, 80);
-  lv_label_set_text(g_ui.touch_label, "Touch: tap anywhere");
-  g_ui.buttons_label = AddInfoLabel(g_ui.check, 108);
-  g_ui.power_label = AddInfoLabel(g_ui.check, 154);
-  g_ui.storage_label = AddInfoLabel(g_ui.check, 222);
-  g_ui.memory_label = AddInfoLabel(g_ui.check, 268);
-  g_ui.touch_dot = lv_obj_create(g_ui.check);
-  lv_obj_set_size(g_ui.touch_dot, 24, 24);
-  lv_obj_set_style_radius(g_ui.touch_dot, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(g_ui.touch_dot, lv_palette_main(LV_PALETTE_CYAN), 0);
-  lv_obj_set_clickable(g_ui.touch_dot, false);
-  lv_obj_set_hidden(g_ui.touch_dot, true);
-  AddButton(g_ui.check, "Home", 370, OnNavigate, g_ui.home);
-
-  g_ui.brightness_label = AddInfoLabel(g_ui.settings, 110);
-  lv_obj_set_style_text_font(g_ui.brightness_label, &lv_font_montserrat_20, 0);
-  lv_label_set_text_fmt(g_ui.brightness_label, "Brightness: %d%%", g_brightness);
-  lv_obj_t* slider = lv_slider_create(g_ui.settings);
-  lv_obj_set_width(slider, 300);
-  lv_obj_align(slider, LV_ALIGN_TOP_MID, 0, 170);
-  lv_slider_set_range(slider, kMinBrightness, 100);
-  lv_slider_set_value(slider, g_brightness, LV_ANIM_OFF);
-  lv_obj_add_event_cb(slider, OnBrightness, LV_EVENT_VALUE_CHANGED, nullptr);
-  lv_obj_add_event_cb(slider, OnBrightness, LV_EVENT_RELEASED, nullptr);
+      break;
+    case ui::Action::kLeave:
+      if (g_function == Function::kKeyferry) {
+        RequestKeyferryExit();
+      } else {
+        StopInput();
+        Launch(Function::kHome);
+      }
+      break;
+    case ui::Action::kWake: Wake(); break;
+    case ui::Action::kShown:
+      ESP_LOGI(kTag, "screen %s", ScreenName(static_cast<ui::Screen>(value)));
+      if (static_cast<ui::Screen>(value) == ui::Screen::kCheck && g_sd_state == SdState::kUnchecked) {
+        g_sd_state = SdState::kChecking;
+        xTaskCreate(SdCheckTask, "kf_sd_check", 4096, nullptr, 3, nullptr);
+      }
+      break;
+    case ui::Action::kTouch: ESP_LOGI(kTag, "touch %d %d", value >> 16, value & 0xFFFF); break;
+    case ui::Action::kKeepAwakeToggle: KeepAwakeSetRunning(!KeepAwakeRunning()); break;
+    case ui::Action::kBrightness:
+      g_brightness = value;
+      bsp_display_brightness_set(g_brightness);
+      break;
+    case ui::Action::kBrightnessCommit: StoreSetting(kBrightnessKey, static_cast<std::uint8_t>(value)); break;
+    case ui::Action::kStartInKeyferry:
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
-  lv_obj_t* start_label = AddInfoLabel(g_ui.settings, 290);
-  lv_obj_set_style_text_font(start_label, &lv_font_montserrat_20, 0);
-  lv_label_set_text(start_label, "Start in Keyferry");
-  lv_obj_t* start_switch = lv_switch_create(g_ui.settings);
-  lv_obj_align(start_switch, LV_ALIGN_TOP_RIGHT, -24, 284);
-  if (LoadStartInKeyferry()) lv_obj_add_state(start_switch, LV_STATE_CHECKED);
-  lv_obj_add_event_cb(start_switch, OnStartInKeyferry, LV_EVENT_VALUE_CHANGED, nullptr);
+      StoreSetting(kStartKey, value == 1 ? 1 : 0);
 #endif
-  lv_obj_t* hint = AddInfoLabel(g_ui.settings, 230);
-  lv_label_set_text(hint, "Screen turns off after 30 s idle.\nTouch, BOOT or PWR wakes it.");
-  AddButton(g_ui.settings, "Home", 370, OnNavigate, g_ui.home);
-
-  g_ui.keep_awake = NewScreen("Keep Awake");
-  g_ui.keep_awake_status = AddInfoLabel(g_ui.keep_awake, 100);
-  lv_obj_set_style_text_font(g_ui.keep_awake_status, &lv_font_montserrat_20, 0);
-  g_ui.keep_awake_toggle = AddButton(g_ui.keep_awake, "Start", 270, OnKeepAwakeToggle, nullptr);
-  AddButton(g_ui.keep_awake, "Home", 370, OnLeaveFunction, nullptr);
-
-  g_ui.keyferry = NewScreen("Keyferry");
-  g_ui.keyferry_status = AddInfoLabel(g_ui.keyferry, 90);
-  lv_obj_set_style_text_font(g_ui.keyferry_status, &lv_font_montserrat_20, 0);
-  AddButton(g_ui.keyferry, "Home", 370, OnLeaveKeyferry, nullptr);
-
-  g_ui.wake_shield = lv_obj_create(lv_layer_top());
-  lv_obj_set_size(g_ui.wake_shield, LV_PCT(100), LV_PCT(100));
-  lv_obj_set_style_bg_opa(g_ui.wake_shield, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(g_ui.wake_shield, 0, 0);
-  lv_obj_add_event_cb(g_ui.wake_shield, OnWakeShield, LV_EVENT_PRESSED, nullptr);
-  lv_obj_add_event_cb(g_ui.wake_shield, OnWakeShield, LV_EVENT_RELEASED, nullptr);
-  lv_obj_set_hidden(g_ui.wake_shield, true);
-
-  lv_screen_load(g_function == Function::kKeepAwake  ? g_ui.keep_awake
-                 : g_function == Function::kKeyferry ? g_ui.keyferry
-                                                     : g_ui.home);
+      break;
+    case ui::Action::kMacroHost:
+      g_host = static_cast<macros::Host>(value);
+      StoreSetting(kHostKey, static_cast<std::uint8_t>(value));
+      break;
+    case ui::Action::kMacroPage: StoreSetting(kMacroPageKey, static_cast<std::uint8_t>(value)); break;
+    case ui::Action::kRunMacro: MacroPadRun(value >> 8, value & 0xFF, g_host); break;
+  }
 }
+
+// --- Status refresh ------------------------------------------------------------------------------
 
 const char* KeepAwakeText(KeepAwakeState state) {
   switch (state) {
     case KeepAwakeState::kRunning: return "Running";
     case KeepAwakeState::kStoppedUnplugged: return "Stopped: unplugged";
     case KeepAwakeState::kStoppedSuspended: return "Stopped: computer slept";
-    case KeepAwakeState::kStoppedUnconfirmed: return "Stopped: report not confirmed";
+    case KeepAwakeState::kStoppedUnconfirmed: return "Stopped: not confirmed";
     default: return "Ready";
   }
 }
 
 void RefreshKeepAwake() {
-  lv_label_set_text_fmt(g_ui.keep_awake_status, "%s\nUSB: %s\nNudges: %u (every 25 s)",
-                        KeepAwakeText(KeepAwakeStateNow()),
-                        KeepAwakeUsbMounted() ? "connected" : "not connected",
-                        static_cast<unsigned>(KeepAwakeNudges()));
-  lv_label_set_text(lv_obj_get_child(g_ui.keep_awake_toggle, 0),
-                    KeepAwakeRunning() ? "Stop" : "Start");
+  ui::KeepAwakeView view;
+  const KeepAwakeState state = KeepAwakeStateNow();
+  view.state = KeepAwakeText(state);
+  view.running = KeepAwakeRunning();
+  view.stopped_by_fault = state != KeepAwakeState::kReady && state != KeepAwakeState::kRunning;
+  view.usb = UsbHidMounted();
+  view.nudges = KeepAwakeNudges();
+  view.seconds_to_next = KeepAwakeSecondsToNext();
+  view.interval_seconds = kKeepAwakeIntervalSeconds;
+  ui::RefreshKeepAwake(view);
+}
+
+void RefreshMacros() {
+  std::uint32_t serial = 0;
+  int which = -1;
+  const MacroResult result = MacroPadLastResult(&serial, &which);
+  const std::int64_t now = esp_timer_get_time();
+  if (serial != g_macro_serial_seen) {
+    g_macro_serial_seen = serial;
+    const macros::Page& page = macros::PageAt(which >> 8);
+    const int index = which & 0xFF;
+    const char* name = index < page.count ? macros::NameFor(page.macros[index], g_host) : "";
+    switch (result) {
+      case MacroResult::kSent: std::snprintf(g_notice, sizeof(g_notice), "Sent: %s", name); break;
+      case MacroResult::kNotConnected: std::snprintf(g_notice, sizeof(g_notice), "No computer connected"); break;
+      case MacroResult::kNotConfirmed: std::snprintf(g_notice, sizeof(g_notice), "Not confirmed: %s", name); break;
+      default: std::snprintf(g_notice, sizeof(g_notice), "Stopped"); break;
+    }
+    g_notice_error = result != MacroResult::kSent;
+    g_notice_until = now + kNoticeUs;
+  }
+  ui::MacrosView view;
+  view.usb = UsbHidMounted();
+  view.busy = MacroPadBusy();
+  if (now < g_notice_until) {
+    view.notice = g_notice;
+    view.notice_is_error = g_notice_error;
+  } else if (!view.usb) {
+    view.notice = "Not connected";
+    view.notice_is_error = true;
+  }
+  ui::RefreshMacros(view);
 }
 
 const char* ChargeText(int direction) {
@@ -673,37 +540,54 @@ const char* ChargeText(int direction) {
 }
 
 void RefreshCheck() {
-  lv_label_set_text_fmt(g_ui.buttons_label, "BOOT: %s   PWR: %" PRIu32 " short, %" PRIu32 " long",
-                        g_boot_down ? "DOWN" : "up", g_pwr_short_count, g_pwr_long_count);
-  const PowerStatus power = ReadPower();
-  if (!power.readable) {
-    lv_label_set_text(g_ui.power_label, "Power chip: not readable");
-  } else if (!power.battery_present) {
-    lv_label_set_text_fmt(g_ui.power_label, "USB power: %s\nBattery: none detected",
-                          power.vbus_good ? "yes" : "no");
+  char buttons[64];
+  char power[96];
+  char storage[80];
+  char memory[96];
+  std::snprintf(buttons, sizeof(buttons), "BOOT %s   PWR %" PRIu32 " short, %" PRIu32 " long",
+                g_boot_down ? "DOWN" : "up", g_pwr_short_count, g_pwr_long_count);
+  const PowerStatus status = ReadPower();
+  if (!status.readable) {
+    std::snprintf(power, sizeof(power), "Power chip: not readable");
+  } else if (!status.battery_present) {
+    std::snprintf(power, sizeof(power), "USB power: %s\nBattery: none", status.vbus_good ? "yes" : "no");
   } else {
-    lv_label_set_text_fmt(g_ui.power_label, "USB power: %s\nBattery: %d mV, %d%%, %s",
-                          power.vbus_good ? "yes" : "no", power.battery_mv,
-                          power.battery_percent, ChargeText(power.charge_direction));
+    std::snprintf(power, sizeof(power), "USB power: %s\nBattery: %d mV, %d%%, %s",
+                  status.vbus_good ? "yes" : "no", status.battery_mv, status.battery_percent,
+                  ChargeText(status.charge_direction));
   }
   switch (g_sd_state) {
     case SdState::kUnchecked:
-    case SdState::kChecking:
-      lv_label_set_text(g_ui.storage_label, "SD card: checking...");
-      break;
+    case SdState::kChecking: std::snprintf(storage, sizeof(storage), "SD card: checking..."); break;
     case SdState::kMounted:
-      lv_label_set_text_fmt(g_ui.storage_label, "SD card: %" PRIu32 " MiB, FAT mounted (read only use)",
-                            static_cast<std::uint32_t>(g_sd_bytes >> 20));
+      std::snprintf(storage, sizeof(storage), "SD card: %" PRIu32 ".%" PRIu32 " GB, FAT",
+                    static_cast<std::uint32_t>(g_sd_bytes / 1000000000ULL),
+                    static_cast<std::uint32_t>(g_sd_bytes / 100000000ULL % 10));
       break;
     case SdState::kFailed:
-      lv_label_set_text_fmt(g_ui.storage_label, "SD card: not mounted (%s)", esp_err_to_name(g_sd_error));
+      std::snprintf(storage, sizeof(storage), "SD card: not mounted\n(%s)", esp_err_to_name(g_sd_error));
       break;
   }
-  lv_label_set_text_fmt(
-      g_ui.memory_label, "Internal RAM: %u KiB free, %u KiB largest\nPSRAM: %u KiB free",
-      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10),
-      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) >> 10),
-      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10));
+  std::snprintf(memory, sizeof(memory), "RAM %u KiB free (%u KiB block)\nPSRAM %u KiB free",
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >> 10),
+                static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) >> 10),
+                static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10));
+  ui::RefreshCheck(ui::CheckView{buttons, power, storage, memory});
+}
+
+void RefreshHome() {
+  const PowerStatus status = ReadPower();
+  ui::HomeView view;
+  view.usb_power = status.vbus_good;
+  view.battery_percent = status.battery_present ? status.battery_percent : -1;
+  ui::RefreshHome(view);
+}
+
+void RefreshKeyferry() {
+  if (g_leaving.load() || g_keyferry.status == nullptr) return;
+  char text[256] = {};
+  g_keyferry.status(g_keyferry.context, text, sizeof(text));
+  ui::SetKeyferryText(text);
 }
 
 // Runs in the LVGL task with the display lock held.
@@ -715,7 +599,7 @@ void OnTick(lv_timer_t*) {
     g_boot_down_since = now;
     g_boot_long = false;
     ESP_LOGI(kTag, "BOOT down");
-    if (g_function == Function::kKeepAwake) KeepAwakeSetRunning(false);  // stop input at once
+    StopInput();  // stop input at once
   }
   if (boot_down && !g_boot_long && now - g_boot_down_since >= kBootLongHoldUs) {
     g_boot_long = true;  // restart only after release so GPIO0 cannot select ROM download
@@ -723,7 +607,7 @@ void OnTick(lv_timer_t*) {
   }
   if (!boot_down && g_boot_down) {
     ESP_LOGI(kTag, "BOOT up%s", g_boot_long ? " (long)" : "");
-    if (g_function == Function::kKeepAwake) Launch(Function::kHome);  // after release: no ROM strap
+    if (UsbFunction()) Launch(Function::kHome);  // after release: no ROM strap
     if (g_function == Function::kKeyferry) {
       if (g_boot_long) RequestKeyferryExit();
       Wake();
@@ -737,14 +621,15 @@ void OnTick(lv_timer_t*) {
     if (g_blanked) {
       Wake();
     } else {
-      ShowScreen(g_ui.home);
+      ui::Show(ui::Screen::kHome);
     }
     lv_display_trigger_activity(nullptr);
   }
   g_boot_down = boot_down;
 
-  static std::uint32_t pmu_divider = 0;
-  if (++pmu_divider % 5 == 0) {
+  static std::uint32_t divider = 0;
+  ++divider;
+  if (divider % 5 == 0) {  // every 100 ms
     const std::uint8_t events = TakePwrEvents();
     if (events) ESP_LOGI(kTag, "PWR event 0x%02x", events);
     if (events & kPwrShort) {
@@ -756,9 +641,18 @@ void OnTick(lv_timer_t*) {
       }
     }
     if (events & kPwrLong) ++g_pwr_long_count;
-    if (!g_blanked && lv_screen_active() == g_ui.check) RefreshCheck();
-    if (!g_blanked && lv_screen_active() == g_ui.keep_awake) RefreshKeepAwake();
-    if (!g_blanked && lv_screen_active() == g_ui.keyferry) RefreshKeyferry();
+    if (!g_blanked) {
+      switch (ui::Active()) {
+        case ui::Screen::kCheck: RefreshCheck(); break;
+        case ui::Screen::kKeepAwake: RefreshKeepAwake(); break;
+        case ui::Screen::kMacros: RefreshMacros(); break;
+        case ui::Screen::kKeyferry: RefreshKeyferry(); break;
+        case ui::Screen::kHome:
+          if (divider % 50 == 0) RefreshHome();
+          break;
+        default: break;
+      }
+    }
   }
 
   if (!g_blanked && lv_display_get_inactive_time(nullptr) >= kBlankAfterMs) Blank();
@@ -782,11 +676,12 @@ void Supervise(void*) {
   const bool boot_down = gpio_get_level(kBootGpio) == 0;
   static std::int64_t boot_down_since = 0;
   if (boot_down && !boot_was_down) boot_down_since = now;
-  if (g_function == Function::kKeepAwake) {
-    if (boot_down) KeepAwakeSetRunning(false);
+  if (UsbFunction()) {
+    if (boot_down) StopInput();
     if (boot_was_down && !boot_down) Launch(Function::kHome);  // after release: no ROM strap
     if (now - last_progress > 5000000) {
       ESP_LOGE(kTag, "UI stalled for 5 s inside a function; returning Home");
+      StopInput();
       Launch(Function::kHome);
     }
   }
@@ -800,11 +695,11 @@ void Supervise(void*) {
   boot_was_down = boot_down;
   if (g_function == Function::kHome && now > 3000000) PrintPreviousFlightLog();
   if (++periods % 50 == 0) {  // every 5 s
-    ESP_LOGI(kTag, "status fn=%u ui_ticks=%u renders=%u blanked=%d bright=%d usb=%d run=%d nudges=%u",
+    ESP_LOGI(kTag, "status fn=%u ui_ticks=%u renders=%u blanked=%d bright=%d usb=%d run=%d nudges=%u macro=%d",
              static_cast<unsigned>(g_function), static_cast<unsigned>(ticks),
              static_cast<unsigned>(g_renders.load()), g_blanked, g_brightness,
-             g_function == Function::kKeepAwake && KeepAwakeUsbMounted(), KeepAwakeRunning(),
-             static_cast<unsigned>(KeepAwakeNudges()));
+             UsbFunction() && UsbHidMounted(), KeepAwakeRunning(),
+             static_cast<unsigned>(KeepAwakeNudges()), MacroPadBusy());
   }
 #if defined(KEYFERRY_HANDHELD_SELFTEST)
   const std::uint32_t seconds = static_cast<std::uint32_t>(now / 1000000);
@@ -816,7 +711,7 @@ void Supervise(void*) {
   }
   if (g_function == Function::kKeepAwake) {
     if (seconds >= 4 && !KeepAwakeRunning() && KeepAwakeNudges() == 0 &&
-        KeepAwakeStateNow() == KeepAwakeState::kReady && KeepAwakeUsbMounted()) {
+        KeepAwakeStateNow() == KeepAwakeState::kReady && UsbHidMounted()) {
       KeepAwakeSetRunning(true);
     }
     if (seconds >= 20) {
@@ -843,6 +738,15 @@ void ResetPanelAndTouch() {
   vTaskDelay(pdMS_TO_TICKS(20));
   esp_io_expander_set_level(expander, pins, 1);
   vTaskDelay(pdMS_TO_TICKS(120));  // reset-to-first-command time for the panel
+}
+
+ui::Screen FirstScreen() {
+  switch (g_function) {
+    case Function::kKeepAwake: return ui::Screen::kKeepAwake;
+    case Function::kMacros: return ui::Screen::kMacros;
+    case Function::kKeyferry: return ui::Screen::kKeyferry;
+    default: return ui::Screen::kHome;
+  }
 }
 
 void StartUi() {
@@ -875,8 +779,19 @@ void StartUi() {
   }
   PmuInit();  // key-event latching and measurement only; PWR blanks/wakes in every function
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
+  if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
+  ui::Config config;
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+  config.keyferry = true;
+#endif
+  config.brightness = g_brightness;
+  config.min_brightness = kMinBrightness;
+  config.start_in_keyferry = LoadStartInKeyferry();
+  config.host = g_host;
+  config.macro_page = LoadSetting(kMacroPageKey, 0);
+  config.action = OnAction;
   bsp_display_lock(0);
-  BuildUi();
+  ui::Build(config, FirstScreen());
   lv_timer_create(OnTick, 20, nullptr);
   lv_display_add_event_cb(lv_display_get_default(), OnRenderReady, LV_EVENT_RENDER_READY, nullptr);
   bsp_display_unlock();
@@ -943,6 +858,7 @@ void RunShellUnlessKeyferry() {
   }
   if (nvs != ESP_OK) ESP_LOGE(kTag, "NVS unavailable (%s); settings will not persist", esp_err_to_name(nvs));
   g_brightness = LoadBrightness();
+  g_host = LoadHost();
   StartUi();
   const PowerStatus power = ReadPower();
   ESP_LOGI(kTag, "shell ready: pmu=%d vbus=%d battery=%d mv=%d pct=%d charge=%d internal_free=%u largest=%u",
@@ -950,6 +866,10 @@ void RunShellUnlessKeyferry() {
            power.battery_percent, power.charge_direction,
            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
            static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+  if (bsp_display_lock(0)) {
+    RefreshHome();
+    bsp_display_unlock();
+  }
   for (;;) vTaskDelay(portMAX_DELAY);
 }
 
