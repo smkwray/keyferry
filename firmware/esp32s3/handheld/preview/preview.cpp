@@ -31,7 +31,7 @@ const char* const kScenes[] = {
     "keep-awake-done", "macros-0", "macros-1",
     "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
     "keyferry", "keyferry-stopped", "drive-list", "drive-empty", "drive-nocard", "drive-detail",
-    "drive-detail-dirty", "drive-create", "mic", "mic-live", "mic-muted",
+    "drive-detail-dirty", "drive-create", "mic", "mic-live", "mic-muted", "messages", "messages-empty",
     "drive-waiting", "drive-connected", "drive-ejected", "drive-confirm",
 };
 
@@ -99,12 +99,26 @@ bool Scene(const char* name) {
     ui::Build(config, ui::Screen::kKeyferry);
     ui::SetKeyferryText("Unplug to finish\nKeyferry is stopped, but the computer did not confirm every key "
                         "was released.");
+  } else if (std::strncmp(name, "messages", 8) == 0) {
+    ui::Build(config, ui::Screen::kMessages);
+    const ui::MessageRow rows[] = {
+        {7, ui::MessageKind::kQuestion, ui::MessageState::kNew, "Delete the 12 duplicate scans and continue?", 20},
+        {6, ui::MessageKind::kAlert, ui::MessageState::kNew, "Build failed: 3 tests in parser_test", 240},
+        {5, ui::MessageKind::kInfo, ui::MessageState::kRead, "OCR finished: 60 PDFs in 14 min", 1500},
+        {4, ui::MessageKind::kQuestion, ui::MessageState::kAnsweredYes, "Upload the report?", 4000},
+    };
+    ui::MessagesView view;
+    view.usb = true;
+    view.listening = true;
+    view.rows = rows;
+    view.count = std::strcmp(name, "messages") == 0 ? 4 : 0;
+    ui::RefreshMessages(view);
   } else if (std::strncmp(name, "mic", 3) == 0) {
     ui::Build(config, ui::Screen::kMic);
     ui::MicView view;
     view.usb = true;
     view.live = std::strcmp(name, "mic") != 0;
-    view.muted = std::strcmp(name, "mic-muted") == 0;
+    view.muted = std::strcmp(name, "mic-muted") == 0;  // live and muted
     view.level = view.live ? 64 : 22;
     ui::RefreshMic(view);
   } else if (std::strncmp(name, "drive-", 6) == 0) {

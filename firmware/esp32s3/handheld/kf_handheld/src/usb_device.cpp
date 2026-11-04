@@ -1,4 +1,5 @@
-// The handheld's own USB device (Keep Awake, Macros, USB Drive, Microphone): descriptors, install and, for the
+// The handheld's own USB device (Keep Awake, Macros, USB Drive, Microphone, Messages): descriptors,
+// install and, for the
 // HID personalities, confirmed report sends. Keyferry's bridge never runs in the same boot.
 #include "usb_device.h"
 #include "keyferry/handheld.h"
@@ -51,6 +52,7 @@ const tusb_desc_device_t kMacroPadDevice = Device(0x4011);
 const tusb_desc_device_t kDriveDevice = Device(0x4012);
 // The audio function's two interfaces are grouped by an interface association.
 const tusb_desc_device_t kMicDevice = Device(0x4013, TUSB_CLASS_MISC, MISC_SUBCLASS_COMMON, MISC_PROTOCOL_IAD);
+const tusb_desc_device_t kMessagesDevice = Device(0x4014, TUSB_CLASS_MISC, MISC_SUBCLASS_COMMON, MISC_PROTOCOL_IAD);
 
 constexpr std::uint8_t kDriveConfig[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN, 0, 100),
@@ -66,6 +68,12 @@ constexpr std::uint8_t kMicConfig[] = {
     TUD_AUDIO20_MIC_ONE_CH_DESCRIPTOR(0, 4, 2, 16, 0x81, kMicPacketMax),
 };
 
+// One CDC-ACM port: notification IN 0x81, data OUT 0x02 and IN 0x82, 64-byte full-speed packets.
+constexpr std::uint8_t kMessagesConfig[] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN, 0, 100),
+    TUD_CDC_DESCRIPTOR(0, 4, 0x81, 8, 0x02, 0x82, 64),
+};
+
 char g_serial[13] = "000000000000";
 const char* g_mouse_strings[] = {"\x09\x04", "Keyferry", "Keyferry Keep Awake", g_serial,
                                  "Keep Awake mouse"};
@@ -73,6 +81,8 @@ const char* g_macro_strings[] = {"\x09\x04", "Keyferry", "Keyferry Macros", g_se
                                  "Macros keyboard and mouse"};
 const char* g_mic_strings[] = {"\x09\x04", "Keyferry", "Keyferry Microphone", g_serial,
                                "Keyferry Microphone"};
+const char* g_messages_strings[] = {g_mic_strings[0], "Keyferry", "Keyferry Messages", g_serial,
+                                    "Keyferry Messages"};
 const char* g_drive_strings[] = {"\x09\x04", "Keyferry", "Keyferry USB Drive", g_serial, "USB Drive"};
 
 enum : int { kDelivered, kFailed };
@@ -174,6 +184,11 @@ bool UsbDeviceStart(UsbPersonality personality) {
       config.descriptor.device = &kMicDevice;
       config.descriptor.full_speed_config = kMicConfig;
       config.descriptor.string = g_mic_strings;
+      break;
+    case UsbPersonality::kMessages:
+      config.descriptor.device = &kMessagesDevice;
+      config.descriptor.full_speed_config = kMessagesConfig;
+      config.descriptor.string = g_messages_strings;
       break;
   }
   config.descriptor.string_count = 5;

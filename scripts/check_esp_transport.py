@@ -473,6 +473,10 @@ def source_checks() -> None:
     for forbidden in ("tud_hid_ready()", "tud_hid_report("):
         if forbidden in main_source:
             fail(f"multi-instance HIL source uses instance-0 shorthand: {forbidden}")
+    # The bridge has no serial channel; only the handheld's Messages function presents one.
+    for forbidden in ("tud_cdc", "tinyusb_cdcacm", "TUD_CDC_DESCRIPTOR"):
+        if forbidden in main_source:
+            fail(f"bridge source uses a USB serial port: {forbidden}")
     if 'xTaskCreate(TransportTask, "kf-transport", 12288,' in main_source:
         fail("roaming peer admission regained its unsafe 12 KiB transport stack")
     if "vTaskDelay(pdMS_TO_TICKS(1))" in main_source:

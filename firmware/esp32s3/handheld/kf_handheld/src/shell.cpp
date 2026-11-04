@@ -1,6 +1,6 @@
 // Handheld shell (ADR 0018): boot selection, power and buttons, the supervisor and the glue
 // between the screens (ui.cpp) and the functions (Keep Awake, Macros, USB Drive, Microphone,
-// Keyferry).
+// Messages, Keyferry).
 // Functions are mutually exclusive: launching one records it in RTC memory and restarts, and
 // leaving it restarts to Home. Home has no radio, no application USB class and no SD writes.
 #include "keyferry/handheld.h"
@@ -32,6 +32,7 @@
 #include "macro_pad.h"
 #include "drive.h"
 #include "macros.h"
+#include "messages.h"
 #include "mic.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -88,6 +89,7 @@ enum class Function : std::uint32_t {
   kMacros = 3,
   kDrive = 4,
   kMic = 5,
+  kMessages = 6,
 };
 
 struct BootSelection {
@@ -132,6 +134,7 @@ Function TakeSelection() {
     case static_cast<std::uint32_t>(Function::kMacros): return Function::kMacros;
     case static_cast<std::uint32_t>(Function::kDrive): return Function::kDrive;
     case static_cast<std::uint32_t>(Function::kMic): return Function::kMic;
+    case static_cast<std::uint32_t>(Function::kMessages): return Function::kMessages;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
     case static_cast<std::uint32_t>(Function::kKeyferry): return Function::kKeyferry;
 #endif
@@ -271,7 +274,8 @@ bool g_notice_error = false;
 // worker owns their restart.
 bool UsbFunction() {
   return g_function == Function::kKeepAwake || g_function == Function::kMacros ||
-         g_function == Function::kDrive || g_function == Function::kMic;
+         g_function == Function::kDrive || g_function == Function::kMic ||
+         g_function == Function::kMessages;
 }
 
 // Stops any input a handheld USB function is producing; safe from any task. For Macros it is
@@ -587,6 +591,7 @@ void OnAction(ui::Action action, int value) {
     case ui::Action::kLaunchMacros: Launch(Function::kMacros);
     case ui::Action::kLaunchDrive: Launch(Function::kDrive);
     case ui::Action::kLaunchMic: Launch(Function::kMic);
+    case ui::Action::kLaunchMessages: Launch(Function::kMessages);
     case ui::Action::kLaunchKeyferry:
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
       Launch(Function::kKeyferry);
@@ -656,6 +661,11 @@ void OnAction(ui::Action action, int value) {
       StoreSetting(kMicGainKey, static_cast<std::uint8_t>(value));
       MicSetGain(ui::kMicGainDb[value]);
       break;
+    case ui::Action::kMessageRead: MessagesMarkRead(static_cast<std::uint32_t>(value)); break;
+    case ui::Action::kMessageAnswer:
+      MessagesAnswer(static_cast<std::uint32_t>(value) >> 1, (value & 1) != 0);
+      break;
+    case ui::Action::kMessagesClear: MessagesClear(); break;
   }
 }
 
@@ -785,6 +795,33 @@ void RefreshMic() {
   ui::RefreshMic(view);
 }
 
+Message g_message_copy[kMaxMessages];
+ui::MessageRow g_message_rows[kMaxMessages];
+std::uint32_t g_messages_received_seen = 0;
+
+// Every second for ages and connection state, at once when the messages change.
+void RefreshMessages() {
+  static std::uint32_t serial_seen = 0;
+  static std::int64_t refreshed_at = -1000000;
+  const std::int64_t now = esp_timer_get_time();
+  if (MessagesSerial() == serial_seen && now - refreshed_at < 1000000) return;
+  refreshed_at = now;
+  std::uint32_t serial = 0;
+  const int count = MessagesList(g_message_copy, kMaxMessages, &serial);
+  serial_seen = serial;
+  for (int i = 0; i < count; ++i) {
+    const Message& message = g_message_copy[i];
+    g_message_rows[i] = ui::MessageRow{message.id, message.kind, message.state, message.text,
+                                       static_cast<int>((now - message.received_us) / 1000000)};
+  }
+  ui::MessagesView view;
+  view.usb = UsbDeviceMounted() && !UsbDeviceSuspended();
+  view.listening = MessagesListening();
+  view.rows = g_message_rows;
+  view.count = count;
+  ui::RefreshMessages(view);
+}
+
 void RefreshKeyferry() {
   if (g_leaving.load() || g_keyferry.status == nullptr) return;
   char text[256] = {};
@@ -848,6 +885,11 @@ void OnTick(lv_timer_t*) {
       }
     }
     if (events & kPwrLong) ++g_pwr_long_count;
+    if (g_function == Function::kMessages && MessagesReceived() != g_messages_received_seen) {
+      g_messages_received_seen = MessagesReceived();  // a new message wakes the screen
+      Wake();
+      lv_display_trigger_activity(nullptr);
+    }
     if (!g_blanked) {
       switch (ui::Active()) {
         case ui::Screen::kCheck: RefreshCheck(); break;
@@ -855,6 +897,7 @@ void OnTick(lv_timer_t*) {
         case ui::Screen::kMacros: RefreshMacros(); break;
         case ui::Screen::kDrive: RefreshDrive(); break;
         case ui::Screen::kMic: RefreshMic(); break;
+        case ui::Screen::kMessages: RefreshMessages(); break;
         case ui::Screen::kKeyferry: RefreshKeyferry(); break;
         case ui::Screen::kHome:
           if (divider % 50 == 0) RefreshHome();
@@ -969,6 +1012,7 @@ ui::Screen FirstScreen() {
     case Function::kMacros: return ui::Screen::kMacros;
     case Function::kDrive: return ui::Screen::kDrive;
     case Function::kMic: return ui::Screen::kMic;
+    case Function::kMessages: return ui::Screen::kMessages;
     case Function::kKeyferry: return ui::Screen::kKeyferry;
     default: return ui::Screen::kHome;
   }
@@ -1009,6 +1053,7 @@ void StartUi() {
   if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
   if (g_function == Function::kDrive) DriveScan();  // the USB disk attaches only on Connect
   if (g_function == Function::kMic && !MicStart(ui::kMicGainDb[g_mic_gain])) Launch(Function::kHome);
+  if (g_function == Function::kMessages && !MessagesStart()) Launch(Function::kHome);
   ui::Config config;
 #if defined(KEYFERRY_HANDHELD_KEYFERRY)
   config.keyferry = true;

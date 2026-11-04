@@ -6,6 +6,7 @@
 
 #include "lvgl.h"
 #include "macros.h"
+#include "messages.h"
 
 namespace keyferry::handheld::ui {
 
@@ -22,8 +23,10 @@ constexpr int kScreenOffChoices = static_cast<int>(std::size(kScreenOffSeconds))
 constexpr int kDriveSizeChoices = static_cast<int>(std::size(kDriveSizesMiB));
 constexpr int kMicGainChoices = static_cast<int>(std::size(kMicGainDb));
 
-enum class Screen : std::uint8_t { kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry, kDrive, kMic };
-constexpr int kScreenCount = 8;
+enum class Screen : std::uint8_t {
+  kHome, kCheck, kSettings, kKeepAwake, kMacros, kKeyferry, kDrive, kMic, kMessages
+};
+constexpr int kScreenCount = 9;
 
 enum class Action : std::uint8_t {
   kLaunchKeyferry,
@@ -31,6 +34,7 @@ enum class Action : std::uint8_t {
   kLaunchMacros,
   kLaunchDrive,
   kLaunchMic,
+  kLaunchMessages,
   kLeave,               // Home from inside a function
   kWake,                // a touch on the blanked panel
   kShown,               // value: Screen
@@ -50,6 +54,9 @@ enum class Action : std::uint8_t {
   kDriveCancelCreate,
   kMicMute,             // value: 1 muted, 0 not
   kMicGain,             // value: index into kMicGainDb
+  kMessageRead,         // value: message id
+  kMessageAnswer,       // value: message id << 1 | 1 for Yes
+  kMessagesClear,
 };
 
 struct Config {
@@ -168,5 +175,25 @@ struct MicView {
   int level = 0;            // input level, 0-100 (-60 to 0 dBFS)
 };
 void RefreshMic(const MicView& view);
+
+// --- Messages ---
+
+using handheld::MessageKind;
+using handheld::MessageState;
+struct MessageRow {
+  std::uint32_t id;
+  MessageKind kind;
+  MessageState state;
+  const char* text;
+  int age_seconds;
+};
+struct MessagesView {
+  bool usb = false;        // configured by a computer
+  bool listening = false;  // a program on the computer has the port open
+  const MessageRow* rows = nullptr;  // newest first
+  int count = 0;
+};
+// Rebuilds the list; call when it changes and now and then so ages stay current.
+void RefreshMessages(const MessagesView& view);
 
 }  // namespace keyferry::handheld::ui

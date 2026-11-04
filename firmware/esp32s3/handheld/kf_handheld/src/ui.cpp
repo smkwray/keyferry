@@ -31,6 +31,7 @@ constexpr std::uint32_t kDriveColor = 0x2ECC8F;
 constexpr std::uint32_t kCheckColor = 0x22C3E6;
 constexpr std::uint32_t kSettingsColor = 0x8C96A8;
 constexpr std::uint32_t kMicColor = 0xFF5C7A;
+constexpr std::uint32_t kMessagesColor = 0x5CC8FF;
 
 const lv_font_t* const kSmall = &lv_font_montserrat_16;
 const lv_font_t* const kBody = &lv_font_montserrat_20;
@@ -124,6 +125,15 @@ struct State {
   lv_obj_t* mic_gain_value = nullptr;
   bool mic_muted = false;
   int mic_gain = 5;
+  // Messages
+  lv_obj_t* msg_status = nullptr;
+  lv_obj_t* msg_clear = nullptr;
+  lv_obj_t* msg_rows = nullptr;
+  lv_obj_t* msg_empty = nullptr;
+  lv_obj_t* msg_empty_detail = nullptr;
+  lv_obj_t* msg_ages[16] = {};
+  int msg_shown = 0;
+  std::uint32_t msg_signature = 0;
 };
 
 State g;
@@ -340,7 +350,7 @@ void BuildMicGlyph(lv_obj_t* parent) {
 
 lv_obj_t* AddTile(lv_obj_t* parent, int index, const char* symbol, const char* name, std::uint32_t color,
                   lv_event_cb_t callback, int data, bool enabled) {
-  constexpr int kTop = 72;
+  constexpr int kTop = kMargin + kControl + 8;  // under the title bar and its Settings button
   constexpr int kTileHeight = (kHeight - kTop - kMargin - 2 * kGap) / 3;
   lv_obj_t* tile = Button(parent, kHalfWidth, kTileHeight);
   lv_obj_set_pos(tile, kMargin + (index % 2) * (kHalfWidth + kGap),
@@ -359,10 +369,14 @@ lv_obj_t* AddTile(lv_obj_t* parent, int index, const char* symbol, const char* n
 
 void BuildHome() {
   lv_obj_t* screen = NewScreen(Screen::kHome);
+  lv_obj_t* settings = Button(screen, kControl, kControl);
+  lv_obj_set_pos(settings, kWidth - kMargin - kControl, kMargin);
+  lv_obj_center(Label(settings, kTitle, kSettingsColor, LV_SYMBOL_SETTINGS));
+  lv_obj_add_event_cb(settings, OnShow, LV_EVENT_CLICKED, Pack(static_cast<int>(Screen::kSettings)));
   lv_obj_t* title = Label(screen, kTitle, kText, "Keyferry");
-  lv_obj_set_pos(title, kMargin + 8, 20);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, kMargin + 8, kMargin + 18);
   g.home_status = Label(screen, kBody, kMuted, "");
-  lv_obj_align(g.home_status, LV_ALIGN_TOP_RIGHT, -kMargin - 8, 24);
+  lv_obj_align(g.home_status, LV_ALIGN_TOP_RIGHT, -(kMargin + kControl + 14), kMargin + 24);
   AddTile(screen, 0, LV_SYMBOL_KEYBOARD, "Keyferry", kKeyferryColor, OnAction,
           static_cast<int>(Action::kLaunchKeyferry), g.config.keyferry);
   AddTile(screen, 1, LV_SYMBOL_EYE_OPEN, "Keep Awake", kKeepAwakeColor, OnAction,
@@ -376,8 +390,8 @@ void BuildHome() {
   lv_obj_t* parts[4];
   lv_obj_center(MicGlyph(lv_obj_get_child(mic, 0), 15, parts));
   SetGlyphColor(parts, kMicColor);
-  AddTile(screen, 5, LV_SYMBOL_SETTINGS, "Settings", kSettingsColor, OnShow,
-          static_cast<int>(Screen::kSettings), true);
+  AddTile(screen, 5, LV_SYMBOL_ENVELOPE, "Messages", kMessagesColor, OnAction,
+          static_cast<int>(Action::kLaunchMessages), true);
 }
 
 // --- Board Check ---------------------------------------------------------------------------------
@@ -933,6 +947,113 @@ void BuildMic() {
   SetGlyphColor(g.mic_glyph, kText);
 }
 
+// --- Messages ------------------------------------------------------------------------------------
+
+void FormatAge(char* out, std::size_t size, int seconds) {
+  if (seconds < 60) {
+    std::snprintf(out, size, "just now");
+  } else if (seconds < 3600) {
+    std::snprintf(out, size, "%d min ago", seconds / 60);
+  } else {
+    std::snprintf(out, size, "%d h ago", seconds / 3600);
+  }
+}
+
+std::uint32_t KindColor(MessageKind kind) {
+  switch (kind) {
+    case MessageKind::kAlert: return kError;
+    case MessageKind::kQuestion: return kKeepAwakeColor;
+    default: return kMessagesColor;
+  }
+}
+
+void OnMessageTap(lv_event_t* event) { Emit(Action::kMessageRead, Unpack(event)); }
+void OnMessageAnswer(lv_event_t* event) { Emit(Action::kMessageAnswer, Unpack(event)); }
+void OnMessagesClear(lv_event_t*) { Emit(Action::kMessagesClear, 0); }
+
+// One message: kind badge, text, age; a question carries Yes and No until it is answered.
+void MessageCard(lv_obj_t* parent, const MessageRow& row, int index) {
+  constexpr int kBadge = 44;
+  constexpr int kTextLeft = 14 + kBadge + 12;
+  const bool fresh = row.state == MessageState::kNew;
+  const bool question = row.kind == MessageKind::kQuestion;
+  const std::uint32_t accent = KindColor(row.kind);
+  lv_obj_t* card = Button(parent, kInnerWidth, LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_ver(card, 14, 0);
+  lv_obj_set_style_pad_left(card, kTextLeft, 0);
+  lv_obj_set_style_pad_right(card, 14, 0);
+  lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(card, 6, 0);
+  if (fresh) {
+    lv_obj_set_style_border_color(card, lv_color_hex(accent), 0);
+    lv_obj_set_style_border_width(card, 3, 0);
+  }
+  const char* symbol = row.kind == MessageKind::kAlert ? LV_SYMBOL_WARNING
+                       : question                      ? "?"
+                                                       : LV_SYMBOL_BELL;
+  lv_obj_t* badge = Badge(card, symbol, accent, kBadge, kBody);
+  lv_obj_set_ignore_layout(badge, true);
+  lv_obj_align(badge, LV_ALIGN_TOP_LEFT, 14 - kTextLeft, 0);
+  lv_obj_t* text = Label(card, kBody, kText, row.text);
+  lv_obj_set_width(text, LV_PCT(100));
+  lv_label_set_long_mode(text, LV_LABEL_LONG_MODE_WRAP);
+  char age[32];
+  FormatAge(age, sizeof(age), row.age_seconds);
+  g.msg_ages[index] = Label(card, kSmall, fresh ? accent : kMuted, age);
+  if (!question) {
+    lv_obj_add_event_cb(card, OnMessageTap, LV_EVENT_CLICKED, Pack(static_cast<int>(row.id)));
+    return;
+  }
+  lv_obj_set_clickable(card, false);  // only its answers take a tap
+  if (row.state == MessageState::kAnsweredYes || row.state == MessageState::kAnsweredNo) {
+    Label(card, kBody, kKeepAwakeColor, row.state == MessageState::kAnsweredYes ? LV_SYMBOL_OK "  Answered Yes"
+                                                                                : LV_SYMBOL_CLOSE "  Answered No");
+    return;
+  }
+  lv_obj_t* answers = Plain(card);
+  lv_obj_set_size(answers, LV_PCT(100), kControl);
+  lv_obj_set_flex_flow(answers, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(answers, 8, 0);
+  const char* names[2] = {"Yes", "No"};
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_t* answer = Button(answers, 0, kControl);
+    lv_obj_set_flex_grow(answer, 1);
+    lv_obj_center(Label(answer, kBody, kText, names[i]));
+    if (i == 0) SetSelected(answer, true, kKeepAwakeColor);
+    lv_obj_add_event_cb(answer, OnMessageAnswer, LV_EVENT_CLICKED,
+                        Pack(static_cast<int>(row.id << 1 | (i == 0 ? 1U : 0U))));
+  }
+}
+
+void BuildMessages() {
+  lv_obj_t* screen = NewScreen(Screen::kMessages);
+  Header(screen, "Messages");
+  g.msg_clear = Button(screen, kControl, kControl);
+  lv_obj_set_pos(g.msg_clear, kWidth - kMargin - kControl, kMargin);
+  lv_obj_center(Label(g.msg_clear, kTitle, kText, LV_SYMBOL_TRASH));
+  lv_obj_add_event_cb(g.msg_clear, OnMessagesClear, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* list = ScrollList(screen);
+  g.msg_status = Label(list, kSmall, kMuted, "");
+  lv_obj_set_style_pad_left(g.msg_status, 6, 0);
+  g.msg_rows = Plain(list);
+  lv_obj_set_size(g.msg_rows, kInnerWidth, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(g.msg_rows, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(g.msg_rows, 8, 0);
+  AddFade(list);
+
+  g.msg_empty = Plain(screen);
+  lv_obj_set_size(g.msg_empty, kInnerWidth, 230);
+  lv_obj_align(g.msg_empty, LV_ALIGN_TOP_MID, 0, kContentTop + 50);
+  lv_obj_set_flex_flow(g.msg_empty, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(g.msg_empty, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(g.msg_empty, 12, 0);
+  Badge(g.msg_empty, LV_SYMBOL_ENVELOPE, kMessagesColor, 96, kLarge);
+  Label(g.msg_empty, kTitle, kText, "No messages");
+  g.msg_empty_detail = Label(g.msg_empty, kSmall, kMuted, "");
+  lv_obj_set_width(g.msg_empty_detail, kInnerWidth);
+  lv_obj_set_style_text_align(g.msg_empty_detail, LV_TEXT_ALIGN_CENTER, 0);
+}
+
 // --- USB Drive -----------------------------------------------------------------------------------
 
 enum DriveView : int { kDriveListView, kDriveDetailView, kDriveExportView, kDriveCreateView };
@@ -1243,6 +1364,7 @@ void Build(const Config& config, Screen first) {
     case Screen::kKeyferry: BuildKeyferry(); break;
     case Screen::kDrive: BuildDrive(); break;
     case Screen::kMic: BuildMic(); break;
+    case Screen::kMessages: BuildMessages(); break;
     default:
       BuildHome();
       BuildCheck();
@@ -1431,14 +1553,51 @@ void RefreshMic(const MicView& view) {
     color = kKeepAwakeColor;
     state = "Muted on the computer";
     detail = "Unmute it in the computer's sound settings.";
-  } else if (view.live) {
-    color = kMicColor;
-    state = LV_SYMBOL_BULLET " Live";
-    detail = "The computer is listening.";
   }
   lv_obj_set_style_text_color(g.mic_state, lv_color_hex(color), 0);
   lv_label_set_text(g.mic_state, state);
   lv_label_set_text(g.mic_detail, detail);
+}
+
+void RefreshMessages(const MessagesView& view) {
+  if (g.msg_rows == nullptr) return;
+  const int count = view.count < 16 ? view.count : 16;
+  if (!view.usb) {
+    lv_label_set_text(g.msg_status, "Not connected to a computer");
+  } else if (view.listening) {
+    lv_label_set_text(g.msg_status, LV_SYMBOL_BULLET " A program is connected");
+  } else {
+    lv_label_set_text(g.msg_status, LV_SYMBOL_USB " Connected: waiting for messages");
+  }
+  lv_obj_set_style_text_color(g.msg_status, lv_color_hex(view.listening ? kMessagesColor : kMuted), 0);
+  lv_label_set_text(g.msg_empty_detail, view.usb ? "What programs on the computer send to the Keyferry Messages port shows here."
+                                                 : "Plug the board into a computer.");
+  lv_obj_set_hidden(g.msg_empty, count > 0);
+  lv_obj_set_hidden(g.msg_status, count == 0);
+  if (count > 0) {
+    lv_obj_remove_state(g.msg_clear, LV_STATE_DISABLED);
+  } else {
+    lv_obj_add_state(g.msg_clear, LV_STATE_DISABLED);
+  }
+  // Rebuild only when the messages or their states change; otherwise just age them.
+  std::uint32_t signature = 2166136261U;
+  for (int i = 0; i < count; ++i) {
+    signature = (signature ^ view.rows[i].id) * 16777619U;
+    signature = (signature ^ static_cast<std::uint32_t>(view.rows[i].state)) * 16777619U;
+  }
+  signature ^= static_cast<std::uint32_t>(count);
+  if (signature != g.msg_signature || count != g.msg_shown) {
+    g.msg_signature = signature;
+    g.msg_shown = count;
+    lv_obj_clean(g.msg_rows);
+    for (int i = 0; i < count; ++i) MessageCard(g.msg_rows, view.rows[i], i);
+    return;
+  }
+  for (int i = 0; i < count; ++i) {
+    char age[32];
+    FormatAge(age, sizeof(age), view.rows[i].age_seconds);
+    lv_label_set_text(g.msg_ages[i], age);
+  }
 }
 
 void SetDriveList(const DriveListView& view) {
