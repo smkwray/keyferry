@@ -30,7 +30,8 @@ const char* const kScenes[] = {
     "home", "check", "settings", "keep-awake", "keep-awake-timer", "keep-awake-always",
     "keep-awake-done", "macros-0", "macros-1",
     "macros-1-mac", "macros-2", "macros-3", "macros-4", "macros-1-busy", "macros-2-releasing",
-    "keyferry", "drive-list", "drive-empty", "drive-nocard", "drive-detail", "drive-create",
+    "keyferry", "keyferry-stopped", "drive-list", "drive-empty", "drive-nocard", "drive-detail",
+    "drive-detail-dirty", "drive-create",
     "drive-waiting", "drive-connected", "drive-ejected", "drive-confirm",
 };
 
@@ -93,7 +94,11 @@ bool Scene(const char* name) {
     ui::RefreshMacros(view);
   } else if (std::strcmp(name, "keyferry") == 0) {
     ui::Build(config, ui::Screen::kKeyferry);
-    ui::SetKeyferryText("Ready, disarmed\nWi-Fi: connected\nDaemon: authenticated\nUSB: keyboard + mouse");
+    ui::SetKeyferryText("Ready, disarmed\nWi-Fi: connected\nDaemon: authenticated\nUSB: keyboard + mouse\n");
+  } else if (std::strcmp(name, "keyferry-stopped") == 0) {
+    ui::Build(config, ui::Screen::kKeyferry);
+    ui::SetKeyferryText("Unplug to finish\nKeyferry is stopped, but the computer did not confirm every key "
+                        "was released.");
   } else if (std::strncmp(name, "drive-", 6) == 0) {
     ui::Build(config, ui::Screen::kDrive);
     ui::DriveListView list;
@@ -103,7 +108,8 @@ bool Scene(const char* name) {
     list.count = empty ? 0 : 3;
     list.free_bytes = 14ULL * 1024 * 1024 * 1024 + (200ULL << 20);
     ui::SetDriveList(list);
-    if (std::strcmp(name, "drive-detail") == 0) ui::ShowDriveDetail(1);
+    if (std::strcmp(name, "drive-detail") == 0) ui::ShowDriveDetail(0);
+    if (std::strcmp(name, "drive-detail-dirty") == 0) ui::ShowDriveDetail(1);
     if (std::strcmp(name, "drive-create") == 0) {
       ui::ShowDriveCreate();
       ui::DriveCreateView create;

@@ -37,7 +37,6 @@ enum class Action : std::uint8_t {
   kBrightness,          // value: percent, while it changes
   kBrightnessCommit,    // value: percent, to store
   kScreenOff,           // value: index into kScreenOffSeconds
-  kStartInKeyferry,     // value: 0 or 1
   kMacroHost,           // value: macros::Host
   kRunMacro,            // value: page << 8 | index
   kMacroPage,           // value: page now showing
@@ -49,12 +48,11 @@ enum class Action : std::uint8_t {
 };
 
 struct Config {
-  bool keyferry = false;  // bridge linked: Keyferry tile and the Start in Keyferry row
+  bool keyferry = false;  // bridge linked: the Keyferry tile works
   int brightness = 60;
   int min_brightness = 5;
   int screen_off = 1;           // index into kScreenOffSeconds
   int keep_awake_duration = 1;  // index into kKeepAwakeMinutes
-  bool start_in_keyferry = false;
   macros::Host host = macros::Host::kWindows;
   int macro_page = 0;
   void (*action)(Action action, int value) = nullptr;
@@ -103,6 +101,7 @@ struct MacrosView {
 };
 void RefreshMacros(const MacrosView& view);
 
+// Keyferry status: the first line is shown large, the rest small under it.
 void SetKeyferryText(const char* text);
 
 // --- USB Drive ---

@@ -1,6 +1,7 @@
 // Handheld screens. Design rules: true black (AMOLED), one accent colour per function, raised
 // buttons that press in when touched, and nothing to tap under 72 px tall (about 6 mm on this
-// panel). Every screen but Home has the Home button in the same top-left place.
+// panel). Every screen but Home and Keyferry (End along the bottom) has the Home button in the
+// same top-left place.
 #include "ui.h"
 
 #include <cstdint>
@@ -73,7 +74,8 @@ struct State {
   lv_obj_t* macro_buttons[macros::kMaxPages][macros::kMaxPerPage] = {};
   int macro_page = 0;
   int macro_busy = -1;
-  lv_obj_t* keyferry_text = nullptr;
+  lv_obj_t* keyferry_state = nullptr;
+  lv_obj_t* keyferry_detail = nullptr;
   // USB Drive
   lv_obj_t* drive_title = nullptr;
   lv_obj_t* drive_back_icon = nullptr;
@@ -503,11 +505,6 @@ void OnHost(lv_event_t* event) {
   Emit(Action::kMacroHost, static_cast<int>(g.config.host));
 }
 
-void OnStartInKeyferry(lv_event_t* event) {
-  lv_obj_t* toggle = lv_event_get_target_obj(event);
-  Emit(Action::kStartInKeyferry, lv_obj_has_state(toggle, LV_STATE_CHECKED) ? 1 : 0);
-}
-
 void BuildSettings() {
   lv_obj_t* screen = NewScreen(Screen::kSettings);
   Header(screen, "Settings");
@@ -533,16 +530,6 @@ void BuildSettings() {
   }
   ShowHost();
 
-  if (g.config.keyferry) {
-    lv_obj_t* start = SettingsRow(list, "Start in Keyferry");
-    lv_obj_t* toggle = lv_switch_create(start);
-    lv_obj_set_size(toggle, 96, 52);
-    lv_obj_align(toggle, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(toggle, lv_color_hex(kKeyferryColor),
-                              static_cast<lv_style_selector_t>(LV_PART_INDICATOR) | LV_STATE_CHECKED);
-    if (g.config.start_in_keyferry) lv_obj_add_state(toggle, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(toggle, OnStartInKeyferry, LV_EVENT_VALUE_CHANGED, nullptr);
-  }
   lv_obj_t* hint = Label(list, kSmall, kMuted,
                          "A touch wakes the screen.\n"
                          "PWR: screen off/on.   BOOT: back to Home.");
@@ -739,13 +726,45 @@ void BuildMacros() {
 
 // --- Keyferry ------------------------------------------------------------------------------------
 
+// The main action along the bottom edge.
+lv_obj_t* WideButton(lv_obj_t* parent, const char* text, std::uint32_t accent) {
+  lv_obj_t* button = Button(parent, kInnerWidth, 80);
+  lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -kMargin);
+  lv_obj_t* label = Label(button, kTitle, kText, text);
+  lv_obj_center(label);
+  if (accent != 0) SetSelected(button, true, accent);
+  return button;
+}
+
+// Keyferry runs until ended: its status, and one button back to Home (holding BOOT works too).
 void BuildKeyferry() {
   lv_obj_t* screen = NewScreen(Screen::kKeyferry);
-  Header(screen, "Keyferry");
-  lv_obj_t* card = Card(screen, kInnerWidth, kHeight - kContentTop - kMargin);
-  lv_obj_set_pos(card, kMargin, kContentTop);
-  g.keyferry_text = Label(card, kBody, kText, "Starting...");
-  lv_obj_set_width(g.keyferry_text, LV_PCT(100));
+  lv_obj_t* title = Label(screen, kTitle, kText, "Keyferry");
+  lv_obj_set_pos(title, kMargin + 8, 20);
+
+  constexpr int kRing = 128;
+  constexpr int kRingTop = 76;
+  lv_obj_t* ring = Plain(screen);
+  lv_obj_set_size(ring, kRing, kRing);
+  lv_obj_align(ring, LV_ALIGN_TOP_MID, 0, kRingTop);
+  lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(ring, lv_color_hex(kKeyferryColor), 0);
+  lv_obj_set_style_bg_opa(ring, LV_OPA_20, 0);
+  lv_obj_set_style_border_width(ring, 4, 0);
+  lv_obj_set_style_border_color(ring, lv_color_hex(kKeyferryColor), 0);
+  lv_obj_center(Label(ring, kLarge, kKeyferryColor, LV_SYMBOL_KEYBOARD));
+
+  g.keyferry_state = Label(screen, kTitle, kText, "Starting...");
+  lv_obj_set_width(g.keyferry_state, kInnerWidth);
+  lv_obj_set_style_text_align(g.keyferry_state, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.keyferry_state, kMargin, kRingTop + kRing + 14);
+  g.keyferry_detail = Label(screen, kSmall, kMuted, "");
+  lv_obj_set_width(g.keyferry_detail, kInnerWidth);
+  lv_obj_set_style_text_align(g.keyferry_detail, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_pos(g.keyferry_detail, kMargin, kRingTop + kRing + 54);
+
+  lv_obj_add_event_cb(WideButton(screen, LV_SYMBOL_HOME "   End Keyferry", 0), OnAction, LV_EVENT_CLICKED,
+                      Pack(static_cast<int>(Action::kLeave)));
 }
 
 // --- USB Drive -----------------------------------------------------------------------------------
@@ -798,16 +817,17 @@ void OnConfirm(lv_event_t* event) {
   if (Unpack(event) == 1) Emit(Action::kDriveDisconnect, g_disconnect_target);
 }
 
+// detail_modes[0] is Writable, [1] Read-only.
 void ShowModes() {
-  SetSelected(g.detail_modes[0], !g.drive_writable, kDriveColor);
-  SetSelected(g.detail_modes[1], g.drive_writable, kDriveColor);
+  SetSelected(g.detail_modes[0], g.drive_writable, kDriveColor);
+  SetSelected(g.detail_modes[1], !g.drive_writable, kDriveColor);
   lv_label_set_text(g.detail_hint, g.drive_writable
-                                       ? "Eject it on the computer before unplugging."
-                                       : "The computer can read but not change it.");
+                                       ? "The computer can save to it.\nEject it there before unplugging."
+                                       : "The computer can open files\nbut not change them.");
 }
 
 void OnMode(lv_event_t* event) {
-  g.drive_writable = Unpack(event) == 1;
+  g.drive_writable = Unpack(event) == 0;
   ShowModes();
 }
 
@@ -818,7 +838,7 @@ void OnConnect(lv_event_t*) {
 void OpenDetail(int index) {
   if (index < 0 || index >= g.drive_count) return;
   g.drive_selected = index;
-  g.drive_writable = false;
+  g.drive_writable = true;
   const DriveRow& row = g.drive_list[index];
   lv_label_set_text(g.detail_name, row.name);
   char size[24];
@@ -897,15 +917,6 @@ lv_obj_t* DriveRowButton(lv_obj_t* parent, const char* symbol, std::uint32_t col
   return row;
 }
 
-lv_obj_t* WideButton(lv_obj_t* parent, const char* text, std::uint32_t accent) {
-  lv_obj_t* button = Button(parent, kInnerWidth, 80);
-  lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, -kMargin);
-  lv_obj_t* label = Label(button, kTitle, kText, text);
-  lv_obj_center(label);
-  if (accent != 0) SetSelected(button, true, accent);
-  return button;
-}
-
 void BuildDriveList(lv_obj_t* view) {
   lv_obj_t* list = ScrollList(view);
   g.drive_status = Label(list, kBody, kMuted, "Looking for the SD card...");
@@ -940,10 +951,10 @@ void BuildDriveDetail(lv_obj_t* view) {
   g.detail_warning = Label(view, kSmall, kKeepAwakeColor, "");
   lv_obj_set_width(g.detail_warning, kInnerWidth - 8);
   lv_obj_set_pos(g.detail_warning, kMargin + 4, kContentTop + 80);
-  const char* modes[2] = {"Read-only", "Writable"};
+  const char* modes[2] = {LV_SYMBOL_EDIT "  Writable", LV_SYMBOL_EYE_OPEN "  Read-only"};
   for (int i = 0; i < 2; ++i) {
     lv_obj_t* button = Button(view, kHalfWidth, kControl);
-    lv_obj_set_pos(button, kMargin + i * (kHalfWidth + kGap), 232);
+    lv_obj_set_pos(button, kMargin + i * (kHalfWidth + kGap), 224);
     lv_obj_center(Label(button, kBody, kText, modes[i]));
     lv_obj_add_event_cb(button, OnMode, LV_EVENT_CLICKED, Pack(i));
     g.detail_modes[i] = button;
@@ -951,7 +962,7 @@ void BuildDriveDetail(lv_obj_t* view) {
   g.detail_hint = Label(view, kSmall, kMuted, "");
   lv_obj_set_width(g.detail_hint, kInnerWidth);
   lv_obj_set_style_text_align(g.detail_hint, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_pos(g.detail_hint, kMargin, 318);
+  lv_obj_set_pos(g.detail_hint, kMargin, 306);
   lv_obj_add_event_cb(WideButton(view, "Connect", kDriveColor), OnConnect, LV_EVENT_CLICKED, nullptr);
 }
 
@@ -1223,7 +1234,18 @@ void RefreshMacros(const MacrosView& view) {
 }
 
 void SetKeyferryText(const char* text) {
-  if (g.keyferry_text != nullptr) lv_label_set_text(g.keyferry_text, text);
+  if (g.keyferry_state == nullptr) return;
+  char state[48];
+  const char* rest = std::strchr(text, '\n');
+  const std::size_t length = rest == nullptr ? std::strlen(text) : static_cast<std::size_t>(rest - text);
+  std::snprintf(state, sizeof(state), "%.*s", static_cast<int>(length), text);
+  lv_label_set_text(g.keyferry_state, state);
+  // The rest, without the trailing line break.
+  char detail[192];
+  std::snprintf(detail, sizeof(detail), "%s", rest == nullptr ? "" : rest + 1);
+  const std::size_t end = std::strlen(detail);
+  if (end > 0 && detail[end - 1] == '\n') detail[end - 1] = '\0';
+  lv_label_set_text(g.keyferry_detail, detail);
 }
 
 void SetDriveList(const DriveListView& view) {

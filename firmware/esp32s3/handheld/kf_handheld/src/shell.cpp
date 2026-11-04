@@ -46,7 +46,6 @@ static_assert(ui::kWidth == BSP_LCD_H_RES && ui::kHeight == BSP_LCD_V_RES, "pane
 constexpr char kTag[] = "handheld";
 constexpr char kNvsNamespace[] = "kf_hh";
 constexpr char kBrightnessKey[] = "bright";
-constexpr char kStartKey[] = "start";       // 1: power-up starts Keyferry
 constexpr char kHostKey[] = "host";         // macros::Host for Macros shortcuts
 constexpr char kMacroPageKey[] = "mpage";   // last Macros page shown
 constexpr char kAwakeKey[] = "kadur";       // Keep Awake timer, index into ui::kKeepAwakeMinutes
@@ -117,13 +116,11 @@ constexpr std::uint32_t kStartsMagic = 0x4B465354 ^ 0x1;
 constexpr std::uint32_t kMaxKeyferryStarts = 3;
 RTC_NOINIT_ATTR KeyferryStarts g_keyferry_starts;
 
-// *deliberate is true only for a choice recorded by Launch(); otherwise the start preference applies.
-Function TakeSelection(bool* deliberate) {
+// The function Launch() recorded; anything else (power-up, a crash in Home or a function) is Home.
+Function TakeSelection() {
   const BootSelection selection = g_selection;
   g_selection = BootSelection{0, 0, 0};  // a crash or reset inside Home or a function leaves it
-  *deliberate = selection.magic == kSelectionMagic &&
-                selection.check == (~selection.function ^ ImageTag());
-  if (!*deliberate) {
+  if (selection.magic != kSelectionMagic || selection.check != (~selection.function ^ ImageTag())) {
     return Function::kHome;
   }
   switch (selection.function) {
@@ -406,15 +403,6 @@ int LoadBrightness() {
   return value < kMinBrightness || value > 100 ? kDefaultBrightness : value;
 }
 
-bool LoadStartInKeyferry() {
-#if defined(KEYFERRY_HANDHELD_KEYFERRY)
-  // ADR 0018: power-up shows Home unless the owner turned "Start in Keyferry" on (stored 1).
-  return LoadSetting(kStartKey, 0) == 1;
-#else
-  return false;
-#endif
-}
-
 // An index into one of the UI's choice tables; out of range gives `fallback`.
 int LoadChoice(const char* key, int count, int fallback) {
   const int value = LoadSetting(key, static_cast<std::uint8_t>(fallback));
@@ -474,10 +462,10 @@ void KeyferryExitWorker(void*) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (g_keyferry.begin_leave == nullptr || !g_keyferry.begin_leave(g_keyferry.context)) {
       g_leaving.store(false);
-      ShowExitText("Busy (maintenance or provisioning).\nTry Home again shortly.");
+      ShowExitText("Busy right now\nSetup or maintenance is running.\nTry End again shortly.");
       continue;
     }
-    ShowExitText("Releasing all keys...");
+    ShowExitText("Ending...\nReleasing all keys");
     const std::int64_t deadline = esp_timer_get_time() + kExitNeutralTimeoutUs;
     while (esp_timer_get_time() < deadline) {
       if (g_keyferry.neutral_confirmed != nullptr && g_keyferry.neutral_confirmed(g_keyferry.context)) {
@@ -486,7 +474,8 @@ void KeyferryExitWorker(void*) {
       vTaskDelay(pdMS_TO_TICKS(20));
     }
     // Admission stays closed and nothing retries; the bridge is stopped until power is removed.
-    ShowExitText("Release not confirmed.\nKeyferry is stopped.\nUnplug to reset.");
+    ShowExitText("Unplug to finish\nKeyferry is stopped, but the computer did not confirm every key "
+                 "was released.");
     for (;;) vTaskDelay(portMAX_DELAY);
   }
 }
@@ -631,11 +620,6 @@ void OnAction(ui::Action action, int value) {
       bsp_display_brightness_set(g_brightness);
       break;
     case ui::Action::kBrightnessCommit: StoreSetting(kBrightnessKey, static_cast<std::uint8_t>(value)); break;
-    case ui::Action::kStartInKeyferry:
-#if defined(KEYFERRY_HANDHELD_KEYFERRY)
-      StoreSetting(kStartKey, value == 1 ? 1 : 0);
-#endif
-      break;
     case ui::Action::kMacroHost:
       g_host = static_cast<macros::Host>(value);
       StoreSetting(kHostKey, static_cast<std::uint8_t>(value));
@@ -986,7 +970,6 @@ void StartUi() {
 #endif
   config.brightness = g_brightness;
   config.min_brightness = kMinBrightness;
-  config.start_in_keyferry = LoadStartInKeyferry();
   config.host = g_host;
   config.keep_awake_duration = g_awake_duration;
   config.screen_off = g_screen_off;
@@ -1031,9 +1014,7 @@ void RunShellUnlessKeyferry() {
       break;
   }
   const esp_err_t nvs = nvs_flash_init();  // never erases; the bridge reports any failure itself
-  bool deliberate = false;
-  g_function = TakeSelection(&deliberate);
-  if (!deliberate && LoadStartInKeyferry()) g_function = Function::kKeyferry;
+  g_function = TakeSelection();
   if (g_function == Function::kKeyferry) {
     if (g_keyferry_starts.magic != kStartsMagic) g_keyferry_starts = KeyferryStarts{kStartsMagic, 0};
     if (++g_keyferry_starts.count > kMaxKeyferryStarts) {
