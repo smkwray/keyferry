@@ -339,6 +339,38 @@ lv_obj_t* AddButton(lv_obj_t* parent, const char* text, int y, lv_event_cb_t cal
   return button;
 }
 
+// Home tiles: a 2-column grid of near-square targets (about 160 x 113 px) with an icon above
+// the name, easier to hit than full-width bars.
+constexpr int kTileWidth = 160;
+constexpr int kTileHeight = 113;
+constexpr int kTileGap = 11;
+constexpr int kTileTop = 72;
+
+void AddTile(lv_obj_t* parent, int index, const char* symbol, const char* text,
+             lv_event_cb_t callback, void* target, bool enabled = true) {
+  lv_obj_t* tile = lv_button_create(parent);
+  lv_obj_set_size(tile, kTileWidth, kTileHeight);
+  const int column = index % 2;
+  const int row = index / 2;
+  const int left = (BSP_LCD_H_RES - 2 * kTileWidth - kTileGap) / 2;
+  lv_obj_set_pos(tile, left + column * (kTileWidth + kTileGap),
+                 kTileTop + row * (kTileHeight + kTileGap));
+  lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(tile, 8, 0);
+  lv_obj_t* icon = lv_label_create(tile);
+  lv_label_set_text(icon, symbol);
+  lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
+  lv_obj_t* label = lv_label_create(tile);
+  lv_label_set_text(label, text);
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+  if (enabled) {
+    lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, target);
+  } else {
+    lv_obj_add_state(tile, LV_STATE_DISABLED);
+  }
+}
+
 void OnNavigate(lv_event_t* event) {
   ShowScreen(static_cast<lv_obj_t*>(lv_event_get_user_data(event)));
 }
@@ -397,11 +429,11 @@ void BuildUi() {
   g_ui.check = NewScreen("Board Check");
   g_ui.settings = NewScreen("Settings");
 
-  AddButton(g_ui.home, "Keyferry", 96, OnNavigate, nullptr, false);
-  AddButton(g_ui.home, "Keep Awake", 166, OnLaunchKeepAwake, nullptr);
-  AddButton(g_ui.home, "USB Drive", 236, OnNavigate, nullptr, false);
-  AddButton(g_ui.home, "Board Check", 306, OnNavigate, g_ui.check);
-  AddButton(g_ui.home, "Settings", 376, OnNavigate, g_ui.settings);
+  AddTile(g_ui.home, 0, LV_SYMBOL_KEYBOARD, "Keyferry", OnNavigate, nullptr, false);
+  AddTile(g_ui.home, 1, LV_SYMBOL_EYE_OPEN, "Keep Awake", OnLaunchKeepAwake, nullptr);
+  AddTile(g_ui.home, 2, LV_SYMBOL_USB, "USB Drive", OnNavigate, nullptr, false);
+  AddTile(g_ui.home, 3, LV_SYMBOL_LIST, "Board Check", OnNavigate, g_ui.check);
+  AddTile(g_ui.home, 4, LV_SYMBOL_SETTINGS, "Settings", OnNavigate, g_ui.settings);
 
   lv_obj_set_clickable(g_ui.check, true);
   lv_obj_add_event_cb(g_ui.check, OnCheckTouch, LV_EVENT_PRESSING, nullptr);
