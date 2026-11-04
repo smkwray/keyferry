@@ -15,6 +15,7 @@
 #include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
+#include "esp_io_expander.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "soc/reset_reasons.h"
@@ -827,6 +828,23 @@ void Supervise(void*) {
 #endif
 }
 
+// The panel and touch controller reset only through the TCA9554 expander (EXIO0..2), as the
+// vendor examples do and the BSP does not. Without it an internal restart left the panel in its
+// previous state and a launched function could come up black (bench, 2026-11-04).
+void ResetPanelAndTouch() {
+  if (bsp_i2c_init() != ESP_OK) return;
+  esp_io_expander_handle_t expander = bsp_io_expander_init();
+  if (expander == nullptr) return;
+  const std::uint32_t pins = IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2;
+  if (esp_io_expander_set_dir(expander, pins, IO_EXPANDER_OUTPUT) != ESP_OK ||
+      esp_io_expander_set_level(expander, pins, 0) != ESP_OK) {
+    return;
+  }
+  vTaskDelay(pdMS_TO_TICKS(20));
+  esp_io_expander_set_level(expander, pins, 1);
+  vTaskDelay(pdMS_TO_TICKS(120));  // reset-to-first-command time for the panel
+}
+
 void StartUi() {
   gpio_config_t boot{};
   boot.pin_bit_mask = 1ULL << kBootGpio;
@@ -850,6 +868,7 @@ void StartUi() {
     }
   }
 
+  ResetPanelAndTouch();
   if (bsp_display_start() == nullptr) {
     ESP_LOGE(kTag, "display start failed");
     return;
