@@ -11,7 +11,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_RESERVE_BYTES = 32 * 1024
-MD5_ENTRY_MAGIC = b"\xeb\xeb"
 
 
 def partition_tool():
@@ -32,16 +31,19 @@ def factory_app_bytes(table_path: Path, table_offset: int) -> int:
     if not table_path.is_file():
         raise SystemExit(f"BLE HID spike partition table absent: {table_path}")
     data = table_path.read_bytes()
-    if not any(data[offset:offset + 2] == MD5_ENTRY_MAGIC for offset in range(0, len(data), 32)):
-        raise SystemExit("BLE HID spike partition table has no MD5 entry")
     tool = partition_tool()
     tool.md5sum = True
     tool.offset_part_table = table_offset
     try:
         table = tool.PartitionTable.from_binary(data)
         table.verify()
+        canonical = table.to_binary()
     except tool.InputError as error:
         raise SystemExit(f"BLE HID spike partition table invalid: {error}") from None
+    # Exactly the entries, one MD5 record covering all of them, then 0xFF padding: anything
+    # else (missing, misplaced or extra MD5 records, data after the terminator) is rejected.
+    if data != canonical:
+        raise SystemExit("BLE HID spike partition table is not in canonical checksummed form")
     factories = [entry for entry in table if entry.type == tool.APP_TYPE and entry.subtype == 0]
     if len(factories) != 1:
         raise SystemExit(f"BLE HID spike needs exactly one factory app partition: found {len(factories)}")

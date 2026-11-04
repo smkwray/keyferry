@@ -859,7 +859,8 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return false;
     }
-    if (!handheld_leaving_ && (provisioning_active_ || local_maintenance_active_)) {
+    if (!handheld_leaving_ &&
+        (provisioning_active_ || local_maintenance_active_ || restart_committed_)) {
       Unlock();
       return false;
     }
@@ -1431,6 +1432,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return keyferry::protocol::LocalManagementStatus::kInternal;
     }
+    if (handheld_leaving_) {
+      Unlock();
+      return keyferry::protocol::LocalManagementStatus::kBusy;
+    }
     command_.EndSession();
 #if defined(KEYFERRY_FILE_HANDOFF)
     ReleaseFileVolumeLocked();
@@ -1451,12 +1456,24 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return false;
     }
-    const bool confirmed = NeutralConfirmedLocked();
+    const bool confirmed = !handheld_leaving_ && NeutralConfirmedLocked();
     Unlock();
     return confirmed;
   }
 
+  bool HandheldLeaving() {
+    if (!Lock()) {
+      return true;  // unknown state: treat as leaving and refuse the effect
+    }
+    const bool leaving = handheld_leaving_;
+    Unlock();
+    return leaving;
+  }
+
   keyferry::protocol::LocalManagementStatus RestartNetwork() override {
+    if (HandheldLeaving()) {
+      return keyferry::protocol::LocalManagementStatus::kBusy;
+    }
     if (transport_ == nullptr) {
       return keyferry::protocol::LocalManagementStatus::kBadState;
     }
@@ -1466,6 +1483,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
   }
 
   keyferry::protocol::LocalManagementStatus ClearBleBondAndEnroll() override {
+    if (HandheldLeaving()) {
+      return keyferry::protocol::LocalManagementStatus::kBusy;
+    }
     if (output_mode_ != keyferry::protocol::OutputMode::kBleHid) {
       return keyferry::protocol::LocalManagementStatus::kBadState;
     }
@@ -1476,6 +1496,9 @@ class HilRuntime final : public keyferry::transport::Delegate,
   }
 
   keyferry::protocol::LocalManagementStatus CancelEnrollment() override {
+    if (HandheldLeaving()) {
+      return keyferry::protocol::LocalManagementStatus::kBusy;
+    }
     if (output_mode_ != keyferry::protocol::OutputMode::kBleHid) {
       return keyferry::protocol::LocalManagementStatus::kBadState;
     }
@@ -1489,6 +1512,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (restart_required == nullptr ||
         !keyferry::output_mode::IsSupported(mode) || !Lock()) {
       return keyferry::protocol::LocalManagementStatus::kBadReport;
+    }
+    if (handheld_leaving_) {
+      Unlock();
+      return keyferry::protocol::LocalManagementStatus::kBusy;
     }
     const bool changed = mode != stored_output_mode_;
     const bool saved = !changed || keyferry::output_mode::Save(
@@ -1628,7 +1655,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     Unlock();
   }
 
-  bool RestartRequested() {
+  // The main loop restarts only through this commitment, taken under the same lock as
+  // BeginHandheldLeave(): once leaving wins no earlier restart decision can execute, and once a
+  // restart is committed leaving is refused.
+  bool CommitRestart() {
     if (!Lock()) {
       return false;
     }
@@ -1636,6 +1666,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
                            (restart_not_before_ms_ != 0 &&
                             keyferry::command::IdfHeldKeyWatchdog::NowMs() >=
                                 restart_not_before_ms_));
+    restart_committed_ = restart_committed_ || requested;
     Unlock();
     return requested;
   }
@@ -2325,6 +2356,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
   LocalManagementMetadata local_management_metadata_{};
   bool restart_requested_{false};
   bool handheld_leaving_{false};
+  bool restart_committed_{false};
   std::uint64_t restart_not_before_ms_{0};
   bool ble_release_in_flight_{false};
   bool ble_transport_ready_{false};
@@ -3600,7 +3632,7 @@ extern "C" void app_main() {
     if (mounted) {
       provisioning_adapter.Service();
     }
-    if (runtime.RestartRequested()) {
+    if (runtime.CommitRestart()) {
       esp_restart();
     }
     // CONFIG_FREERTOS_HZ is 100, so pdMS_TO_TICKS(1) truncates to zero and

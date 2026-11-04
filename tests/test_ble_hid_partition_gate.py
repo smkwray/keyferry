@@ -38,7 +38,14 @@ class PartitionGateTests(unittest.TestCase):
         self.tool.md5sum = False
         no_md5 = self.tool.PartitionTable.from_csv(CSV).to_binary()
         self.tool.md5sum = True
+        entry = good[:32]
+        md5_record = next(good[o:o + 32] for o in range(0, len(good), 32)
+                          if good[o:o + 2] == b"\xeb\xeb")
+        terminator = b"\xff" * 32
+        pad = lambda body: body + b"\xff" * (len(good) - len(body))
         cases = {
+            "md5 after terminator": pad(entry + terminator + md5_record),
+            "entry after md5": pad(good[:64] + md5_record + entry),
             "truncated": good[:32],
             "partial entry": good[:48],
             "corrupt size": bytes(corrupt),

@@ -478,7 +478,8 @@ TaskHandle_t g_exit_worker = nullptr;
 
 // Display text is optional during an exit and never waits long for the LVGL lock.
 void ShowExitText(const char* text) {
-  if (bsp_display_lock(kExitDisplayLockTicks * portTICK_PERIOD_MS)) {
+  if (g_ui.keyferry_status != nullptr &&
+      bsp_display_lock(kExitDisplayLockTicks * portTICK_PERIOD_MS)) {
     lv_label_set_text(g_ui.keyferry_status, text);
     bsp_display_unlock();
   }
@@ -822,6 +823,22 @@ void StartUi() {
   boot.pull_up_en = GPIO_PULLUP_ENABLE;
   gpio_config(&boot);
 
+  // The supervisor carries the BOOT exit and stall recovery, so it starts before and does not
+  // depend on the display.
+  esp_timer_create_args_t supervisor{};
+  supervisor.callback = Supervise;
+  supervisor.name = "kf_supervise";
+  esp_timer_handle_t supervisor_timer = nullptr;
+  const bool supervised = esp_timer_create(&supervisor, &supervisor_timer) == ESP_OK &&
+                          esp_timer_start_periodic(supervisor_timer, 100000) == ESP_OK;
+  if (!supervised) {
+    ESP_LOGE(kTag, "supervisor unavailable");
+    // Without an independent exit the bridge must not keep accepting input: close it now.
+    if (g_function == Function::kKeyferry && g_keyferry.begin_leave != nullptr) {
+      g_keyferry.begin_leave(g_keyferry.context);
+    }
+  }
+
   if (bsp_display_start() == nullptr) {
     ESP_LOGE(kTag, "display start failed");
     return;
@@ -833,14 +850,6 @@ void StartUi() {
   lv_timer_create(OnTick, 20, nullptr);
   lv_display_add_event_cb(lv_display_get_default(), OnRenderReady, LV_EVENT_RENDER_READY, nullptr);
   bsp_display_unlock();
-  esp_timer_create_args_t supervisor{};
-  supervisor.callback = Supervise;
-  supervisor.name = "kf_supervise";
-  esp_timer_handle_t supervisor_timer = nullptr;
-  if (esp_timer_create(&supervisor, &supervisor_timer) != ESP_OK ||
-      esp_timer_start_periodic(supervisor_timer, 100000) != ESP_OK) {
-    ESP_LOGE(kTag, "supervisor unavailable");
-  }
   bsp_display_brightness_set(g_brightness);
 }
 
@@ -849,6 +858,9 @@ void StartUi() {
 void StartKeyferryShell(const KeyferryHooks& hooks) {
   g_keyferry = hooks;
   StartExitWorker();  // before any UI: leaving must not depend on the display coming up
+  if (g_exit_worker == nullptr && g_keyferry.begin_leave != nullptr) {
+    g_keyferry.begin_leave(g_keyferry.context);  // no way to leave cleanly: stop input now
+  }
   g_brightness = LoadBrightness();  // the bridge has already initialized NVS
   StartUi();
 }
