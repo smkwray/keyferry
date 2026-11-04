@@ -1,6 +1,7 @@
 // Keep Awake (ADR 0018): a standalone relative mouse that, after an explicit local Start, sends a
 // (+1, 0) then (-1, 0) pair every 25 s. Stops on unplug, suspend or an unconfirmed report.
 #include "keep_awake.h"
+#include "keyferry/handheld.h"
 
 #include <atomic>
 #include <cstdio>
@@ -41,6 +42,7 @@ SemaphoreHandle_t g_report_done = nullptr;
 std::atomic<bool> g_running{false};
 std::atomic<KeepAwakeState> g_state{KeepAwakeState::kReady};
 std::atomic<std::uint32_t> g_nudges{0};
+std::atomic<bool> g_usb_owned{false};
 
 bool SendAndConfirm(std::int8_t dx) {
   xSemaphoreTake(g_report_done, 0);  // drop any stale completion
@@ -96,6 +98,9 @@ bool KeepAwakeStartUsb() {
                   mac[2], mac[3], mac[4], mac[5]);
   }
   g_report_done = xSemaphoreCreateBinary();
+  // Claim the HID callbacks before TinyUSB starts: its task can serve descriptor requests before
+  // tinyusb_driver_install() returns. A failed install restarts to Home, so the claim never leaks.
+  g_usb_owned.store(true);
   tinyusb_config_t config = TINYUSB_DEFAULT_CONFIG();
   config.descriptor.device = &kDeviceDescriptor;
   config.descriptor.full_speed_config = kConfigDescriptor;
@@ -124,10 +129,20 @@ KeepAwakeState KeepAwakeStateNow() { return g_state.load(); }
 std::uint32_t KeepAwakeNudges() { return g_nudges.load(); }
 bool KeepAwakeUsbMounted() { return tud_mounted(); }
 
+bool UsbOwnedByHandheld() { return g_usb_owned.load(); }
+
+const std::uint8_t* HandheldHidReportDescriptor(std::uint8_t) { return kReportDescriptor; }
+
+void HandheldHidReportComplete(std::uint8_t) {
+  if (g_report_done != nullptr) xSemaphoreGive(g_report_done);
+}
+
 }  // namespace keyferry::handheld
 
-extern "C" std::uint8_t const* tud_hid_descriptor_report_cb(std::uint8_t) {
-  return keyferry::handheld::kReportDescriptor;
+#if !defined(KEYFERRY_HANDHELD_KEYFERRY)
+// Check image: no bridge is linked, so these callbacks live here.
+extern "C" std::uint8_t const* tud_hid_descriptor_report_cb(std::uint8_t instance) {
+  return keyferry::handheld::HandheldHidReportDescriptor(instance);
 }
 
 extern "C" std::uint16_t tud_hid_get_report_cb(std::uint8_t, std::uint8_t, hid_report_type_t,
@@ -138,8 +153,8 @@ extern "C" std::uint16_t tud_hid_get_report_cb(std::uint8_t, std::uint8_t, hid_r
 extern "C" void tud_hid_set_report_cb(std::uint8_t, std::uint8_t, hid_report_type_t,
                                       std::uint8_t const*, std::uint16_t) {}
 
-extern "C" void tud_hid_report_complete_cb(std::uint8_t, std::uint8_t const*, std::uint16_t) {
-  if (keyferry::handheld::g_report_done != nullptr) {
-    xSemaphoreGive(keyferry::handheld::g_report_done);
-  }
+extern "C" void tud_hid_report_complete_cb(std::uint8_t instance, std::uint8_t const*,
+                                           std::uint16_t) {
+  keyferry::handheld::HandheldHidReportComplete(instance);
 }
+#endif

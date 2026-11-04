@@ -4,3 +4,4 @@ dependencies:
     version: "^2.0.3"
     public: true
   espressif/esp_tinyusb: "==2.0.1~1"
+  espressif/tinyusb: "==0.21.0~1"  # same TinyUSB as hil_endpoint/dependencies.lock

@@ -24,6 +24,9 @@ idf_component_register(
     PRIV_REQUIRES esp_psram
 )
 
+# Linked only when the selected board is a handheld (see the project CMakeLists).
+idf_component_optional_requires(PRIVATE kf_handheld)
+
 target_include_directories(${COMPONENT_LIB} BEFORE PRIVATE
     "${KEYFERRY_PRIVATE_CONFIG_DIR}"
     "${KEYFERRY_BOARD_INCLUDE_DIR}"

@@ -4,6 +4,7 @@
 #include "keyferry/handheld.h"
 
 #include <atomic>
+#include <iterator>
 #include <cinttypes>
 #include <cstdarg>
 #include <cstdio>
@@ -11,10 +12,12 @@
 #include "bsp/esp-bsp.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_app_desc.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "soc/reset_reasons.h"
 #include <algorithm>
 #include <cstring>
 #include "esp_system.h"
@@ -34,6 +37,7 @@ namespace {
 constexpr char kTag[] = "handheld";
 constexpr char kNvsNamespace[] = "kf_hh";
 constexpr char kBrightnessKey[] = "bright";
+constexpr char kStartKey[] = "start";  // 1: power-up starts Keyferry
 constexpr int kDefaultBrightness = 60;
 constexpr int kMinBrightness = 5;
 constexpr std::uint32_t kBlankAfterMs = 20000;
@@ -62,31 +66,60 @@ struct PowerStatus {
   int battery_percent = -1;
 };
 
-enum class Function : std::uint32_t { kHome = 0, kKeepAwake = 1 };
+enum class Function : std::uint32_t { kHome = 0, kKeepAwake = 1, kKeyferry = 2 };
 
 struct BootSelection {
   std::uint32_t magic;
   std::uint32_t function;
-  std::uint32_t check;
+  std::uint32_t check;  // ~function ^ image tag: a choice made by another image is ignored
 };
+
+std::uint32_t ImageTag() {
+  const esp_app_desc_t* description = esp_app_get_description();
+  std::uint32_t tag = 0;
+  if (description != nullptr) std::memcpy(&tag, description->app_elf_sha256, sizeof(tag));
+  return tag;
+}
+
+// The CPU-only reset that RunShellUnlessKeyferry upgraded, kept for diagnostics.
+RTC_NOINIT_ATTR std::uint32_t g_upgraded_reset_reason;
+constexpr std::uint32_t kNoUpgrade = 0xFFFFFFFFU;
 constexpr std::uint32_t kSelectionMagic = 0x4B464853;
 // Survives the system reset in Launch(); garbage after power-on, which the magic and check reject (-> Home).
 RTC_NOINIT_ATTR BootSelection g_selection;
 
-Function TakeSelection() {
+// Consecutive Keyferry starts without 60 s of stable running; a third falls back to Home so a
+// crashing bridge cannot trap the device away from its menu.
+struct KeyferryStarts {
+  std::uint32_t magic;
+  std::uint32_t count;
+};
+constexpr std::uint32_t kStartsMagic = 0x4B465354 ^ 0x1;
+constexpr std::uint32_t kMaxKeyferryStarts = 3;
+RTC_NOINIT_ATTR KeyferryStarts g_keyferry_starts;
+
+// *deliberate is true only for a choice recorded by Launch(); otherwise the start preference applies.
+Function TakeSelection(bool* deliberate) {
   const BootSelection selection = g_selection;
-  g_selection = BootSelection{0, 0, 0};  // a crash or reset inside a function returns Home
-  if (selection.magic != kSelectionMagic || selection.check != ~selection.function) {
+  g_selection = BootSelection{0, 0, 0};  // a crash or reset inside Home or Keep Awake leaves it
+  *deliberate = selection.magic == kSelectionMagic &&
+                selection.check == (~selection.function ^ ImageTag());
+  if (!*deliberate) {
     return Function::kHome;
   }
-  return selection.function == static_cast<std::uint32_t>(Function::kKeepAwake)
-             ? Function::kKeepAwake
-             : Function::kHome;
+  switch (selection.function) {
+    case static_cast<std::uint32_t>(Function::kKeepAwake): return Function::kKeepAwake;
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+    case static_cast<std::uint32_t>(Function::kKeyferry): return Function::kKeyferry;
+#endif
+    default: return Function::kHome;
+  }
 }
 
 [[noreturn]] void Launch(Function function) {
   const auto value = static_cast<std::uint32_t>(function);
-  g_selection = BootSelection{kSelectionMagic, value, ~value};
+  g_selection = BootSelection{kSelectionMagic, value, ~value ^ ImageTag()};
+  g_keyferry_starts = KeyferryStarts{kStartsMagic, 0};
   ESP_LOGI("handheld", "restarting into function %u", static_cast<unsigned>(value));
   vTaskDelay(pdMS_TO_TICKS(50));
   // Full digital-system reset (RTC memory kept). A CPU-only esp_restart() left the display's
@@ -175,12 +208,16 @@ struct Ui {
   lv_obj_t* keep_awake = nullptr;
   lv_obj_t* keep_awake_status = nullptr;
   lv_obj_t* keep_awake_toggle = nullptr;
+  lv_obj_t* keyferry = nullptr;
+  lv_obj_t* keyferry_status = nullptr;
 };
 
 Ui g_ui;
 Function g_function = Function::kHome;
 std::atomic<std::uint32_t> g_ui_ticks{0};
 std::atomic<std::uint32_t> g_renders{0};
+KeyferryHooks g_keyferry{};
+std::atomic<bool> g_leaving{false};
 i2c_master_dev_handle_t g_pmu = nullptr;
 int g_brightness = kDefaultBrightness;
 bool g_blanked = false;
@@ -263,6 +300,29 @@ int LoadBrightness() {
   }
   return value < kMinBrightness || value > 100 ? kDefaultBrightness : value;
 }
+
+bool LoadStartInKeyferry() {
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+  // ADR 0018: power-up shows Home unless the owner turned "Start in Keyferry" on (stored 1).
+  nvs_handle_t handle;
+  std::uint8_t value = 0;
+  if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+  const esp_err_t read = nvs_get_u8(handle, kStartKey, &value);
+  nvs_close(handle);
+  return read == ESP_OK && value == 1;
+#else
+  return false;
+#endif
+}
+
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+void StoreStartInKeyferry(bool value) {
+  nvs_handle_t handle;
+  if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
+  if (nvs_set_u8(handle, kStartKey, value ? 1 : 0) == ESP_OK) nvs_commit(handle);
+  nvs_close(handle);
+}
+#endif
 
 void StoreBrightness(int value) {
   nvs_handle_t handle;
@@ -408,6 +468,75 @@ void OnLeaveFunction(lv_event_t*) {
 
 void OnKeepAwakeToggle(lv_event_t*) { KeepAwakeSetRunning(!KeepAwakeRunning()); }
 
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+void OnLaunchKeyferry(lv_event_t*) { Launch(Function::kKeyferry); }
+#endif
+
+constexpr TickType_t kExitDisplayLockTicks = pdMS_TO_TICKS(50);
+constexpr std::int64_t kExitNeutralTimeoutUs = 3000000;
+TaskHandle_t g_exit_worker = nullptr;
+
+// Display text is optional during an exit and never waits long for the LVGL lock.
+void ShowExitText(const char* text) {
+  if (bsp_display_lock(kExitDisplayLockTicks * portTICK_PERIOD_MS)) {
+    lv_label_set_text(g_ui.keyferry_status, text);
+    bsp_display_unlock();
+  }
+}
+
+// Created once when the Keyferry screen starts, so an exit never depends on allocation or the UI.
+void KeyferryExitWorker(void*) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (g_keyferry.begin_leave == nullptr || !g_keyferry.begin_leave(g_keyferry.context)) {
+      g_leaving.store(false);
+      ShowExitText("Busy (maintenance or provisioning).\nTry Home again shortly.");
+      continue;
+    }
+    ShowExitText("Releasing all keys...");
+    const std::int64_t deadline = esp_timer_get_time() + kExitNeutralTimeoutUs;
+    while (esp_timer_get_time() < deadline) {
+      if (g_keyferry.neutral_confirmed != nullptr && g_keyferry.neutral_confirmed(g_keyferry.context)) {
+        Launch(Function::kHome);
+      }
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    // Admission stays closed and nothing retries; the bridge is stopped until power is removed.
+    ShowExitText("Release not confirmed.\nKeyferry is stopped.\nUnplug to reset.");
+    for (;;) vTaskDelay(portMAX_DELAY);
+  }
+}
+
+void StartExitWorker() {
+  static StaticTask_t control;
+  static StackType_t stack[4096 / sizeof(StackType_t)];
+  g_exit_worker = xTaskCreateStatic(KeyferryExitWorker, "kf_leave", std::size(stack), nullptr, 5,
+                                    stack, &control);
+}
+
+void RequestKeyferryExit() {
+  if (g_function != Function::kKeyferry || g_exit_worker == nullptr || g_leaving.exchange(true)) {
+    return;
+  }
+  xTaskNotifyGive(g_exit_worker);
+}
+
+void OnLeaveKeyferry(lv_event_t*) { RequestKeyferryExit(); }
+
+void RefreshKeyferry() {
+  if (g_leaving.load() || g_keyferry.status == nullptr) return;
+  char text[256] = {};
+  g_keyferry.status(g_keyferry.context, text, sizeof(text));
+  lv_label_set_text(g_ui.keyferry_status, text);
+}
+
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+void OnStartInKeyferry(lv_event_t* event) {
+  lv_obj_t* toggle = static_cast<lv_obj_t*>(lv_event_get_target(event));
+  StoreStartInKeyferry(lv_obj_has_state(toggle, LV_STATE_CHECKED));
+}
+#endif
+
 void OnBrightness(lv_event_t* event) {
   lv_obj_t* slider = static_cast<lv_obj_t*>(lv_event_get_target(event));
   g_brightness = lv_slider_get_value(slider);
@@ -429,7 +558,11 @@ void BuildUi() {
   g_ui.check = NewScreen("Board Check");
   g_ui.settings = NewScreen("Settings");
 
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+  AddTile(g_ui.home, 0, LV_SYMBOL_KEYBOARD, "Keyferry", OnLaunchKeyferry, nullptr);
+#else
   AddTile(g_ui.home, 0, LV_SYMBOL_KEYBOARD, "Keyferry", OnNavigate, nullptr, false);
+#endif
   AddTile(g_ui.home, 1, LV_SYMBOL_EYE_OPEN, "Keep Awake", OnLaunchKeepAwake, nullptr);
   AddTile(g_ui.home, 2, LV_SYMBOL_USB, "USB Drive", OnNavigate, nullptr, false);
   AddTile(g_ui.home, 3, LV_SYMBOL_LIST, "Board Check", OnNavigate, g_ui.check);
@@ -462,6 +595,15 @@ void BuildUi() {
   lv_slider_set_value(slider, g_brightness, LV_ANIM_OFF);
   lv_obj_add_event_cb(slider, OnBrightness, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(slider, OnBrightness, LV_EVENT_RELEASED, nullptr);
+#if defined(KEYFERRY_HANDHELD_KEYFERRY)
+  lv_obj_t* start_label = AddInfoLabel(g_ui.settings, 290);
+  lv_obj_set_style_text_font(start_label, &lv_font_montserrat_20, 0);
+  lv_label_set_text(start_label, "Start in Keyferry");
+  lv_obj_t* start_switch = lv_switch_create(g_ui.settings);
+  lv_obj_align(start_switch, LV_ALIGN_TOP_RIGHT, -24, 284);
+  if (LoadStartInKeyferry()) lv_obj_add_state(start_switch, LV_STATE_CHECKED);
+  lv_obj_add_event_cb(start_switch, OnStartInKeyferry, LV_EVENT_VALUE_CHANGED, nullptr);
+#endif
   lv_obj_t* hint = AddInfoLabel(g_ui.settings, 230);
   lv_label_set_text(hint, "Screen turns off after 30 s idle.\nTouch, BOOT or PWR wakes it.");
   AddButton(g_ui.settings, "Home", 370, OnNavigate, g_ui.home);
@@ -472,6 +614,11 @@ void BuildUi() {
   g_ui.keep_awake_toggle = AddButton(g_ui.keep_awake, "Start", 270, OnKeepAwakeToggle, nullptr);
   AddButton(g_ui.keep_awake, "Home", 370, OnLeaveFunction, nullptr);
 
+  g_ui.keyferry = NewScreen("Keyferry");
+  g_ui.keyferry_status = AddInfoLabel(g_ui.keyferry, 90);
+  lv_obj_set_style_text_font(g_ui.keyferry_status, &lv_font_montserrat_20, 0);
+  AddButton(g_ui.keyferry, "Home", 370, OnLeaveKeyferry, nullptr);
+
   g_ui.wake_shield = lv_obj_create(lv_layer_top());
   lv_obj_set_size(g_ui.wake_shield, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_bg_opa(g_ui.wake_shield, LV_OPA_TRANSP, 0);
@@ -480,7 +627,9 @@ void BuildUi() {
   lv_obj_add_event_cb(g_ui.wake_shield, OnWakeShield, LV_EVENT_RELEASED, nullptr);
   lv_obj_set_hidden(g_ui.wake_shield, true);
 
-  lv_screen_load(g_function == Function::kKeepAwake ? g_ui.keep_awake : g_ui.home);
+  lv_screen_load(g_function == Function::kKeepAwake  ? g_ui.keep_awake
+                 : g_function == Function::kKeyferry ? g_ui.keyferry
+                                                     : g_ui.home);
 }
 
 const char* KeepAwakeText(KeepAwakeState state) {
@@ -553,7 +702,7 @@ void OnTick(lv_timer_t*) {
     g_boot_down_since = now;
     g_boot_long = false;
     ESP_LOGI(kTag, "BOOT down");
-    if (g_function != Function::kHome) KeepAwakeSetRunning(false);  // stop input immediately
+    if (g_function == Function::kKeepAwake) KeepAwakeSetRunning(false);  // stop input at once
   }
   if (boot_down && !g_boot_long && now - g_boot_down_since >= kBootLongHoldUs) {
     g_boot_long = true;  // restart only after release so GPIO0 cannot select ROM download
@@ -561,7 +710,13 @@ void OnTick(lv_timer_t*) {
   }
   if (!boot_down && g_boot_down) {
     ESP_LOGI(kTag, "BOOT up%s", g_boot_long ? " (long)" : "");
-    if (g_function != Function::kHome) Launch(Function::kHome);  // after release: no ROM strap
+    if (g_function == Function::kKeepAwake) Launch(Function::kHome);  // after release: no ROM strap
+    if (g_function == Function::kKeyferry) {
+      if (g_boot_long) RequestKeyferryExit();
+      Wake();
+      g_boot_down = boot_down;
+      return;
+    }
     if (g_boot_long) {
       ESP_LOGI(kTag, "BOOT long hold released: restarting to Home");
       Launch(Function::kHome);
@@ -590,6 +745,7 @@ void OnTick(lv_timer_t*) {
     if (events & kPwrLong) ++g_pwr_long_count;
     if (!g_blanked && lv_screen_active() == g_ui.check) RefreshCheck();
     if (!g_blanked && lv_screen_active() == g_ui.keep_awake) RefreshKeepAwake();
+    if (!g_blanked && lv_screen_active() == g_ui.keyferry) RefreshKeyferry();
   }
 
   if (!g_blanked && lv_display_get_inactive_time(nullptr) >= kBlankAfterMs) Blank();
@@ -611,13 +767,22 @@ void Supervise(void*) {
     last_progress = now;
   }
   const bool boot_down = gpio_get_level(kBootGpio) == 0;
-  if (g_function != Function::kHome) {
+  static std::int64_t boot_down_since = 0;
+  if (boot_down && !boot_was_down) boot_down_since = now;
+  if (g_function == Function::kKeepAwake) {
     if (boot_down) KeepAwakeSetRunning(false);
     if (boot_was_down && !boot_down) Launch(Function::kHome);  // after release: no ROM strap
     if (now - last_progress > 5000000) {
       ESP_LOGE(kTag, "UI stalled for 5 s inside a function; returning Home");
       Launch(Function::kHome);
     }
+  }
+  if (g_function == Function::kKeyferry && now > 60000000 && g_keyferry_starts.count != 0) {
+    g_keyferry_starts.count = 0;
+  }
+  if (g_function == Function::kKeyferry && boot_was_down && !boot_down &&
+      now - boot_down_since >= kBootLongHoldUs) {
+    RequestKeyferryExit();  // the bridge never depends on the UI task to be left
   }
   boot_was_down = boot_down;
   if (g_function == Function::kHome && now > 3000000) PrintPreviousFlightLog();
@@ -650,25 +815,7 @@ void Supervise(void*) {
 #endif
 }
 
-}  // namespace
-
-[[noreturn]] void RunShell() {
-  g_function = TakeSelection();
-  StartFlightLog(g_function == Function::kHome);
-#if defined(KEYFERRY_HANDHELD_SELFTEST)
-  if (esp_reset_reason() != ESP_RST_SW) g_selftest = SelfTest{kSelfTestMagic, 0};
-#endif
-  ESP_LOGI(kTag, "boot: function=%u reset_reason=%d", static_cast<unsigned>(g_function),
-           static_cast<int>(esp_reset_reason()));
-  if (g_function == Function::kHome) {
-    // A previous function may have left the internal PHY on USB OTG (RTC register survives a
-    // software restart); hand it back to USB-Serial/JTAG so Home keeps console and ROM access.
-    usb_serial_jtag_ll_phy_enable_external(false);
-  }
-  const esp_err_t nvs = nvs_flash_init();
-  if (nvs != ESP_OK) ESP_LOGE(kTag, "NVS unavailable (%s); settings will not persist", esp_err_to_name(nvs));
-  g_brightness = LoadBrightness();
-
+void StartUi() {
   gpio_config_t boot{};
   boot.pin_bit_mask = 1ULL << kBootGpio;
   boot.mode = GPIO_MODE_INPUT;
@@ -677,9 +824,9 @@ void Supervise(void*) {
 
   if (bsp_display_start() == nullptr) {
     ESP_LOGE(kTag, "display start failed");
-    for (;;) vTaskDelay(portMAX_DELAY);
+    return;
   }
-  PmuInit();
+  if (g_function != Function::kKeyferry) PmuInit();
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
   bsp_display_lock(0);
   BuildUi();
@@ -695,6 +842,66 @@ void Supervise(void*) {
     ESP_LOGE(kTag, "supervisor unavailable");
   }
   bsp_display_brightness_set(g_brightness);
+}
+
+}  // namespace
+
+void StartKeyferryShell(const KeyferryHooks& hooks) {
+  g_keyferry = hooks;
+  StartExitWorker();  // before any UI: leaving must not depend on the display coming up
+  g_brightness = LoadBrightness();  // the bridge has already initialized NVS
+  StartUi();
+}
+
+void RunShellUnlessKeyferry() {
+  // A CPU-only reset (esp_restart, panic, watchdog) leaves the display's SPI/DMA state behind and
+  // the next panel reset can hang; turn it into a full digital-system reset before touching
+  // anything. RTC memory, and so the function selection, survives it.
+  switch (esp_rom_get_reset_reason(0)) {
+    case RESET_REASON_CPU0_SW:
+    case RESET_REASON_CPU0_MWDT0:
+    case RESET_REASON_CPU0_MWDT1:
+    case RESET_REASON_CPU0_RTC_WDT:
+      g_upgraded_reset_reason = static_cast<std::uint32_t>(esp_rom_get_reset_reason(0));
+      esp_rom_software_reset_system();
+      break;
+    case RESET_REASON_CORE_SW:
+      break;  // keep the cause recorded just before an upgrade
+    default:
+      g_upgraded_reset_reason = kNoUpgrade;
+      break;
+  }
+  const esp_err_t nvs = nvs_flash_init();  // never erases; the bridge reports any failure itself
+  bool deliberate = false;
+  g_function = TakeSelection(&deliberate);
+  if (!deliberate && LoadStartInKeyferry()) g_function = Function::kKeyferry;
+  if (g_function == Function::kKeyferry) {
+    if (g_keyferry_starts.magic != kStartsMagic) g_keyferry_starts = KeyferryStarts{kStartsMagic, 0};
+    if (++g_keyferry_starts.count > kMaxKeyferryStarts) {
+      g_keyferry_starts.count = 0;
+      g_function = Function::kHome;
+    }
+  }
+  StartFlightLog(g_function == Function::kHome);
+  if (g_function == Function::kKeyferry) {
+    // Any restart inside the bridge (its own restarts, a crash) comes back to the bridge.
+    const auto value = static_cast<std::uint32_t>(Function::kKeyferry);
+    g_selection = BootSelection{kSelectionMagic, value, ~value ^ ImageTag()};
+    return;
+  }
+#if defined(KEYFERRY_HANDHELD_SELFTEST)
+  if (esp_reset_reason() != ESP_RST_SW) g_selftest = SelfTest{kSelfTestMagic, 0};
+#endif
+  ESP_LOGI(kTag, "boot: function=%u reset_reason=%d upgraded_from=0x%x", static_cast<unsigned>(g_function),
+           static_cast<int>(esp_reset_reason()), static_cast<unsigned>(g_upgraded_reset_reason));
+  if (g_function == Function::kHome) {
+    // A previous function may have left the internal PHY on USB OTG (RTC register survives a
+    // software restart); hand it back to USB-Serial/JTAG so Home keeps console and ROM access.
+    usb_serial_jtag_ll_phy_enable_external(false);
+  }
+  if (nvs != ESP_OK) ESP_LOGE(kTag, "NVS unavailable (%s); settings will not persist", esp_err_to_name(nvs));
+  g_brightness = LoadBrightness();
+  StartUi();
   const PowerStatus power = ReadPower();
   ESP_LOGI(kTag, "shell ready: pmu=%d vbus=%d battery=%d mv=%d pct=%d charge=%d internal_free=%u largest=%u",
            power.readable, power.vbus_good, power.battery_present, power.battery_mv,

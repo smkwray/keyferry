@@ -79,4 +79,25 @@ class BoardProfileTests(unittest.TestCase):
                 path.write_text(json.dumps(candidate))
                 with self.assertRaises(ValueError): boards.load_profile(path)
 
+    def test_handheld_profile_selects_shell_and_rejects_conflicts(self):
+        path = BOARDS / "waveshare_amoled_1_8/board.json"
+        p = boards.load_profile(path)
+        self.assertEqual((p["compatibility_id"], p["flash"]["size_mb"]), (4, 16))
+        self.assertFalse(p["display"]["present"])
+        self.assertIn("#define KEYFERRY_BOARD_HANDHELD 1", boards.render(p, path))
+        source = json.loads(path.read_text())
+        cases = []
+        for mutate in (lambda c: c["capabilities"].update(touch=False),
+                       lambda c: c["handheld"].update(shell="unknown"),
+                       lambda c: c.update(handheld={"shell": "waveshare_amoled_1_8", "extra": 1}),
+                       lambda c: c.pop("handheld")):
+            candidate = copy.deepcopy(source)
+            mutate(candidate)
+            cases.append(candidate)
+        for candidate in cases:
+            with tempfile.TemporaryDirectory() as directory:
+                candidate_path = Path(directory)/"board.json"
+                candidate_path.write_text(json.dumps(candidate))
+                with self.assertRaises(ValueError): boards.load_profile(candidate_path)
+
 if __name__ == "__main__": unittest.main()

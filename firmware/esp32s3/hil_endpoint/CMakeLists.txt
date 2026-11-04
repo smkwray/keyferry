@@ -57,6 +57,13 @@ set(KEYFERRY_WORKSPACE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
 set(KEYFERRY_PRIVATE_CONFIG_DIR "${CMAKE_BINARY_DIR}/private-config")
 
 include("${CMAKE_CURRENT_LIST_DIR}/../boards/load_board_profile.cmake")
+if(KEYFERRY_BOARD_HANDHELD)
+    if(KEYFERRY_FILE_HANDOFF OR KEYFERRY_MSC_SIZE_PROBE)
+        message(FATAL_ERROR
+            "Handheld file handoff is unqualified: its layout and capacity need their own gate")
+    endif()
+    list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../handheld/kf_handheld")
+endif()
 
 if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite")
     if(KEYFERRY_FILE_HANDOFF OR KEYFERRY_MSC_SIZE_PROBE)
@@ -163,8 +170,19 @@ elseif(NOT KEYFERRY_BLE_HID_SPIKE STREQUAL "off" AND
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-idf_build_set_property(MINIMAL_BUILD ON)
+if(KEYFERRY_BOARD_HANDHELD)
+    # COMPONENTS stands in for MINIMAL_BUILD: main, the handheld shell and their dependencies.
+    # The shell's managed display/touch stack is locked per board so other boards' lock is untouched.
+    set(COMPONENTS main kf_handheld)
+    idf_build_set_property(DEPENDENCIES_LOCK "${KEYFERRY_BOARD_DIR}/dependencies.lock")
+else()
+    idf_build_set_property(MINIMAL_BUILD ON)
+endif()
 project(keyferry_hil_endpoint)
+if(KEYFERRY_BOARD_HANDHELD)
+    idf_component_get_property(KEYFERRY_HANDHELD_LIB kf_handheld COMPONENT_LIB)
+    target_compile_definitions(${KEYFERRY_HANDHELD_LIB} PRIVATE KEYFERRY_HANDHELD_KEYFERRY=1)
+endif()
 
 if((KEYFERRY_MSC_SIZE_PROBE OR KEYFERRY_FILE_HANDOFF) AND
    NOT CONFIG_TINYUSB_MSC_ENABLED)

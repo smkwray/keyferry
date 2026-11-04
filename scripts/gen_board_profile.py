@@ -14,6 +14,7 @@ SCHEMA = "keyferry.board-profile.v1"
 IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 CONTROLLERS = {"st7735", "st7789"}
 PRESENTATIONS = {"compact", "normal"}
+HANDHELD_SHELLS = {"waveshare_amoled_1_8"}
 
 
 def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -65,7 +66,8 @@ def load_profile(path: Path) -> dict[str, Any]:
             "display",
             "capabilities",
             "pins",
-        } | ({"indicators"} if "indicators" in profile else set()),
+        } | ({"indicators"} if "indicators" in profile else set())
+          | ({"handheld"} if "handheld" in profile else set()),
         "profile",
     )
     if profile["schema"] != SCHEMA:
@@ -79,8 +81,8 @@ def load_profile(path: Path) -> dict[str, Any]:
     integer(flash["size_mb"], 2, 32, "flash.size_mb")
 
     if profile["display"] == {"present": False}:
-        if "indicators" not in profile:
-            raise ValueError("a displayless profile requires indicators")
+        if "indicators" not in profile and "handheld" not in profile:
+            raise ValueError("a displayless profile requires indicators or a handheld shell")
         # No LCD hardware is initialized. Keep the C++ layout compatible.
         profile["display"] = dict(present=False, controller="st7735",
             presentation="normal", dc_gpio=0, cs_gpio=0, clk_gpio=0,
@@ -161,6 +163,15 @@ def load_profile(path: Path) -> dict[str, Any]:
             raise ValueError("indicator pins overlap each other, USB, or ROM BOOT")
         if display["present"] or not capabilities["led"] or not capabilities["button"]:
             raise ValueError("indicators require displayless LED/button capabilities")
+    if "handheld" in profile:
+        # The handheld shell (firmware/esp32s3/handheld) drives the panel, touch and buttons;
+        # keyferry's own status renderer stays off on these boards.
+        handheld = exact_fields(profile["handheld"], {"shell"}, "handheld")
+        if handheld["shell"] not in HANDHELD_SHELLS:
+            raise ValueError(f"handheld.shell must be one of {sorted(HANDHELD_SHELLS)!r}")
+        if (display["present"] or "indicators" in profile or not capabilities["touch"]
+                or not capabilities["button"]):
+            raise ValueError("a handheld profile needs touch and button and no keyferry display")
     return profile
 
 
@@ -194,6 +205,8 @@ def render(profile: dict[str, Any], source: Path) -> str:
         extra = "\n#define KEYFERRY_BOARD_RGB_STATUS 1\n"
         for name, value in indicators.items():
             extra += f"inline constexpr std::int32_t {name} = {value};\n"
+    if "handheld" in profile:
+        extra += "\n#define KEYFERRY_BOARD_HANDHELD 1\n"
     return f"""// Generated from {source.name}; do not edit.
 #pragma once
 

@@ -8,6 +8,9 @@
 #include <optional>
 
 #include "board_profile.h"
+#if defined(KEYFERRY_BOARD_HANDHELD)
+#include "keyferry/handheld.h"
+#endif
 #include "class/hid/hid_device.h"
 #if defined(KEYFERRY_MSC_SIZE_PROBE) || defined(KEYFERRY_FILE_HANDOFF)
 #include "class/msc/msc_device.h"
@@ -846,6 +849,44 @@ class HilRuntime final : public keyferry::transport::Delegate,
     Unlock();
   }
 
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  // Handheld exit (ADR 0018). Leaving is terminal for this boot: it closes network admission,
+  // refuses provisioning, cable-local maintenance, commits and every restart source, ends the
+  // session, withdraws the RAM volume and starts the keyboard-zero/mouse-zero barrier used before
+  // file publication. Only the shell restarts the device, after HandheldNeutralConfirmed().
+  // Refused (false) while provisioning or maintenance is already under way.
+  bool BeginHandheldLeave() {
+    if (!Lock()) {
+      return false;
+    }
+    if (!handheld_leaving_ && (provisioning_active_ || local_maintenance_active_)) {
+      Unlock();
+      return false;
+    }
+    handheld_leaving_ = true;
+    restart_requested_ = false;
+    restart_not_before_ms_ = 0;
+    command_.EndSession();
+#if defined(KEYFERRY_FILE_HANDOFF)
+    ReleaseFileVolumeLocked();
+#endif
+    hid_.request_dual_neutral();
+    authenticated_epoch_ = 0;
+    session_abort_requested_ = true;
+    Unlock();
+    return true;
+  }
+
+  bool HandheldNeutralConfirmed() {
+    if (!Lock()) {
+      return false;
+    }
+    const bool confirmed = handheld_leaving_ && NeutralConfirmedLocked();
+    Unlock();
+    return confirmed;
+  }
+#endif
+
   bool SessionAuthenticated(const std::uint64_t epoch,
                             const keyferry::endpoint::SessionReady& ready) override {
     if (epoch == 0 ||
@@ -858,7 +899,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     // The authenticated control plane remains available while a paired BLE
     // keyboard is idle or temporarily disconnected. Effectful admission is
     // separately gated on OutputReadyLocked() in CommandScopedArm().
-    if (provisioning_active_ || local_maintenance_active_) {
+    if (provisioning_active_ || local_maintenance_active_ || handheld_leaving_) {
       Unlock();
       return false;
     }
@@ -888,7 +929,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
       return false;
     }
     const bool armed = !provisioning_active_ && !local_maintenance_active_ &&
-                         OutputReadyLocked() &&
+                         !handheld_leaving_ && OutputReadyLocked() &&
 #if defined(KEYFERRY_FILE_HANDOFF)
                          !FileArmBlockedLocked() &&
 #endif
@@ -1128,8 +1169,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
         return false;
       }
       if (pending.restart_after_send && Lock()) {
-        restart_not_before_ms_ =
-            keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        if (!handheld_leaving_) {
+          restart_not_before_ms_ =
+              keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        }
         Unlock();
       }
       return true;
@@ -1142,8 +1185,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
         return false;
       }
       if (pending.restart_after_send && Lock()) {
-        restart_not_before_ms_ =
-            keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        if (!handheld_leaving_) {
+          restart_not_before_ms_ =
+              keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        }
         Unlock();
       }
       return true;
@@ -1156,8 +1201,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
         return false;
       }
       if (pending.restart_after_send && Lock()) {
-        restart_not_before_ms_ =
-            keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        if (!handheld_leaving_) {
+          restart_not_before_ms_ =
+              keyferry::command::IdfHeldKeyWatchdog::NowMs() + 250U;
+        }
         Unlock();
       }
       return true;
@@ -1373,7 +1420,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return;
     }
-    local_maintenance_active_ = active;
+    local_maintenance_active_ = active && !handheld_leaving_;
 #if defined(KEYFERRY_FILE_HANDOFF)
     if (active) ReleaseFileVolumeLocked();
 #endif
@@ -1459,7 +1506,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return;
     }
-    restart_requested_ = true;
+    restart_requested_ = !handheld_leaving_;
     Unlock();
   }
 
@@ -1471,6 +1518,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
         local_maintenance_authorized ? local_maintenance_active_
                                      : !local_maintenance_active_;
     const bool safe =
+        !handheld_leaving_ &&
         usb_mounted_ && authenticated_epoch_ == 0 && !command_.active() &&
         maintenance_matches &&
         !hid_.armed() &&
@@ -1506,6 +1554,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
                                          ? local_maintenance_active_
                                          : !local_maintenance_active_;
     const bool safe =
+        !handheld_leaving_ &&
         provisioning_active_ && maintenance_matches && usb_mounted_ &&
         authenticated_epoch_ == 0 &&
         !command_.active() && !hid_.armed() &&
@@ -1570,7 +1619,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
                       !ble_release_in_flight_;
     provisioning_active_ = false;
     provisioning_from_local_maintenance_ = false;
-    restart_requested_ = safe;
+    restart_requested_ = safe && !handheld_leaving_;
     if (!safe) {
       command_.EndSession();
       hid_.fault();
@@ -1583,10 +1632,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return false;
     }
-    const bool requested = restart_requested_ ||
+    const bool requested = !handheld_leaving_ && (restart_requested_ ||
                            (restart_not_before_ms_ != 0 &&
                             keyferry::command::IdfHeldKeyWatchdog::NowMs() >=
-                                restart_not_before_ms_);
+                                restart_not_before_ms_));
     Unlock();
     return requested;
   }
@@ -2275,6 +2324,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
   bool local_maintenance_active_{false};
   LocalManagementMetadata local_management_metadata_{};
   bool restart_requested_{false};
+  bool handheld_leaving_{false};
   std::uint64_t restart_not_before_ms_{0};
   bool ble_release_in_flight_{false};
   bool ble_transport_ready_{false};
@@ -2634,6 +2684,102 @@ struct StatusTaskContext {
       keyferry::protocol::ScreenPower::kOn};
 };
 
+// One snapshot source for every status surface (status display, handheld screen).
+keyferry::status::Snapshot CollectStatusSnapshot(const StatusTaskContext& status) {
+  keyferry::status::LinkPath link = keyferry::status::LinkPath::kOffline;
+  if (status.transport != nullptr) {
+    const auto active = status.transport->active_path();
+    if (active == keyferry::transport::Path::kWifi) {
+      link = keyferry::status::LinkPath::kWifi;
+    } else if (active == keyferry::transport::Path::kBluetooth) {
+      link = keyferry::status::LinkPath::kBluetooth;
+    }
+  }
+  auto snapshot = status.runtime->StatusSnapshot(
+      status.transport_allowed, link,
+      status.config_generation);
+  snapshot.usb_suspended =
+      g_usb_suspended.load(std::memory_order_acquire);
+  const esp_app_desc_t* description = esp_app_get_description();
+  if (description != nullptr) {
+    constexpr char kHex[] = "0123456789ABCDEF";
+    for (std::size_t index = 0; index < 4; ++index) {
+      snapshot.build_id[index * 2] =
+          kHex[description->app_elf_sha256[index] >> 4];
+      snapshot.build_id[index * 2 + 1] =
+          kHex[description->app_elf_sha256[index] & 0x0F];
+    }
+  }
+  snapshot.nvs_error = status.nvs_result;
+  snapshot.free_internal_heap =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
+      ~std::uint32_t{1023};
+  snapshot.largest_internal_block = heap_caps_get_largest_free_block(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
+      ~std::uint32_t{1023};
+  snapshot.minimum_internal_heap = heap_caps_get_minimum_free_size(
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
+      ~std::uint32_t{1023};
+  if (status.transport != nullptr) {
+    const auto diagnostics = status.transport->diagnostics();
+    snapshot.transport_running = diagnostics.running;
+    snapshot.wifi_available = diagnostics.wifi_available;
+    snapshot.wifi_stage = static_cast<std::uint8_t>(diagnostics.wifi_stage);
+    snapshot.wifi_error = diagnostics.wifi_error;
+    if (!snapshot.ble_hid_mode) {
+      snapshot.ble_available = diagnostics.ble_available;
+      snapshot.ble_stage = static_cast<std::uint8_t>(diagnostics.ble.stage);
+      snapshot.ble_error = diagnostics.ble.error;
+      snapshot.ble_synchronized = diagnostics.ble.synchronized;
+      snapshot.ble_advertising = diagnostics.ble.advertising;
+    }
+    if (diagnostics.wifi_stage ==
+        keyferry::transport::WifiStage::kConnecting) {
+      snapshot.connection =
+          keyferry::status::ConnectionProgress::kWifiJoining;
+    } else if (diagnostics.wifi_stage ==
+                   keyferry::transport::WifiStage::kGotIp ||
+               diagnostics.wifi_stage ==
+                   keyferry::transport::WifiStage::kTls) {
+      snapshot.connection =
+          keyferry::status::ConnectionProgress::kWifiAuthenticating;
+    } else if (diagnostics.ble.stage ==
+               keyferry::ble::PeripheralStage::kConnected) {
+      snapshot.connection =
+          keyferry::status::ConnectionProgress::kBluetoothAuthenticating;
+    } else if (diagnostics.ble.advertising) {
+      snapshot.connection =
+          keyferry::status::ConnectionProgress::kBluetoothAdvertising;
+    }
+  }
+  return snapshot;
+}
+
+#if defined(KEYFERRY_BOARD_HANDHELD)
+void HandheldStatusText(void* context, char* text, const std::size_t size) {
+  const auto& status = *static_cast<const StatusTaskContext*>(context);
+  const auto presentation = keyferry::status::BuildPresentation(
+      CollectStatusSnapshot(status), keyferry::status::Page::kSummary);
+  std::size_t used = 0;
+  for (std::size_t index = 0; index < presentation.line_count() && used + 1 < size; ++index) {
+    const auto& line = presentation.line(index).text;
+    for (std::size_t at = 0; at < line.size() && line[at] != '\0' && used + 2 < size; ++at) {
+      text[used++] = line[at];
+    }
+    text[used++] = '\n';
+  }
+  text[used < size ? used : size - 1] = '\0';
+}
+
+bool HandheldBeginLeave(void* context) {
+  return static_cast<const StatusTaskContext*>(context)->runtime->BeginHandheldLeave();
+}
+
+bool HandheldNeutralConfirmed(void* context) {
+  return static_cast<const StatusTaskContext*>(context)->runtime->HandheldNeutralConfirmed();
+}
+#endif
+
 bool ConfigureButton() {
   if constexpr (!keyferry::board::capabilities.button ||
                 kButtonGpio < 0 || kButtonGpio >= GPIO_NUM_MAX) {
@@ -2757,75 +2903,10 @@ void StatusTask(void* context) {
       wait_tick();
       continue;
     }
-    keyferry::status::LinkPath link = keyferry::status::LinkPath::kOffline;
-    if (status->transport != nullptr) {
-      const auto active = status->transport->active_path();
-      if (active == keyferry::transport::Path::kWifi) {
-        link = keyferry::status::LinkPath::kWifi;
-      } else if (active == keyferry::transport::Path::kBluetooth) {
-        link = keyferry::status::LinkPath::kBluetooth;
-      }
-    }
-    auto snapshot = status->runtime->StatusSnapshot(
-        status->transport_allowed, link,
-        status->config_generation);
-    snapshot.usb_suspended =
-        g_usb_suspended.load(std::memory_order_acquire);
-    const esp_app_desc_t* description = esp_app_get_description();
-    if (description != nullptr) {
-      constexpr char kHex[] = "0123456789ABCDEF";
-      for (std::size_t index = 0; index < 4; ++index) {
-        snapshot.build_id[index * 2] =
-            kHex[description->app_elf_sha256[index] >> 4];
-        snapshot.build_id[index * 2 + 1] =
-            kHex[description->app_elf_sha256[index] & 0x0F];
-      }
-    }
-    snapshot.nvs_error = status->nvs_result;
-    snapshot.free_internal_heap =
-        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
-        ~std::uint32_t{1023};
-    snapshot.largest_internal_block = heap_caps_get_largest_free_block(
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
-        ~std::uint32_t{1023};
-    snapshot.minimum_internal_heap = heap_caps_get_minimum_free_size(
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) &
-        ~std::uint32_t{1023};
+    auto snapshot = CollectStatusSnapshot(*status);
     const std::uint64_t elapsed_ms =
         static_cast<std::uint64_t>(esp_timer_get_time()) / 1000U;
     snapshot.activity = activity_filter.Update(snapshot.activity, elapsed_ms);
-    if (status->transport != nullptr) {
-      const auto diagnostics = status->transport->diagnostics();
-      snapshot.transport_running = diagnostics.running;
-      snapshot.wifi_available = diagnostics.wifi_available;
-      snapshot.wifi_stage = static_cast<std::uint8_t>(diagnostics.wifi_stage);
-      snapshot.wifi_error = diagnostics.wifi_error;
-      if (!snapshot.ble_hid_mode) {
-        snapshot.ble_available = diagnostics.ble_available;
-        snapshot.ble_stage = static_cast<std::uint8_t>(diagnostics.ble.stage);
-        snapshot.ble_error = diagnostics.ble.error;
-        snapshot.ble_synchronized = diagnostics.ble.synchronized;
-        snapshot.ble_advertising = diagnostics.ble.advertising;
-      }
-      if (diagnostics.wifi_stage ==
-          keyferry::transport::WifiStage::kConnecting) {
-        snapshot.connection =
-            keyferry::status::ConnectionProgress::kWifiJoining;
-      } else if (diagnostics.wifi_stage ==
-                     keyferry::transport::WifiStage::kGotIp ||
-                 diagnostics.wifi_stage ==
-                     keyferry::transport::WifiStage::kTls) {
-        snapshot.connection =
-            keyferry::status::ConnectionProgress::kWifiAuthenticating;
-      } else if (diagnostics.ble.stage ==
-                 keyferry::ble::PeripheralStage::kConnected) {
-        snapshot.connection =
-            keyferry::status::ConnectionProgress::kBluetoothAuthenticating;
-      } else if (diagnostics.ble.advertising) {
-        snapshot.connection =
-            keyferry::status::ConnectionProgress::kBluetoothAdvertising;
-      }
-    }
     if (!screen_care.Update(snapshot, wake, elapsed_ms)) {
       wake = false;
       if (!set_lit(false, desired)) {
@@ -2989,6 +3070,11 @@ extern "C" bool tud_msc_is_writable_cb(std::uint8_t) { return false; }
 
 extern "C" std::uint8_t const* tud_hid_descriptor_report_cb(
     const std::uint8_t instance) {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  if (keyferry::handheld::UsbOwnedByHandheld()) {
+    return keyferry::handheld::HandheldHidReportDescriptor(instance);
+  }
+#endif
   if (g_ble_control_usb.load(std::memory_order_acquire)) {
     return instance == keyferry::hil::kBleControlProvisioningHidInstance
                ? kProvisioningReportDescriptor
@@ -3010,6 +3096,11 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
     const std::uint8_t instance, const std::uint8_t report_id,
     const hid_report_type_t report_type, std::uint8_t* buffer,
     const std::uint16_t requested_length) {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  if (keyferry::handheld::UsbOwnedByHandheld()) {
+    return 0;
+  }
+#endif
   if (g_runtime == nullptr ||
       report_type != HID_REPORT_TYPE_INPUT ||
       g_ble_control_usb.load(std::memory_order_acquire)) {
@@ -3057,6 +3148,11 @@ extern "C" void tud_hid_set_report_cb(
     const std::uint8_t instance, const std::uint8_t report_id,
     const hid_report_type_t report_type, const std::uint8_t* buffer,
     const std::uint16_t length) {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  if (keyferry::handheld::UsbOwnedByHandheld()) {
+    return;
+  }
+#endif
   const auto provisioning_instance =
       g_ble_control_usb.load(std::memory_order_acquire)
           ? keyferry::hil::kBleControlProvisioningHidInstance
@@ -3077,6 +3173,12 @@ extern "C" void tud_hid_set_report_cb(
 extern "C" void tud_hid_report_complete_cb(
     const std::uint8_t instance, const std::uint8_t* report,
     const std::uint16_t length) {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  if (keyferry::handheld::UsbOwnedByHandheld()) {
+    keyferry::handheld::HandheldHidReportComplete(instance);
+    return;
+  }
+#endif
   const bool control_only = g_ble_control_usb.load(std::memory_order_acquire);
   const auto provisioning_instance =
       control_only ? keyferry::hil::kBleControlProvisioningHidInstance
@@ -3132,6 +3234,10 @@ extern "C" void tud_resume_cb() {
 #endif
 
 extern "C" void app_main() {
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  // Home and the handheld-only functions never return; a Keyferry boot continues below.
+  keyferry::handheld::RunShellUnlessKeyferry();
+#endif
 #if defined(KEYFERRY_BOARD_RGB_STATUS)
   gpio_config_t ir{};
   ir.pin_bit_mask = 1ULL << keyferry::board::ir_gpio;
@@ -3412,6 +3518,18 @@ extern "C" void app_main() {
       ESP_LOGW(kTag, "optional status display task unavailable");
     }
   }
+#if defined(KEYFERRY_BOARD_HANDHELD)
+  static StatusTaskContext handheld_status{
+      &runtime, transport_allowed, transport ? &*transport : nullptr,
+      selection.generation, static_cast<std::int32_t>(nvs_result),
+      display_orientation, screen_power};
+  keyferry::handheld::KeyferryHooks handheld_hooks;
+  handheld_hooks.context = &handheld_status;
+  handheld_hooks.status = HandheldStatusText;
+  handheld_hooks.begin_leave = HandheldBeginLeave;
+  handheld_hooks.neutral_confirmed = HandheldNeutralConfirmed;
+  keyferry::handheld::StartKeyferryShell(handheld_hooks);
+#endif
 
   bool was_mounted = false;
 #if defined(KEYFERRY_FILE_HANDOFF)

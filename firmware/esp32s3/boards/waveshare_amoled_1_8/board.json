@@ -1,0 +1,24 @@
+{
+  "schema": "keyferry.board-profile.v1",
+  "id": "waveshare_amoled_1_8",
+  "compatibility_id": 4,
+  "qualified": false,
+  "flash": {"size_mb": 16},
+  "display": {"present": false},
+  "handheld": {"shell": "waveshare_amoled_1_8"},
+  "capabilities": {
+    "display": false,
+    "touch": true,
+    "button": true,
+    "led": false,
+    "removable_storage": true,
+    "uart0_header": false
+  },
+  "pins": {
+    "usb_dm_gpio": 19,
+    "usb_dp_gpio": 20,
+    "boot_gpio": 0,
+    "uart0_rx_gpio": 44,
+    "uart0_tx_gpio": 43
+  }
+}

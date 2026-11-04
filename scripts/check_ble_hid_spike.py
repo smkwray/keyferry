@@ -4,12 +4,55 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 from pathlib import Path
 
 
-APP_PARTITION_BYTES = 0x100000
+ROOT = Path(__file__).resolve().parents[1]
 APP_RESERVE_BYTES = 32 * 1024
-MAX_IMAGE_BYTES = APP_PARTITION_BYTES - APP_RESERVE_BYTES
+MD5_ENTRY_MAGIC = b"\xeb\xeb"
+
+
+def partition_tool():
+    """The pinned ESP-IDF partition parser (IDF_PATH when exported, else the project toolchain)."""
+    idf = Path(os.environ.get("IDF_PATH") or ROOT / ".tools/esp-idf-v6.0.3")
+    path = idf / "components/partition_table/gen_esp32part.py"
+    if not path.is_file():
+        raise SystemExit(f"BLE HID spike partition tool absent: {path}")
+    spec = importlib.util.spec_from_file_location("keyferry_gen_esp32part", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    tool.quiet = True
+    return tool
+
+
+def factory_app_bytes(table_path: Path, table_offset: int) -> int:
+    """Size of the single factory app partition in the build's own compiled, verified table."""
+    if not table_path.is_file():
+        raise SystemExit(f"BLE HID spike partition table absent: {table_path}")
+    data = table_path.read_bytes()
+    if not any(data[offset:offset + 2] == MD5_ENTRY_MAGIC for offset in range(0, len(data), 32)):
+        raise SystemExit("BLE HID spike partition table has no MD5 entry")
+    tool = partition_tool()
+    tool.md5sum = True
+    tool.offset_part_table = table_offset
+    try:
+        table = tool.PartitionTable.from_binary(data)
+        table.verify()
+    except tool.InputError as error:
+        raise SystemExit(f"BLE HID spike partition table invalid: {error}") from None
+    factories = [entry for entry in table if entry.type == tool.APP_TYPE and entry.subtype == 0]
+    if len(factories) != 1:
+        raise SystemExit(f"BLE HID spike needs exactly one factory app partition: found {len(factories)}")
+    return factories[0].size
+
+
+def table_offset_from(config: str) -> int:
+    for line in config.splitlines():
+        if line.startswith("CONFIG_PARTITION_TABLE_OFFSET="):
+            return int(line.split("=", 1)[1], 0)
+    raise SystemExit("BLE HID spike sdkconfig missing CONFIG_PARTITION_TABLE_OFFSET")
 
 
 def require_line(config: str, line: str) -> None:
@@ -113,14 +156,17 @@ def main() -> int:
                     f"missing {token}"
                 )
 
+    app_partition_bytes = factory_app_bytes(
+        args.build_dir / "partition_table/partition-table.bin", table_offset_from(config))
+    max_image_bytes = app_partition_bytes - APP_RESERVE_BYTES
     size = binary_path.stat().st_size
-    if size > MAX_IMAGE_BYTES:
+    if size > max_image_bytes:
         raise SystemExit(
             "BLE HID spike exceeded the app reserve gate: "
-            f"bytes={size} maximum={MAX_IMAGE_BYTES}"
+            f"bytes={size} maximum={max_image_bytes}"
         )
-    remaining = APP_PARTITION_BYTES - size
-    growth_before_reserve = MAX_IMAGE_BYTES - size
+    remaining = app_partition_bytes - size
+    growth_before_reserve = max_image_bytes - size
     print(
         "check_ble_hid_spike: ok "
         f"level={args.level} bytes={size} raw_free={remaining} "
