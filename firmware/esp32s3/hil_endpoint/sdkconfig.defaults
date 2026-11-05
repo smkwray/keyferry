@@ -92,6 +92,17 @@ CONFIG_ESP_WIFI_NVS_ENABLED=n
 # CONFIG_ESP_WIFI_GMAC_SUPPORT is not set
 # CONFIG_ESP_WIFI_SOFTAP_SUPPORT is not set
 # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
+# Measured trims (every board): Keyferry is IPv4-only and never a DHCP server
+# (no SoftAP). Error names and assertion text only cost flash; error codes and
+# assertion aborts are unchanged.
+CONFIG_LWIP_IPV6=n
+CONFIG_LWIP_DHCPS=n
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+# Keystroke traffic does not need Wi-Fi's hot paths in internal RAM: about
+# 18 KiB more internal heap, at a throughput cost Keyferry does not notice.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
 # CONFIG_MBEDTLS_SSL_PROTO_TLS1_3 is not set
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=y
