@@ -227,11 +227,14 @@ function Protect-OwnerOnly {
     # A link or junction would take its target outside both the reset and the check, so none
     # is accepted anywhere in the tree.
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $linked = @(@(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force) |
-        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+    $items = @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
+    $linked = @($items | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
     if ($linked.Count -gt 0) {
         throw "Refusing to protect ${Path}: $($linked[0].FullName) is a link or junction."
     }
+    # Limit: an account that can already write under the user's profile while this runs could
+    # reshape the tree mid-walk, but such an account could equally replace the installed
+    # programs; this protection removes other accounts' access from here on.
     Set-AccessRules $Path "D:PAI(A;OICI;FA;;;$sid)"
     Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object {
         # /L acts on a link itself, never its target, if one appears during the walk.

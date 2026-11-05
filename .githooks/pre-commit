@@ -23,11 +23,11 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 # --- Rule 0a: optional required identity ---
-# A clone that sets keyferry.commitName and keyferry.commitEmail (local git config) refuses
-# commits made under any other identity. Other clones skip this rule.
-_want_name="$(git config --get keyferry.commitName || true)"
-_want_email="$(git config --get keyferry.commitEmail || true)"
-if [ -n "$_want_name$_want_email" ]; then
+# A clone that sets both keyferry.commitName and keyferry.commitEmail in its local git config
+# refuses commits made under any other identity. Other clones skip this rule.
+_want_name="$(git config --local --get keyferry.commitName || true)"
+_want_email="$(git config --local --get keyferry.commitEmail || true)"
+if [ -n "$_want_name" ] && [ -n "$_want_email" ]; then
   _AN="$(git config user.name || true)"
   _AE="$(git config user.email || true)"
   if [ "$_AN" != "$_want_name" ] || [ "$_AE" != "$_want_email" ]; then
