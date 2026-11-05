@@ -122,3 +122,42 @@ CONFIG_MBEDTLS_ECDH_C=y
 CONFIG_MBEDTLS_ECDSA_C=y
 CONFIG_MBEDTLS_CHACHA20_C=y
 CONFIG_MBEDTLS_CHACHAPOLY_C=y
+# keyferryd offers exactly TLS 1.2 ECDHE-ECDSA-ChaCha20-Poly1305 on P-256 with
+# DER certificates, no ALPN, no tickets and records of at most 512 bytes
+# (apps/keyferryd/src/tls.rs), so the device keeps a client-only stack for that.
+# Server name indication stays on: the host picks its certificate by it. CBC,
+# PK write and RSA stay because Wi-Fi (wpa_supplicant) and IDF 6.0.3 need them.
+CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
+# CONFIG_MBEDTLS_TLS_SERVER_AND_CLIENT is not set
+# CONFIG_MBEDTLS_SSL_CACHE_C is not set
+# CONFIG_MBEDTLS_SERVER_SSL_SESSION_TICKETS is not set
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION is not set
+# CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS is not set
+# CONFIG_MBEDTLS_SSL_ALPN is not set
+# CONFIG_MBEDTLS_GCM_C is not set
+# CONFIG_MBEDTLS_CIPHER_MODE_CFB is not set
+# CONFIG_MBEDTLS_CIPHER_MODE_OFB is not set
+# CONFIG_MBEDTLS_CIPHER_MODE_XTS is not set
+# CONFIG_MBEDTLS_SHA512_C is not set
+# CONFIG_MBEDTLS_SHA384_C is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_RSA is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_RSA is not set
+# CONFIG_MBEDTLS_PKCS1_V15 is not set
+# CONFIG_MBEDTLS_X509_RSASSA_PSS_SUPPORT is not set
+# CONFIG_ESP_TLS_USE_DS_PERIPHERAL is not set
+# CONFIG_MBEDTLS_HARDWARE_RSA_DS_PERIPHERAL is not set
+# CONFIG_MBEDTLS_LARGE_KEY_SOFTWARE_MPI is not set
+# CONFIG_MBEDTLS_PEM_PARSE_C is not set
+# CONFIG_MBEDTLS_PEM_WRITE_C is not set
+# CONFIG_MBEDTLS_X509_CRL_PARSE_C is not set
+# CONFIG_MBEDTLS_X509_CSR_PARSE_C is not set
+# CONFIG_MBEDTLS_PKCS5_C is not set
+# CONFIG_MBEDTLS_PKCS7_C is not set
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set
+# CONFIG_MBEDTLS_ECDSA_DETERMINISTIC is not set
+# CONFIG_MBEDTLS_SELF_TEST is not set
+# CONFIG_MBEDTLS_PK_PARSE_EC_COMPRESSED is not set
+# The largest record is 512 bytes and the largest handshake message (the
+# certificate chain) stays under 2 KiB: a 4 KiB input buffer frees 12 KiB of RAM
+# per connection. File handoff keeps 16 KiB (spikes/sdkconfig.file.defaults).
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096

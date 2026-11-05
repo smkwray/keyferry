@@ -1,3 +1,4 @@
 # Keep the 16 KiB RX and 4 KiB TX TLS record limits. Release their buffers
 # between records so an authenticated file can use otherwise idle RAM.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
