@@ -60,7 +60,9 @@
 #include "tinyusb_default_config.h"
 #include "nvs_flash.h"
 
+#include "device/dcd.h"
 #include "provisioning_adapter.h"
+#include "usb_attachment.h"
 
 #ifndef KEYFERRY_HIL_PRIVATE_CONFIG
 #error "first-HIL firmware requires generated private configuration"
@@ -71,6 +73,9 @@ namespace {
 
 using keyferry::hid::BootKeyboardReport;
 using keyferry::hid::PointerReport;
+
+// Bus resets latch here from the USB interrupt; reports go only to the confirmed attachment.
+keyferry::hil::UsbAttachmentLatch g_usb_attachment;
 
 constexpr char kTag[] = "keyferry_hil";
 #if defined(KEYFERRY_BOARD_RGB_STATUS)
@@ -697,7 +702,10 @@ class HilRuntime final : public keyferry::transport::Delegate,
     if (!Lock()) {
       return;
     }
-    if (!usb_mounted_ || usb_transfer_in_flight_ || !hid_.report_needed()) {
+    // A bus reset since the main loop confirmed this attachment closes admission until the
+    // loop has ended the old session; checked under the runtime lock, just before submission.
+    if (!usb_mounted_ || usb_transfer_in_flight_ || !hid_.report_needed() ||
+        !g_usb_attachment.Admits()) {
       Unlock();
       return;
     }
@@ -2391,9 +2399,6 @@ std::atomic_bool g_usb_suspended{false};
 #if defined(KEYFERRY_FILE_HANDOFF)
 std::atomic<std::uint32_t> g_usb_attach_generation{0};
 #endif
-// Counts ATTACHED (configured) events that arrive while already mounted: a host that resets the
-// bus and re-enumerates the device configures it again without a DETACHED event.
-std::atomic<std::uint32_t> g_usb_reattach_count{0};
 std::atomic_bool g_ble_control_usb{false};
 
 struct DeviceConfigContext {
@@ -2481,9 +2486,7 @@ void TinyUsbEventCallback(tinyusb_event_t* event, void*) {
     return;
   }
   if (event->id == TINYUSB_EVENT_ATTACHED) {
-    if (g_usb_mounted.exchange(true, std::memory_order_acq_rel)) {
-      g_usb_reattach_count.fetch_add(1, std::memory_order_acq_rel);
-    }
+    g_usb_mounted.store(true, std::memory_order_release);
     g_usb_suspended.store(false, std::memory_order_release);
 #if defined(KEYFERRY_FILE_HANDOFF)
     g_usb_attach_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -3182,6 +3185,15 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
   return 0;
 }
 
+// Runs for every TinyUSB device event, in interrupt context when the event comes from the
+// controller. A bus reset or unplug ends the attachment before any re-enumeration.
+extern "C" void tud_event_hook_cb(const std::uint8_t, const std::uint32_t event_id,
+                                  const bool) {
+  if (event_id == DCD_EVENT_BUS_RESET || event_id == DCD_EVENT_UNPLUGGED) {
+    g_usb_attachment.BusReset();
+  }
+}
+
 extern "C" void tud_hid_set_report_cb(
     const std::uint8_t instance, const std::uint8_t report_id,
     const hid_report_type_t report_type, const std::uint8_t* buffer,
@@ -3579,7 +3591,7 @@ extern "C" void app_main() {
 #endif
 
   bool was_mounted = false;
-  std::uint32_t seen_reattach_count = 0;
+  std::uint32_t seen_resets = g_usb_attachment.Resets();
 #if defined(KEYFERRY_FILE_HANDOFF)
   bool file_refresh_waiting_for_attach = false;
   bool file_refresh_timed_out = false;
@@ -3627,8 +3639,10 @@ extern "C" void app_main() {
       }
     }
 #endif
-    // TinyUSB's configured state is required: a bus reset clears it at once, although no
-    // DETACHED event follows.
+    // Observe the reset count before the mount state, so a reset that follows is never
+    // credited to the attachment confirmed below. TinyUSB's configured state is required: a
+    // bus reset clears it at once, although no DETACHED event follows.
+    const auto observed_resets = g_usb_attachment.Resets();
 #if defined(KEYFERRY_FILE_HANDOFF)
     const bool mounted = !file_refresh_waiting_for_attach &&
                          !g_usb_suspended.load(std::memory_order_acquire) &&
@@ -3638,19 +3652,20 @@ extern "C" void app_main() {
     const bool mounted =
         !g_usb_suspended.load(std::memory_order_acquire) && tud_mounted();
 #endif
-    const auto reattach_count =
-        g_usb_reattach_count.load(std::memory_order_acquire);
-    if (reattach_count != seen_reattach_count) {
-      seen_reattach_count = reattach_count;
+    if (observed_resets != seen_resets) {
+      seen_resets = observed_resets;
       if (was_mounted) {
-        // Re-enumerated without a detach: end the old attachment's session, pending work
-        // and in-flight transfer before the new one admits input.
+        // Reset (and possibly re-enumerated) without a detach: end the old attachment's
+        // session, pending work and in-flight transfer before the new one admits input.
         runtime.SetUsbMounted(false);
         provisioning_adapter.TransportLost();
         was_mounted = false;
       }
     }
     if (mounted != was_mounted) {
+      if (mounted) {
+        g_usb_attachment.Confirm(observed_resets);
+      }
       runtime.SetUsbMounted(mounted);
       if (!mounted) {
         provisioning_adapter.TransportLost();

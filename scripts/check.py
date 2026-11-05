@@ -228,6 +228,11 @@ def run_cpp_check(compiler: str) -> None:
                 ],
             ),
             (
+                "usb-attachment-test",
+                [ROOT / "firmware/esp32s3/hil_endpoint/main"],
+                [ROOT / "firmware/esp32s3/hil_endpoint/test/usb_attachment_test.cpp"],
+            ),
+            (
                 "output-mode-test",
                 [
                     ROOT / "firmware/esp32s3/components/kf_output_mode/include",
