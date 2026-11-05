@@ -232,9 +232,10 @@ function Protect-OwnerOnly {
     if ($linked.Count -gt 0) {
         throw "Refusing to protect ${Path}: $($linked[0].FullName) is a link or junction."
     }
-    # Limit: an account that can already write under the user's profile while this runs could
-    # reshape the tree mid-walk, but such an account could equally replace the installed
-    # programs; this protection removes other accounts' access from here on.
+    # Limit: this repairs the tree in place by path. An account that can already write under the
+    # user's profile while it runs can replace a directory or ancestor mid-walk, evade the checks
+    # below and keep that ability afterwards; such an account could equally replace the
+    # installed programs. Against every other account, the result is owner-only.
     Set-AccessRules $Path "D:PAI(A;OICI;FA;;;$sid)"
     Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object {
         # /L acts on a link itself, never its target, if one appears during the walk.
@@ -243,8 +244,9 @@ function Protect-OwnerOnly {
             throw "Could not protect $($_.FullName) for the current user."
         }
     }
-    # Final check, after every entry is owner-only: no other principal can add entries from
-    # here on, so a link or junction inserted while the reset ran is still present and fails.
+    # Final check: every entry reached by this walk must be owner-only and not a link or
+    # junction. (It cannot see a replacement made and undone mid-walk by an account outside the
+    # limit above.)
     foreach ($item in @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Refusing to protect ${Path}: $($item.FullName) is a link or junction."

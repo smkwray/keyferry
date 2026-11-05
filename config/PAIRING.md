@@ -1,4 +1,4 @@
-# Private first-HIL pairing bundle
+# Device pairing bundle
 
 The generator writes exactly one device bundle to the Git-ignored `secrets/first-hil/` directory.
 It creates a random device ID and 32-byte link secret, a P-256 host key and self-signed certificate,
@@ -40,10 +40,10 @@ certificate, private key, SPKI, or pin differ, or the firmware and `keyferryd` d
 or link secrets disagree. A successful validation is configuration evidence only; it does not build
 or flash firmware and does not start the daemon.
 
-On Windows the generator removes inherited access from its private directories and grants access to
-the current user SID. POSIX directories and files are created with owner-only permissions.
+On Windows the generator gives its private directories and files a protected access list naming only
+the current user. POSIX directories and files are created with owner-only permissions.
 
-The first-HIL firmware build consumes this bundle without putting credential values in command-line
+The firmware build consumes this bundle without putting credential values in command-line
 arguments, CMake cache entries, source files, or status output:
 
 ```powershell
