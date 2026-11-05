@@ -1031,6 +1031,22 @@ void ResetPanelAndTouch() {
   vTaskDelay(pdMS_TO_TICKS(120));  // reset-to-first-command time for the panel
 }
 
+// The BSP puts LVGL's draw buffer in PSRAM, so the SPI driver allocates an internal DMA bounce
+// buffer for every flush. One internal DMA-capable buffer, claimed once at start, removes that
+// per-flush allocation in every function.
+void UseInternalDrawBuffer(lv_display_t* display) {
+  constexpr std::size_t kBytes =
+      static_cast<std::size_t>(BSP_LCD_H_RES) * CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT * sizeof(std::uint16_t);
+  void* buffer = heap_caps_aligned_alloc(64, kBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (buffer == nullptr) {
+    ESP_LOGW(kTag, "internal draw buffer unavailable; flushes keep the PSRAM bounce path");
+    return;
+  }
+  bsp_display_lock(0);
+  lv_display_set_buffers(display, buffer, nullptr, kBytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+  bsp_display_unlock();
+}
+
 ui::Screen FirstScreen() {
   switch (g_function) {
     case Function::kKeepAwake: return ui::Screen::kKeepAwake;
@@ -1069,10 +1085,12 @@ void StartUi() {
   if (UsbFunction() && !StartUsbExitWorker()) Launch(Function::kHome);  // before any input can start
 
   ResetPanelAndTouch();
-  if (bsp_display_start() == nullptr) {
+  lv_display_t* display = bsp_display_start();
+  if (display == nullptr) {
     ESP_LOGE(kTag, "display start failed");
     return;
   }
+  UseInternalDrawBuffer(display);
   PmuInit();  // key-event latching and measurement only; PWR blanks/wakes in every function
   if (g_function == Function::kKeepAwake && !KeepAwakeStartUsb()) Launch(Function::kHome);
   if (g_function == Function::kMacros && !MacroPadStart()) Launch(Function::kHome);
@@ -1179,3 +1197,13 @@ void RunShellUnlessKeyferry() {
 }
 
 }  // namespace keyferry::handheld
+
+// The Waveshare BSP (2.0.3) registers its CO5300 QSPI panel with lvgl_port_add_disp_rgb, which
+// treats the panel as an RGB panel and writes RGB event callbacks past the end of the CO5300
+// object. In the Keyferry image that write landed on the LVGL display context, so the first flush
+// took the RGB full-frame path and asserted on a missing semaphore: Home restarted in a loop
+// (bench, 2026-11-05). The handheld has no RGB panel, so every such call is the SPI/QSPI case.
+extern "C" lv_display_t* __wrap_lvgl_port_add_disp_rgb(const lvgl_port_display_cfg_t* disp_cfg,
+                                                       const lvgl_port_display_rgb_cfg_t*) {
+  return lvgl_port_add_disp(disp_cfg);
+}

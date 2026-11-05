@@ -19,6 +19,7 @@
 #include "keyferry/file_handoff.h"
 #include "mbedtls/md.h"
 #endif
+#include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"
@@ -3330,7 +3331,9 @@ extern "C" void app_main() {
 #else
   constexpr bool file_handoff_ready = false;
 #endif
-  static DeviceConfigContext config_context;
+  // The two largest bridge objects (~86 KB) live in PSRAM on boards that have it, so the
+  // handheld's Home and display keep internal RAM; elsewhere EXT_RAM_BSS_ATTR is empty.
+  static EXT_RAM_BSS_ATTR DeviceConfigContext config_context;
   keyferry::transport::RuntimeConfig runtime_config{};
   keyferry::config::Selection selection{};
   const auto boot_status =
@@ -3399,7 +3402,7 @@ extern "C" void app_main() {
   if (!provisioning_random_ready) {
     ESP_LOGE(kTag, "provisioning random initialization failed");
   }
-  static keyferry::provisioning::Session provisioning_session(
+  static EXT_RAM_BSS_ATTR keyferry::provisioning::Session provisioning_session(
       provisioning_device_id, provisioning_key, provisioning_generation,
       provisioning_effects,
       keyferry::provisioning::PayloadFormat::kRoamingV2,

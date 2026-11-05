@@ -4,6 +4,8 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+# Keyferry's largest static objects go to PSRAM (EXT_RAM_BSS_ATTR in hil_endpoint app_main).
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 # Handheld shell (ADR 0018): console on the USB-Serial/JTAG port Home keeps; LVGL fonts used by
 # the shell; LVGL allocations through malloc so large ones can live in PSRAM.
@@ -15,6 +17,9 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_20=y
+# LVGL draw buffer: 20 rows (14,720 B), which the shell claims once in internal DMA-capable RAM
+# (UseInternalDrawBuffer in kf_handheld shell.cpp) so no flush allocates a bounce buffer.
+CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=20
 # LVGL: the screens use obj, label, arc, bar, line, button and tileview with the default
 # theme and flex layout (ui.cpp); the rest is left out. Preview renders are unchanged.
 # CONFIG_LV_USE_ANIMIMG is not set
