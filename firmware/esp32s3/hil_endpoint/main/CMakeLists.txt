@@ -67,7 +67,7 @@ if(NOT KEYFERRY_PRIVATE_HEADER)
             --root "${KEYFERRY_WORKSPACE_ROOT}" --output "${KEYFERRY_PRIVATE_CONFIG_DIR}"
         DEPENDS ${KEYFERRY_PAIRING_INPUTS}
         WORKING_DIRECTORY "${KEYFERRY_WORKSPACE_ROOT}"
-        COMMENT "Validating private first-HIL configuration"
+        COMMENT "Validating private firmware configuration"
         VERBATIM
     )
     add_custom_target(keyferry_private_config_refresh

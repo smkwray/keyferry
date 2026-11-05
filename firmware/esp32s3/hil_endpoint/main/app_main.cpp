@@ -2415,7 +2415,6 @@ std::atomic<std::uint32_t> g_usb_attach_generation{0};
 #endif
 std::atomic_bool g_ble_control_usb{false};
 std::atomic_bool g_usb_service_queued{false};
-std::atomic<std::uint32_t> g_usb_service_queued_ms{0};
 
 void SubmitUsbReportOnUsbTask(void*) {
   g_usb_service_queued.store(false, std::memory_order_release);
@@ -2425,15 +2424,11 @@ void SubmitUsbReportOnUsbTask(void*) {
 }
 
 void RequestUsbReportService() {
-  const auto now_ms = static_cast<std::uint32_t>(
-      keyferry::command::IdfHeldKeyWatchdog::NowMs());
-  // One request is outstanding at a time. A request the TinyUSB event queue dropped would
-  // otherwise stall reports, so an old one is issued again; a duplicate is harmless.
-  if (g_usb_service_queued.exchange(true, std::memory_order_acq_rel) &&
-      now_ms - g_usb_service_queued_ms.load(std::memory_order_acquire) < 100U) {
+  // One request is outstanding at a time. A task-context send waits for room in TinyUSB's
+  // event queue rather than dropping the request, so every queued request runs.
+  if (g_usb_service_queued.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
-  g_usb_service_queued_ms.store(now_ms, std::memory_order_release);
   usbd_defer_func(SubmitUsbReportOnUsbTask, nullptr, false);
 }
 
@@ -2522,6 +2517,9 @@ void TinyUsbEventCallback(tinyusb_event_t* event, void*) {
     return;
   }
   if (event->id == TINYUSB_EVENT_ATTACHED) {
+    // Every configuration starts a new attachment: SET_CONFIGURATION with another nonzero
+    // index reopens the endpoints and raises ATTACHED without a DETACHED first.
+    g_usb_attachment.End();
     g_usb_mounted.store(true, std::memory_order_release);
     g_usb_suspended.store(false, std::memory_order_release);
 #if defined(KEYFERRY_FILE_HANDOFF)

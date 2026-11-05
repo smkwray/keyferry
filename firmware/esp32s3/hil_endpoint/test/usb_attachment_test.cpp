@@ -35,11 +35,27 @@ void EndBetweenObservingAndConfirmingStillBlocks() {
   assert(latch.Admits());
 }
 
+void EachNewConfigurationNeedsItsOwnConfirmation() {
+  UsbAttachmentLatch latch;
+  latch.End();  // bus reset
+  latch.End();  // configuration 1
+  latch.Confirm(latch.Ends());
+  assert(latch.Admits());
+  // Configuration 2, then back to 1, without a detach: each reopening ends the attachment.
+  for (int change = 0; change < 2; ++change) {
+    latch.End();
+    assert(!latch.Admits());
+    latch.Confirm(latch.Ends());
+    assert(latch.Admits());
+  }
+}
+
 }  // namespace
 
 int main() {
   ConfirmedAttachmentAdmitsUntilItEnds();
   EndBetweenObservingAndConfirmingStillBlocks();
+  EachNewConfigurationNeedsItsOwnConfirmation();
   std::puts("usb_attachment_test: ok");
   return 0;
 }

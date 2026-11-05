@@ -6,8 +6,9 @@
 namespace keyferry::hil {
 
 // Counts the ends of USB attachments: bus resets and unplugs (reported from the USB interrupt
-// before the host re-enumerates the device) and unconfiguration (SET_CONFIGURATION(0)). TinyUSB
-// configures the device again without telling the main loop the old attachment ended. Input
+// before the host re-enumerates the device), unconfiguration (SET_CONFIGURATION(0)) and every
+// new configuration, since a change between nonzero configurations reopens the endpoints
+// without a detach. TinyUSB does not tell the main loop the old attachment ended. Input
 // reports are admitted only on the attachment the main loop last confirmed: an end counted any
 // time after the loop observed the count blocks submission until the loop has ended the old
 // session and confirmed the new attachment.
