@@ -706,7 +706,7 @@ void AuthenticateStressSession(EndpointSession& session) {
   auto wire = Frame(MessageType::kAuthChallenge, 0, challenge);
   assert(session.ConsumeTls(wire.data(), wire.size()));
   std::vector<std::uint8_t> ready(34, 0);
-  std::fill_n(ready.begin(), 16, 1);
+  std::fill_n(ready.begin(), 16, std::uint8_t{1});
   ready[16] = keyferry::protocol::kMajor; ready[17] = keyferry::protocol::kMinor;
   WriteLe32(ready.data() + 18, 1); WriteLe32(ready.data() + 22, 45000);
   WriteLe32(ready.data() + 26, 10000); WriteLe32(ready.data() + 30, 500);

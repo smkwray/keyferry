@@ -4,12 +4,18 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
 namespace file = keyferry::file_handoff;
+
+// Test sizes stay far below 4 GiB; the explicit narrowing keeps MSVC /W4 /WX quiet.
+std::uint32_t U32(std::size_t value) {
+  assert(value <= UINT32_MAX);
+  return static_cast<std::uint32_t>(value);
+}
 
 bool TestDigest(const std::uint8_t* data, std::size_t length,
                 std::uint8_t output[32], void* context) {
@@ -151,7 +157,7 @@ void TestFailurePaths() {
   auto digest = Digest(data);
   file::Volume too_small(storage.data(), storage.size() - 1, TestDigest,
                          &digest_fails);
-  assert(too_small.Begin(storage.size(), digest.data()) == file::Error::kMemory);
+  assert(too_small.Begin(U32(storage.size()), digest.data()) == file::Error::kMemory);
   assert(too_small.Begin(1, digest.data()) == file::Error::kOk);
   too_small.Clear();
   assert(volume.Begin(file::kMaximumFileBytes + 1, digest.data()) == file::Error::kLimit);
@@ -227,10 +233,10 @@ void TestSetManifestRejections() {
            "bad~name", "", std::string(65, 'z')}) {
     const auto bundle = Bundle({{name, {0xA5}}});
     const auto digest = Digest(bundle);
-    assert(volume.BeginSet(bundle.size(), digest.data()) == file::Error::kOk);
+    assert(volume.BeginSet(U32(bundle.size()), digest.data()) == file::Error::kOk);
     for (std::size_t at = 0; at < bundle.size();) {
       const auto n = std::min<std::size_t>(200, bundle.size() - at);
-      assert(volume.Chunk(at, bundle.data() + at, n) == file::Error::kOk);
+      assert(volume.Chunk(U32(at), bundle.data() + at, n) == file::Error::kOk);
       at += n;
     }
     assert(volume.CommitSet() == file::Error::kLimit);
@@ -246,10 +252,10 @@ void TestSetManifestRejections() {
                                                       file::kMaximumFileBytes + 1)}}}) {
     const auto bundle = Bundle(files);
     const auto digest = Digest(bundle);
-    assert(volume.BeginSet(bundle.size(), digest.data()) == file::Error::kOk);
+    assert(volume.BeginSet(U32(bundle.size()), digest.data()) == file::Error::kOk);
     for (std::size_t at = 0; at < bundle.size();) {
       const auto n = std::min<std::size_t>(200, bundle.size() - at);
-      assert(volume.Chunk(at, bundle.data() + at, n) == file::Error::kOk);
+      assert(volume.Chunk(U32(at), bundle.data() + at, n) == file::Error::kOk);
       at += n;
     }
     assert(volume.CommitSet() == file::Error::kLimit);
@@ -257,13 +263,13 @@ void TestSetManifestRejections() {
   auto truncated = Bundle({{"good.txt", {1, 2}}});
   truncated.pop_back();
   const auto truncated_digest = Digest(truncated);
-  assert(volume.BeginSet(truncated.size(), truncated_digest.data()) == file::Error::kOk);
+  assert(volume.BeginSet(U32(truncated.size()), truncated_digest.data()) == file::Error::kOk);
   assert(volume.Chunk(0, truncated.data(), truncated.size()) == file::Error::kOk);
   assert(volume.CommitSet() == file::Error::kLimit);
   const auto good = Bundle({{"config.yaml", {}}, {"note.txt", {1, 2}}});
   auto wrong_digest = Digest(good);
   wrong_digest[0] ^= 1;
-  assert(volume.BeginSet(good.size(), wrong_digest.data()) == file::Error::kOk);
+  assert(volume.BeginSet(U32(good.size()), wrong_digest.data()) == file::Error::kOk);
   assert(volume.Chunk(0, good.data(), good.size()) == file::Error::kOk);
   assert(volume.CommitSet() == file::Error::kDigest);
   UploadSet(volume, good);
@@ -274,7 +280,7 @@ void TestSetManifestRejections() {
   assert(volume.Ready());
   const std::vector<std::uint8_t> legacy{9, 8, 7};
   const auto legacy_digest = Digest(legacy);
-  assert(volume.Begin(legacy.size(), legacy_digest.data()) == file::Error::kOk);
+  assert(volume.Begin(U32(legacy.size()), legacy_digest.data()) == file::Error::kOk);
   assert(volume.Chunk(0, legacy.data(), legacy.size()) == file::Error::kOk);
   assert(volume.Commit() == file::Error::kOk);
   const auto v2_view = volume.SetStatus(0);
@@ -398,17 +404,18 @@ void TestSetFilesystem(const char* bundle_path, const char* image_path) {
       assert(std::all_of(data + length, data + 512,
                          [](auto value) { return value == 0; }));
     }
-    next_cluster += clusters;
+    next_cluster += U32(clusters);
     root_at += lfn_count + 1;
   }
   assert(next_cluster == file::kDataSectors + 2);
   assert(root_at <= file::kRootEntries);
   auto save = [](const char* path, const std::vector<std::uint8_t>& bytes) {
     if (path == nullptr) return;
-    FILE* output = std::fopen(path, "wb");
-    assert(output != nullptr);
-    assert(std::fwrite(bytes.data(), 1, bytes.size(), output) == bytes.size());
-    assert(std::fclose(output) == 0);
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    assert(!output.fail());
   };
   save(bundle_path, bundle);
   save(image_path, image);

@@ -665,7 +665,7 @@ void Extended_click_bytes_preserve_position_and_separate_edges() {
     // The MCP click path is ABSOLUTE followed by one or two existing MOUSE_CLICK records.
     for (std::uint8_t button = 1; button <= 3; ++button) {
         for (int clicks = 1; clicks <= 2; ++clicks) {
-            for (const std::uint16_t hold : {10, 40}) {
+            for (const std::uint16_t hold : std::initializer_list<std::uint16_t>{10, 40}) {
                 keyferry::hid::ExecutorState hid;
                 Results results; Watchdog watchdog;
                 CommandExecutor executor(hid, results, watchdog, kProfileHash);
@@ -726,7 +726,7 @@ void Extended_click_bytes_preserve_position_and_separate_edges() {
 }
 
 void Extended_drag_bytes_keep_buttons_with_absolute_coordinates() {
-    for (const std::uint8_t hold : {10, 40}) {
+    for (const std::uint8_t hold : std::initializer_list<std::uint8_t>{10, 40}) {
         keyferry::hid::ExecutorState hid;
         Results results; Watchdog watchdog;
         CommandExecutor executor(hid, results, watchdog, kProfileHash);
