@@ -310,6 +310,20 @@ fn failure(code: &str) -> Value {
         _ => code,
     }})
 }
+/// The presumed pointer position after a pointer command that may have started: its end point
+/// once emitted; unknown when it may have stopped short, so the next pointer input requires an
+/// observed cursor rather than starting from a place the cursor never reached.
+fn pointer_after_started(
+    previous: Option<[f64; 2]>,
+    emitted: bool,
+    end: Option<[f64; 2]>,
+) -> Option<[f64; 2]> {
+    if emitted {
+        end.or(previous)
+    } else {
+        None
+    }
+}
 /// Calibrate's optional observed cursor tip in screenshot pixels: both coordinates or neither.
 fn observed_cursor(args: &Value) -> Result<Option<[f64; 2]>, Value> {
     match (args["cursor_x"].as_f64(), args["cursor_y"].as_f64()) {
@@ -862,9 +876,10 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         }
         Ok(result)
     }
-    /// Submit input ending with the pointer at `end`. A command that may have started presumes
-    /// `end` (an interrupted glide stops on the segment toward it); one that cannot have
-    /// started leaves the presumed position unchanged.
+    /// Submit input ending with the pointer at `end`. An emitted command presumes `end`. A pointer
+    /// command that may have started without completing leaves the position unknown (an
+    /// interrupted glide stops somewhere short of `end`), so further pointer input waits for an
+    /// observed cursor. One that cannot have started leaves the presumed position unchanged.
     fn submit_tracked(
         &mut self,
         actions: Vec<Value>,
@@ -881,9 +896,7 @@ impl<F: FrameSource, O: Ocr> Server<F, O> {
         };
         if pointer && started {
             self.fresh_screenshot = false;
-        }
-        if let Some(end) = end.filter(|_| pointer && started) {
-            self.pointer = Some(end);
+            self.pointer = pointer_after_started(self.pointer, result.is_ok(), end);
         }
         result
     }

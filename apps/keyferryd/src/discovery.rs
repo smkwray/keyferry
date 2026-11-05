@@ -540,12 +540,12 @@ mod tests {
     #[test]
     fn two_address_interface_order_and_duplicates_do_not_change_registry() {
         let first = BeaconPlan::new(
-            "192.168.30.126".parse().unwrap(),
+            "192.168.1.126".parse().unwrap(),
             "255.255.255.0".parse().unwrap(),
         )
         .unwrap();
         let second = BeaconPlan::new(
-            "192.168.30.145".parse().unwrap(),
+            "192.168.1.145".parse().unwrap(),
             "255.255.255.0".parse().unwrap(),
         )
         .unwrap();
@@ -559,15 +559,15 @@ mod tests {
     #[test]
     fn plan_uses_exact_interface_and_directed_broadcast() {
         let plan = BeaconPlan::new(
-            "192.168.30.137".parse().unwrap(),
+            "192.168.1.137".parse().unwrap(),
             "255.255.255.0".parse().unwrap(),
         )
         .expect("valid plan");
-        assert_eq!(plan.bind_address(), "192.168.30.137:0".parse().unwrap());
-        assert_eq!(plan.destination(), "192.168.30.255:43917".parse().unwrap());
+        assert_eq!(plan.bind_address(), "192.168.1.137:0".parse().unwrap());
+        assert_eq!(plan.destination(), "192.168.1.255:43917".parse().unwrap());
         assert_eq!(
             plan.listener_address(),
-            "192.168.30.137:7443".parse().unwrap()
+            "192.168.1.137:7443".parse().unwrap()
         );
     }
 
@@ -698,11 +698,11 @@ mod tests {
             ("0.0.0.0", "255.255.255.0"),
             ("127.0.0.1", "255.255.255.0"),
             ("224.0.0.1", "255.255.255.0"),
-            ("192.168.30.0", "255.255.255.0"),
-            ("192.168.30.255", "255.255.255.0"),
-            ("192.168.30.137", "0.0.0.0"),
-            ("192.168.30.137", "255.255.255.255"),
-            ("192.168.30.137", "255.0.255.0"),
+            ("192.168.1.0", "255.255.255.0"),
+            ("192.168.1.255", "255.255.255.0"),
+            ("192.168.1.137", "0.0.0.0"),
+            ("192.168.1.137", "255.255.255.255"),
+            ("192.168.1.137", "255.0.255.0"),
         ] {
             assert!(BeaconPlan::new(address.parse().unwrap(), mask.parse().unwrap()).is_err());
         }

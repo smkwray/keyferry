@@ -405,8 +405,26 @@ impl Forwarder {
         (sources, errors)
     }
 
-    pub(crate) async fn capture_prove_device(self: &Arc<Self>, device: &str) -> bool {
-        matches!(self.prove_holder(device).await, Proven::Route(_))
+    /// Whether `caller` may read frames of `device` that this controller captures while another
+    /// controller holds the stick. This controller first proves the actual holder under its own
+    /// secret; the caller qualifies as that holder or by holding its own fresh route there.
+    pub(crate) async fn capture_authorize_caller(
+        self: &Arc<Self>,
+        device: &str,
+        caller: [u8; 16],
+    ) -> bool {
+        let Proven::Route(route) = self.prove_holder(device).await else {
+            return false;
+        };
+        if route.installation_id == caller {
+            return true;
+        }
+        let path = format!("/v2/devices/{device}/route-leases/{}", encode_hex(&caller));
+        matches!(
+            self.exchange(&route, "GET", &path, None, CONTROL_TIMEOUT)
+                .await,
+            OwnerExchange::Response { status: 200, .. }
+        )
     }
 
     pub(crate) async fn capture_frame(
@@ -427,12 +445,13 @@ impl Forwarder {
             return ApiError::unavailable("capture.peer_offline_or_select_source").into_response();
         };
         // Reprove the eyes peer if it holds the device. If eyes and hands differ, prove the
-        // actual holder; the eyes daemon independently reproves its grant on every frame read.
+        // actual holder: that leaves this controller's fresh route there, which the eyes daemon
+        // checks with the holder on every frame read.
         if !matches!(
             self.verify_route(&route, &request.device).await,
             RouteCheck::Verified
         ) && !daemon.local_link_authenticated(&request.device)
-            && !self.capture_prove_device(&request.device).await
+            && !matches!(self.prove_holder(&request.device).await, Proven::Route(_))
         {
             return ApiError::unavailable("capture.peer_offline_or_fresh_proof_failed")
                 .into_response();
@@ -2581,14 +2600,15 @@ mod tests {
         holder
             .configure_owner_remote_installation(&installation)
             .unwrap();
-        let listener = crate::OwnerTlsListener {
-            control_port: listener.local_addr().unwrap().port(),
+        let control_port = listener.local_addr().unwrap().port();
+        let listener = crate::OwnerTlsListener::new(
             listener,
-            acceptor: installation
+            installation
                 .remote_tls_acceptor()
                 .map_err(|error| error.to_string())
                 .unwrap(),
-        };
+            control_port,
+        );
         let record = axum::middleware::from_fn(move |request: Request, next: Next| {
             let received = Arc::clone(&received);
             async move {
@@ -4057,6 +4077,20 @@ mod tests {
             response,
             OwnerExchange::Response { status: 401, .. }
         ));
+        // The owner-mTLS router never mounts the loopback capture routes, whose local bearer
+        // would otherwise serve frames without device proof.
+        for (method, local_path, local_body) in [
+            ("POST", "/v1/capture/frame", Some(body.as_slice())),
+            ("GET", "/v1/capture/sources", None),
+        ] {
+            let response = forwarder
+                .exchange(&route, method, local_path, local_body, CONTROL_TIMEOUT)
+                .await;
+            assert!(
+                matches!(response, OwnerExchange::Response { status: 404, .. }),
+                "{local_path}"
+            );
+        }
         // Plain HTTP cannot reach the owner-mTLS router, even with the holder's loopback bearer.
         let mut tcp = TcpStream::connect(route.control).await.unwrap();
         tcp.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer holder-token-123456\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
@@ -4115,7 +4149,7 @@ mod tests {
         eyes_forwarder.state().holders.insert(
             device_id(),
             Holder {
-                route: holder_route,
+                route: holder_route.clone(),
                 view,
                 view_at: Instant::now(),
                 verified_at: Instant::now(),
@@ -4136,11 +4170,10 @@ mod tests {
             eyes_store,
         ));
         let caller = h.forwarder.forwarder().unwrap();
-        caller
-            .captures
-            .lock()
-            .unwrap()
-            .insert("eyes:fake-hdmi".into(), (route, "local:fake-hdmi".into()));
+        caller.captures.lock().unwrap().insert(
+            "eyes:fake-hdmi".into(),
+            (route.clone(), "local:fake-hdmi".into()),
+        );
         let (status, frame) = call(
             &h.forwarder,
             "POST",
@@ -4152,7 +4185,97 @@ mod tests {
         assert!(eyes.metadata().is_empty());
         assert!(!eyes.local_link_authenticated(&device_id()));
         assert!(!h.holder_device.is_remotely_armed());
+
+        // A direct request from a caller without its own fresh route at the holder is refused,
+        // although the eyes controller can still prove the holder for itself.
+        let caller_id = caller.installation_id;
+        h.holder
+            .0
+            .owner_routes
+            .lock()
+            .unwrap()
+            .retain(|(_, installation), _| *installation != caller_id);
+        let body = serde_json::to_vec(&frame_request("local:fake-hdmi")).unwrap();
+        let path = format!("/v1/devices/{}/capture/frame", device_id());
+        time::sleep(Duration::from_millis(110)).await;
+        let response = caller
+            .exchange(&route, "POST", &path, Some(&body), CONTROL_TIMEOUT)
+            .await;
+        assert!(matches!(
+            response,
+            OwnerExchange::Response { status: 401, .. }
+        ));
+        // The caller's own fresh proof through the holder admits it again.
+        assert!(matches!(
+            caller.verify_route(&holder_route, &device_id()).await,
+            RouteCheck::Verified
+        ));
+        time::sleep(Duration::from_millis(110)).await;
+        let response = caller
+            .exchange(&route, "POST", &path, Some(&body), CONTROL_TIMEOUT)
+            .await;
+        assert!(matches!(
+            response,
+            OwnerExchange::Response { status: 200, .. }
+        ));
     }
+
+    #[tokio::test]
+    async fn silent_connections_never_delay_owner_mtls_admission() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        let _ = call(&h.forwarder, "GET", "/v1/devices", None).await;
+        let forwarder = h.forwarder.forwarder().unwrap();
+        let route = forwarder.fresh_route(&device_id()).unwrap();
+        // Connections that never begin a TLS handshake each hold only their own pending slot.
+        let mut silent = Vec::new();
+        for _ in 0..3 {
+            silent.push(TcpStream::connect(route.control).await.unwrap());
+        }
+        time::sleep(Duration::from_millis(100)).await;
+        let started = Instant::now();
+        assert!(forwarder.fetch_view(&route, &device_id()).await.is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(silent);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_owner_listener_ends_pending_handshakes_and_frees_its_port() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        let store = InstallationTlsSecretSet::load(h.root.join("holder"))
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut owner = crate::OwnerTlsListener::new(
+            listener,
+            store.remote_tls_acceptor().unwrap(),
+            address.port(),
+        );
+        let mut silent = TcpStream::connect(address).await.unwrap();
+        // accept() takes the connection into a pending handshake that never completes.
+        let pending = time::timeout(
+            Duration::from_millis(300),
+            axum::serve::Listener::accept(&mut owner),
+        )
+        .await;
+        assert!(pending.is_err());
+        assert_eq!(owner.handshakes.len(), 1);
+        drop(owner);
+        let mut byte = [0_u8; 1];
+        let closed = time::timeout(Duration::from_secs(2), silent.read(&mut byte))
+            .await
+            .expect("the pending handshake ends with its listener");
+        assert!(matches!(closed, Ok(0) | Err(_)));
+        drop(TcpListener::bind(address).await.unwrap());
+    }
+
     #[tokio::test]
     async fn oversized_frame_response_is_refused_by_the_real_owner_mtls_transport() {
         let h = harness(None, FORWARDER_SECRET).await;
@@ -4166,11 +4289,11 @@ mod tests {
             .clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let listener = crate::OwnerTlsListener {
-            control_port: address.port(),
+        let listener = crate::OwnerTlsListener::new(
             listener,
-            acceptor: store.remote_tls_acceptor().unwrap(),
-        };
+            store.remote_tls_acceptor().unwrap(),
+            address.port(),
+        );
         let app = h
             .holder
             .owner_remote_router()

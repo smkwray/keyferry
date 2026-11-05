@@ -367,6 +367,7 @@ async fn local_sources(
     State(daemon): State<Daemon>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    require_loopback_channel(&headers)?;
     authorize(&headers, &daemon)?;
     let mut result = list_sources(&daemon).await?;
     if let Some(forwarder) = daemon.forwarder() {
@@ -398,6 +399,15 @@ fn require_owner_channel(headers: &HeaderMap) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The loopback capture routes serve this controller's own clients. The owner-mTLS router never
+/// mounts them; a verified remote identity reaching one anyway is refused.
+fn require_loopback_channel(headers: &HeaderMap) -> Result<(), ApiError> {
+    if headers.contains_key(VERIFIED_OWNER_CALLER_HEADER) {
+        return Err(ApiError::auth("capture.loopback_only"));
+    }
+    Ok(())
+}
+
 fn admit(daemon: &Daemon, request: &FrameRequest) -> Result<Admission, ApiError> {
     daemon
         .0
@@ -411,6 +421,7 @@ async fn local_frame(
     headers: HeaderMap,
     Json(request): Json<FrameRequest>,
 ) -> Result<Response, ApiError> {
+    require_loopback_channel(&headers)?;
     authorize(&headers, &daemon)?;
     let admission = admit(&daemon, &request)?;
     let timeout = request.timeout().map_err(ApiError::bad_request)?;
@@ -443,12 +454,17 @@ async fn peer_frame(
     if daemon.local_link_authenticated(&id) {
         authorize_owner_mutation(&headers, &daemon, &id)?;
     } else {
-        // Eyes need not hold hands. Reprove our own authorized device through its actual holder;
-        // this does not forward the frame request, input, or caller credentials.
+        // Eyes need not hold hands. The actual holder must vouch for the caller's own fresh route
+        // proof; this forwards neither the frame request, input, nor any caller credential.
+        let caller = headers
+            .get(VERIFIED_OWNER_CALLER_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| ApiError::auth("capture.owner_mtls_required"))
+            .and_then(|value| parse_fixed_lower_hex::<16>(value, "owner caller identity"))?;
         let forwarder = daemon
             .forwarder()
             .ok_or_else(|| ApiError::unavailable("capture.device_unavailable"))?;
-        if !forwarder.capture_prove_device(&id).await {
+        if !forwarder.capture_authorize_caller(&id, caller).await {
             return Err(ApiError::auth("capture.fresh_proof_required"));
         }
     }

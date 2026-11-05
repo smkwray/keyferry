@@ -746,6 +746,17 @@ fn input_rejections_and_unknown_keys_have_actionable_messages() {
 }
 
 #[test]
+fn an_unfinished_pointer_command_forgets_the_presumed_position() {
+    let start = Some([0.2, 0.2]);
+    let end = Some([0.8, 0.6]);
+    assert_eq!(pointer_after_started(start, true, end), end);
+    assert_eq!(pointer_after_started(start, true, None), start);
+    // A glide that may have stopped anywhere short of its end leaves the cursor unknown.
+    assert_eq!(pointer_after_started(start, false, end), None);
+    assert_eq!(pointer_after_started(start, false, None), None);
+}
+
+#[test]
 fn cursor_seed_is_paired_and_unknown_position_is_actionable() {
     assert_eq!(observed_cursor(&json!({})).unwrap(), None);
     assert_eq!(

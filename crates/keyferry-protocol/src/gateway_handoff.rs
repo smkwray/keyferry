@@ -341,7 +341,7 @@ mod tests {
             target_installation_id: [0x22; 16],
             readiness_nonce: [0x33; 16],
             proof_digest: [0x44; 32],
-            target_ipv4: [192, 168, 30, 120],
+            target_ipv4: [192, 168, 1, 120],
             target_port: roaming::DEVICE_TLS_PORT,
             target_valid_ms: roaming::GATEWAY_HANDOFF_TARGET_VALID_MS as u32,
             recovery_ms: roaming::GATEWAY_HANDOFF_RECOVERY_MS as u32,

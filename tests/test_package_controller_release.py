@@ -193,7 +193,12 @@ class ControllerReleaseTests(unittest.TestCase):
         self.assertIn("Get-NetIPAddress -InterfaceAlias $name", windows)
         self.assertIn("-LocalPort 7443", windows)
         self.assertIn("Get-AccountSid $task.Principal.UserId", windows)
-        self.assertIn("$programAccessSddlBefore", windows)
+        # Owner-only roots are set as a whole protected DACL, never relaxed by rollback, and
+        # refuse links or junctions that would escape the reset.
+        self.assertIn('Set-AccessRules $Path "D:PAI(A;OICI;FA;;;$sid)"', windows)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", windows)
+        self.assertNotIn("AccessSddlBefore", windows)
+        self.assertNotIn("/inheritance:r", windows)
         self.assertIn("[IO.FileSystemAclExtensions]::SetAccessControl", windows)
         self.assertNotIn("Set-Acl", windows)
         self.assertIn("$_.LocalPort -eq 18043 -or $_.LocalPort -eq 18044", windows)

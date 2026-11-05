@@ -3056,7 +3056,7 @@ mod tests {
             terminal: false,
             target_installation_id: "44".repeat(16),
             previous_installation_id: "33".repeat(16),
-            target_ipv4: Some("192.168.30.50".to_owned()),
+            target_ipv4: Some("192.168.1.50".to_owned()),
             target_port: Some(keyferry_protocol::roaming::DEVICE_TLS_PORT),
             target_control_port: Some(keyferry_gateway::OWNER_GATEWAY_CONTROL_PORT),
             readiness_nonce: Some("55".repeat(16)),

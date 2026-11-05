@@ -2463,7 +2463,8 @@ fn write_new_owner_only(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
 
 fn write_replace_private(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
     if fs::read(path).ok().as_deref() == Some(bytes) {
-        return Ok(());
+        // Unchanged content still gets the owner-only permissions an earlier writer may lack.
+        return restrict_existing_private_file(path);
     }
     let temporary = path.with_extension("tmp");
     let backup = path.with_extension("bak");
@@ -2520,6 +2521,18 @@ fn replace_private_file_durable(source: &Path, destination: &Path) -> Result<(),
         .map_err(|_| "could not durably replace private file")
 }
 
+fn restrict_existing_private_file(path: &Path) -> Result<(), &'static str> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| "could not restrict private pairing file")?;
+    }
+    #[cfg(windows)]
+    restrict_windows_file_acl(path)?;
+    Ok(())
+}
+
 fn create_private_dir(path: &Path) -> Result<(), &'static str> {
     fs::create_dir_all(path).map_err(|_| "could not create private pairing directory")?;
     #[cfg(unix)]
@@ -2535,32 +2548,79 @@ fn create_private_dir(path: &Path) -> Result<(), &'static str> {
 
 #[cfg(windows)]
 fn restrict_windows_acl(path: &Path) -> Result<(), &'static str> {
-    let sid = current_windows_sid()?;
-    let grant = format!("*{sid}:(OI)(CI)F");
-    let status = keyferry_core::process::command("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r", &grant, "/q"])
-        .output()
-        .map_err(|_| "could not restrict the private Windows directory")?;
-    if !status.status.success() {
-        return Err("could not restrict the private Windows directory");
-    }
-    Ok(())
+    set_owner_only_dacl(path, "OICI")
+        .map_err(|()| "could not restrict the private Windows directory")
 }
 
 #[cfg(windows)]
 fn restrict_windows_file_acl(path: &Path) -> Result<(), &'static str> {
-    let sid = current_windows_sid()?;
-    let grant = format!("*{sid}:F");
-    let status = keyferry_core::process::command("icacls")
-        .arg(path)
-        .args(["/inheritance:r", "/grant:r", &grant, "/q"])
-        .output()
-        .map_err(|_| "could not restrict the private Windows file")?;
-    if !status.status.success() {
-        return Err("could not restrict the private Windows file");
+    set_owner_only_dacl(path, "").map_err(|()| "could not restrict the private Windows file")
+}
+
+/// Replaces the whole DACL with one protected entry granting the current user full control.
+/// Every other entry, explicit or inherited, is removed; `icacls /grant:r` would keep other
+/// principals' explicit entries.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn set_owner_only_dacl(path: &Path, inheritance: &str) -> Result<(), ()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
+        SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    let sid = current_windows_sid().map_err(|_| ())?;
+    let sddl: Vec<u16> = format!("D:P(A;{inheritance};FA;;;{sid})")
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: both strings are NUL-terminated UTF-16; the descriptor is freed below.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(());
     }
-    Ok(())
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `descriptor` is valid until LocalFree; `dacl` points into it.
+    let status = unsafe {
+        if GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0
+            || present == 0
+            || dacl.is_null()
+        {
+            None
+        } else {
+            Some(SetNamedSecurityInfoW(
+                target.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            ))
+        }
+    };
+    // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(descriptor) };
+    match status {
+        Some(ERROR_SUCCESS) => Ok(()),
+        _ => Err(()),
+    }
 }
 
 #[cfg(windows)]
@@ -2663,6 +2723,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The path's DACL in SDDL, as `icacls /save` records it.
+    #[cfg(windows)]
+    fn saved_dacl(path: &Path) -> String {
+        let saved = path.with_extension("acl");
+        let status = keyferry_core::process::command("icacls")
+            .arg(path)
+            .arg("/save")
+            .arg(&saved)
+            .arg("/q")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&saved).unwrap();
+        fs::remove_file(&saved).unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_drops_other_principals_explicit_entries() {
+        let root = TestRoot::new();
+        fs::create_dir_all(&root.0).unwrap();
+        // An explicit, inheritable Everyone grant, which `icacls /grant:r` would keep.
+        let granted = keyferry_core::process::command("icacls")
+            .arg(&root.0)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)R", "/q"])
+            .status()
+            .unwrap();
+        assert!(granted.success());
+        assert!(saved_dacl(&root.0).contains(";WD)"));
+        // A previously materialized file with the same content and its own explicit grant.
+        let unchanged = root.0.join("unchanged.h");
+        fs::write(&unchanged, b"unchanged").unwrap();
+        let granted = keyferry_core::process::command("icacls")
+            .arg(&unchanged)
+            .args(["/grant", "*S-1-1-0:R", "/q"])
+            .status()
+            .unwrap();
+        assert!(granted.success());
+        create_private_dir(&root.0).unwrap();
+        write_replace_private(&unchanged, b"unchanged").unwrap();
+        let secret = root.0.join("secret.h");
+        write_new_private(&secret, b"secret").unwrap();
+        let sid = current_windows_sid().unwrap();
+        for path in [&root.0, &secret, &unchanged] {
+            let dacl = saved_dacl(path);
+            assert!(dacl.contains(&format!(";FA;;;{sid})")), "{dacl}");
+            assert_eq!(dacl.matches("(A;").count(), 1, "{dacl}");
+        }
+        assert!(saved_dacl(&root.0).contains("D:P"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ use std::{
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::{self, Read, Write},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2093,10 +2093,85 @@ struct RemoteTlsPeer {
     control_port: u16,
 }
 
+/// Owner-mTLS handshakes run concurrently, so a connection that never completes one cannot delay
+/// another caller. Pending handshakes are bounded in total and per remote address; excess
+/// connections are closed at once rather than queued.
+const OWNER_TLS_PENDING_HANDSHAKES: usize = 32;
+const OWNER_TLS_PENDING_PER_ADDRESS: usize = 4;
+const OWNER_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+type OwnerTlsConnection = (ServerTlsStream<tokio::net::TcpStream>, RemoteTlsPeer);
+
+/// Owns the listening socket and every pending handshake: dropping it closes the port at once
+/// and aborts the handshakes (a `JoinSet` aborts its tasks when dropped).
 struct OwnerTlsListener {
     listener: TcpListener,
     acceptor: TlsAcceptor,
     control_port: u16,
+    handshakes: tokio::task::JoinSet<Option<OwnerTlsConnection>>,
+    pending_addresses: HashMap<tokio::task::Id, IpAddr>,
+    pending_per_address: HashMap<IpAddr, usize>,
+}
+
+impl OwnerTlsListener {
+    fn new(listener: TcpListener, acceptor: TlsAcceptor, control_port: u16) -> Self {
+        Self {
+            listener,
+            acceptor,
+            control_port,
+            handshakes: tokio::task::JoinSet::new(),
+            pending_addresses: HashMap::new(),
+            pending_per_address: HashMap::new(),
+        }
+    }
+
+    /// Starts a bounded handshake for an accepted TCP connection; excess ones are closed.
+    fn start_handshake(&mut self, stream: tokio::net::TcpStream, address: SocketAddr) {
+        let from_address = self.pending_per_address.entry(address.ip()).or_insert(0);
+        if self.handshakes.len() >= OWNER_TLS_PENDING_HANDSHAKES
+            || *from_address >= OWNER_TLS_PENDING_PER_ADDRESS
+        {
+            return;
+        }
+        *from_address += 1;
+        let acceptor = self.acceptor.clone();
+        let control_port = self.control_port;
+        let handle = self.handshakes.spawn(async move {
+            let stream = time::timeout(OWNER_TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+                .await
+                .ok()?
+                .ok()?;
+            let installation_id = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .and_then(|certificate| {
+                    tls::installation_id_from_peer_certificate(certificate.as_ref()).ok()
+                })?;
+            Some((
+                stream,
+                RemoteTlsPeer {
+                    installation_id,
+                    address,
+                    control_port,
+                },
+            ))
+        });
+        self.pending_addresses.insert(handle.id(), address.ip());
+    }
+
+    fn finish_handshake(&mut self, id: tokio::task::Id) {
+        let Some(address) = self.pending_addresses.remove(&id) else {
+            return;
+        };
+        if let Some(count) = self.pending_per_address.get_mut(&address) {
+            *count -= 1;
+            if *count == 0 {
+                self.pending_per_address.remove(&address);
+            }
+        }
+    }
 }
 
 impl Listener for OwnerTlsListener {
@@ -2104,37 +2179,28 @@ impl Listener for OwnerTlsListener {
     type Addr = RemoteTlsPeer;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // Both branches are cancel-safe: an interrupted accept leaves every pending handshake
+        // in the set for the next call.
         loop {
-            let Ok((stream, socket_addr)) = self.listener.accept().await else {
-                time::sleep(Duration::from_millis(100)).await;
-                continue;
-            };
-            let Ok(Ok(stream)) =
-                time::timeout(Duration::from_secs(10), self.acceptor.accept(stream)).await
-            else {
-                continue;
-            };
-            let Some(peer_certificate) = stream
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|certificates| certificates.first())
-            else {
-                continue;
-            };
-            let Ok(installation_id) =
-                tls::installation_id_from_peer_certificate(peer_certificate.as_ref())
-            else {
-                continue;
-            };
-            return (
-                stream,
-                RemoteTlsPeer {
-                    installation_id,
-                    address: socket_addr,
-                    control_port: self.control_port,
+            tokio::select! {
+                accepted = self.listener.accept() => match accepted {
+                    Ok((stream, address)) => self.start_handshake(stream, address),
+                    Err(_) => time::sleep(Duration::from_millis(100)).await,
                 },
-            );
+                Some(joined) = self.handshakes.join_next_with_id(),
+                    if !self.handshakes.is_empty() =>
+                {
+                    match joined {
+                        Ok((id, connection)) => {
+                            self.finish_handshake(id);
+                            if let Some(connection) = connection {
+                                return connection;
+                            }
+                        }
+                        Err(error) => self.finish_handshake(error.id()),
+                    }
+                }
+            }
         }
     }
 
@@ -2571,10 +2637,15 @@ impl Daemon {
         let middleware_state = OwnerRemoteMiddlewareState {
             local_token: self.token().to_owned(),
         };
+        // The loopback capture routes are never mounted here: remote frames use the per-device
+        // routes, which require fresh device proof.
         Self::base_routes()
-            .merge(capture::local_routes())
             .merge(capture::peer_routes())
             .route("/v2/devices/{id}/route-proof", get(route_proof))
+            .route(
+                "/v2/devices/{id}/route-leases/{installation}",
+                get(route_lease),
+            )
             .route(
                 "/v2/devices/{id}/gateway/handoffs",
                 post(start_gateway_handoff),
@@ -5153,11 +5224,7 @@ async fn serve_owner_mtls_listener(
         daemon: Arc::downgrade(&daemon.0),
         generation,
     };
-    let listener = OwnerTlsListener {
-        listener,
-        acceptor,
-        control_port: bound_address.port(),
-    };
+    let listener = OwnerTlsListener::new(listener, acceptor, bound_address.port());
     axum::serve(
         listener,
         daemon
@@ -5464,6 +5531,20 @@ async fn route_proof(
     Ok(Json(RouteProofResponse {
         proof: encode_hex(&bytes),
     }))
+}
+
+/// Tells a controller that holds its own fresh route here whether `installation` holds one for
+/// the same device. Leases come only from proofs this holder's live endpoint issued, and the
+/// endpoint refuses revoked installations, so a lease shows the stick currently accepts it.
+async fn route_lease(
+    Path((id, installation)): Path<(String, String)>,
+    State(daemon): State<Daemon>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    verified_owner_route(&headers, &daemon, &id)?;
+    let installation_id = parse_fixed_lower_hex::<16>(&installation, "installation identity")?;
+    fresh_owner_route(&daemon, &id, installation_id)?;
+    Ok(Json(serde_json::json!({ "route": "fresh" })))
 }
 
 async fn yield_gateway(
@@ -6382,23 +6463,7 @@ fn authorize_owner_mutation(
         return Ok(caller);
     };
     let installation_id = parse_fixed_lower_hex::<16>(owner_caller, "owner caller identity")?;
-    let key = (device_id.to_owned(), installation_id);
-    let now = Instant::now();
-    let mut routes = daemon.0.owner_routes.lock().expect("owner route lock");
-    routes.retain(|_, route| route.expires_at > now);
-    let route = routes
-        .get(&key)
-        .ok_or_else(|| ApiError::auth("a fresh endpoint route proof is required"))?;
-    let current_session = daemon
-        .gateway(device_id)
-        .and_then(|gateway| gateway.transport.session_snapshot())
-        .ok_or_else(|| ApiError::auth("the endpoint session is absent after route proof"))?;
-    if current_session.protocol_session_id != route.endpoint_session_id {
-        routes.remove(&key);
-        return Err(ApiError::auth(
-            "the endpoint session changed after route proof",
-        ));
-    }
+    fresh_owner_route(daemon, device_id, installation_id)?;
     Ok(caller)
 }
 
@@ -6413,6 +6478,19 @@ fn verified_owner_route(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| ApiError::auth("verified controller identity is absent"))?;
     let installation_id = parse_fixed_lower_hex::<16>(owner_caller, "owner caller identity")?;
+    Ok((
+        installation_id,
+        fresh_owner_route(daemon, device_id, installation_id)?,
+    ))
+}
+
+/// The installation's unexpired route lease for `device_id`, valid only while the endpoint
+/// session that issued its proof is still current.
+fn fresh_owner_route(
+    daemon: &Daemon,
+    device_id: &str,
+    installation_id: [u8; 16],
+) -> Result<OwnerRouteLease, ApiError> {
     let key = (device_id.to_owned(), installation_id);
     let now = Instant::now();
     let mut routes = daemon.0.owner_routes.lock().expect("owner route lock");
@@ -6431,7 +6509,7 @@ fn verified_owner_route(
             "the endpoint session changed after route proof",
         ));
     }
-    Ok((installation_id, route))
+    Ok(route)
 }
 
 async fn capabilities(
@@ -9951,7 +10029,7 @@ mod tests {
     async fn targeted_handoff_readiness_is_bound_to_the_live_target_and_previous_gateway() {
         let daemon = daemon();
         let transaction_id = Uuid::now_v7();
-        let target_address = SocketAddr::from(([192, 168, 30, 50], 7443));
+        let target_address = SocketAddr::from(([192, 168, 1, 50], 7443));
         daemon
             .0
             .gateway_listeners
@@ -10026,7 +10104,7 @@ mod tests {
                 previous_installation_id: [0x5a; 16],
                 target_installation_id: [0x6b; 16],
                 readiness_nonce: [0x77; 16],
-                target_address: SocketAddr::from(([192, 168, 30, 50], 7443)),
+                target_address: SocketAddr::from(([192, 168, 1, 50], 7443)),
                 listener_generation: 7,
                 target_control_port: keyferry_gateway::OWNER_GATEWAY_CONTROL_PORT,
                 proof_digest: None,
@@ -10203,7 +10281,7 @@ mod tests {
             "previous_installation_id": "33".repeat(16),
             "target_gateway_address": "100.64.0.2",
             "readiness_nonce": "55".repeat(16),
-            "target_ipv4": "192.168.30.50",
+            "target_ipv4": "192.168.1.50",
             "target_port": keyferry_protocol::roaming::DEVICE_TLS_PORT,
             "target_control_port": keyferry_gateway::OWNER_GATEWAY_CONTROL_PORT,
         });

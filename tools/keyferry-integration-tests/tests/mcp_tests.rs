@@ -66,6 +66,13 @@ async fn batch_dispatch_returns_one_image_and_stops_on_unknown_or_unsettled() {
                 let id=uuid::Uuid::parse_str(command["command_id"].as_str().unwrap()).unwrap();
                 assert_eq!(transport.execution_count(id),1);
             }
+            if fault {
+                // The unfinished batch leaves the cursor unknown until it is observed again.
+                assert_eq!(s.pointer,None);
+                let refused=s.call("move",&json!({"x":130,"y":150,"uncalibrated":true}),&c).unwrap_err();
+                assert_eq!(refused["code"],"pointer.position_required","{refused}");
+                s.pointer=Some(START);
+            }
             let prior=transport.control_request_counts();
             let malformed=s.dispatch(json!({"jsonrpc":"2.0","id":"invalid-batch","method":"tools/call","params":{"name":"batch","arguments":{"actions":[{"tool":"move","arguments":{"x":100,"y":130,"uncalibrated":true}},{"tool":"calibrate","arguments":{}}]}}}),&c).unwrap();
             assert_eq!(malformed["result"]["isError"],true);
@@ -969,24 +976,15 @@ async fn faulted_glides_never_replay_and_track_only_possible_starts() {
                 assert_eq!(transport.execution_count(uuid::Uuid::parse_str(id).unwrap()), usize::from(fault == SimulationFault::LostAfterStart));
             }
             assert!(!transport.is_remotely_armed());
-            let path = s
-                .frames
-                .pointer
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .path
-                .clone();
             if fault == SimulationFault::LostAfterStart {
-                // An interrupted glide stops on the segment toward its end; presume the end.
+                // An interrupted glide may stop anywhere short of its end: the position stays
+                // unknown, and pointer input waits for an observed cursor.
                 assert_eq!(error["command"]["outcome"], "UNKNOWN");
-                assert!(s
-                    .pointer
-                    .unwrap()
-                    .into_iter()
-                    .zip(*path.last().unwrap())
-                    .all(|(a, b)| (a - b).abs() < 1e-12));
+                assert_eq!(s.pointer, None);
+                let refused = s
+                    .call("move", &json!({"x":100,"y":100,"uncalibrated":true}), &c)
+                    .unwrap_err();
+                assert_eq!(refused["code"], "pointer.position_required", "{refused}");
             } else {
                 assert_eq!(
                     s.pointer,

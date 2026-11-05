@@ -222,13 +222,34 @@ function Restore-InstalledFile {
 function Protect-OwnerOnly {
     param([string]$Path)
 
-    & icacls.exe $Path /inheritance:r /grant:r "${currentAccount}:(OI)(CI)F" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not protect $Path for the current user."
+    # Replace the whole DACL with one protected entry for the current user (icacls /grant:r would
+    # keep other principals' explicit entries), then make every descendant inherit only that.
+    # A link or junction would take its target outside both the reset and the check, so none
+    # is accepted anywhere in the tree.
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $linked = @(@(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force) |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+    if ($linked.Count -gt 0) {
+        throw "Refusing to protect ${Path}: $($linked[0].FullName) is a link or junction."
+    }
+    Set-AccessRules $Path "D:PAI(A;OICI;FA;;;$sid)"
+    Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object {
+        & icacls.exe $_.FullName /reset /q | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not protect $($_.FullName) for the current user."
+        }
+    }
+    foreach ($item in @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        $others = (Get-Acl -LiteralPath $item.FullName).Access | Where-Object {
+            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid
+        }
+        if ($others) {
+            throw "Could not protect $($item.FullName) for the current user."
+        }
     }
 }
 
-function Restore-AccessRules {
+function Set-AccessRules {
     param(
         [string]$Path,
         [string]$AccessSddl
@@ -369,8 +390,6 @@ $hadPairing = $false
 $hadCli = $false
 $hadInstallation = $false
 $hadShortcut = $false
-$programAccessSddlBefore = $null
-$stateAccessSddlBefore = $null
 try {
 if ($Mode -eq 'Apply') {
     if (-not $programOnly -and (Test-Path -LiteralPath $installedInstallation) -and
@@ -393,16 +412,6 @@ if ($Mode -eq 'Apply') {
     $hadCli = Test-Path -LiteralPath $installedCli -PathType Leaf
     $hadInstallation = Test-Path -LiteralPath $installedInstallation -PathType Container
     $hadShortcut = Test-Path -LiteralPath $shortcutPath -PathType Leaf
-    if (Test-Path -LiteralPath $programRoot) {
-        $programAccessSddlBefore = (Get-Acl -LiteralPath $programRoot).GetSecurityDescriptorSddlForm(
-            [Security.AccessControl.AccessControlSections]::Access
-        )
-    }
-    if (Test-Path -LiteralPath $stateRoot) {
-        $stateAccessSddlBefore = (Get-Acl -LiteralPath $stateRoot).GetSecurityDescriptorSddlForm(
-            [Security.AccessControl.AccessControlSections]::Access
-        )
-    }
     $rollbackRoot = Join-Path ([IO.Path]::GetTempPath()) `
         ('.keyferry-desktop-rollback-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $rollbackRoot | Out-Null
@@ -662,12 +671,8 @@ Write-Output "Verification OK: Keyferry is installed for $currentAccount as a co
         if ($restoreLegacyTask) {
             Start-ScheduledTask -TaskName $legacyTaskName -ErrorAction SilentlyContinue
         }
-        if ($null -ne $programAccessSddlBefore -and (Test-Path -LiteralPath $programRoot)) {
-            Restore-AccessRules $programRoot $programAccessSddlBefore
-        }
-        if ($null -ne $stateAccessSddlBefore -and (Test-Path -LiteralPath $stateRoot)) {
-            Restore-AccessRules $stateRoot $stateAccessSddlBefore
-        }
+        # Owner-only protection stays in place: it only removes access, and restoring a
+        # wider root ACL would let protected files inherit it.
     }
     if ($null -ne $rollbackRoot -and (Test-Path -LiteralPath $rollbackRoot)) {
         $resolvedRollback = (Resolve-Path -LiteralPath $rollbackRoot).Path
