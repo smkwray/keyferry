@@ -1,4 +1,4 @@
-// Host test of handheld Messages (ADR 0018 rule 15). Production messages.cpp runs unchanged over a
+// Host test of handheld Messages. Production messages.cpp runs unchanged over a
 // simulated USB serial port: the test plays the TinyUSB task (receive and line-state callbacks,
 // deferred work), the screen (the public API in messages.h) and the computer (bytes in, bytes out
 // of a TX FIFO the size the board configures, DTR, unplugging).

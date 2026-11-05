@@ -1,4 +1,4 @@
-// Messages (ADR 0018 rule 15): lines a program on the computer writes to a USB serial port, shown
+// Messages: lines a program on the computer writes to a USB serial port, shown
 // on the screen. Receiving runs on the TinyUSB task (esp_tinyusb's CDC-ACM callbacks); replies
 // are queued from any task and written on the TinyUSB task. Message text is never logged.
 #include "messages.h"

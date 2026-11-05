@@ -1,4 +1,4 @@
-// Macros (ADR 0018 rule 12): plays one compiled-in preset per tap on the handheld's own USB
+// Macros: plays one compiled-in preset per tap on the handheld's own USB
 // keyboard + mouse + media-key device. Every press is followed by its release and each report is
 // confirmed. Until a release is confirmed the pad counts as possibly holding something: it refuses
 // presets and keeps sending all-released reports (never presses) until one is confirmed or the

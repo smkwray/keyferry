@@ -5,7 +5,7 @@
 namespace keyferry::handheld {
 
 // Runs Home or a handheld-only function and never returns, unless this boot was launched into
-// Keyferry; then it returns at once and the caller starts the bridge (ADR 0018).
+// Keyferry; then it returns at once and the caller starts the bridge.
 void RunShellUnlessKeyferry();
 
 struct KeyferryHooks {

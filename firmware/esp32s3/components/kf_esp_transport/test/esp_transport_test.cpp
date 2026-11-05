@@ -302,6 +302,49 @@ void TestHandoffWaitsForCorrelatedNeutral() {
   transport.CloseCurrentTls();
 }
 
+// Recovery to the previous Bluetooth gateway after a failed Wi-Fi target must start BLE TLS
+// for the candidate the handoff already selected, rather than ending RECOVERY_UNAVAILABLE.
+void TestBleRecoveryStartsTlsForTheSelectedCandidate() {
+  idf_test::Reset(); Runtime runtime; EspTransport transport(Config(), runtime, 0);
+  idf_test::connected = idf_test::Authenticate; idf_test::stop_at = 100;
+  Run(transport);
+  const auto epoch = transport.session_.epoch();
+  // Model an authenticated Bluetooth source; no physical carrier is used.
+  transport.candidate_path_ = Path::kBluetooth;
+  std::array<std::uint8_t, 32> nonce{}; nonce.fill(0x77);
+  std::array<std::uint8_t, keyferry::protocol::kRoamingRouteProofResponseBytes> proof{};
+  const auto target = idf_test::Installation(1);
+  assert(transport.BuildRouteProof(epoch, target.data(), nonce.data(), proof.data()));
+  keyferry::protocol::GatewayHandoffRequest request{};
+  request.operation = keyferry::protocol::GatewayHandoffOperation::kStart;
+  request.transaction_id.fill(0x11); request.target_installation_id = target;
+  request.readiness_nonce.fill(0x22); request.proof_digest = transport.route_proof_digest_;
+  request.target_ipv4 = {192,0,2,2}; request.target_port = transport.config_.tls.port;
+  request.target_valid_ms = keyferry::protocol::kRoamingGatewayHandoffTargetValidMs;
+  request.recovery_ms = keyferry::protocol::kRoamingGatewayHandoffRecoveryMs;
+  keyferry::protocol::GatewayHandoffStatusPayload status{}; bool defer = false;
+  assert(transport.HandleGatewayHandoff(epoch, request, &status, &defer) && defer);
+  bool ready = false;
+  assert(transport.ServiceGatewayHandoff(epoch, &status, &ready) && ready);
+  transport.GatewayHandoffReplySent(epoch, request.operation);
+  transport.BeginCommittedGatewayHandoff(idf_test::now);
+  assert(transport.gateway_handoff_.TargetFailed(
+      keyferry::protocol::GatewayHandoffReason::kTargetAbsent, idf_test::now));
+  assert(transport.StartGatewayHandoffCandidate(idf_test::now));
+  assert(transport.candidate_path_ == Path::kBluetooth);
+  transport.ble_generation_ = 1;
+  transport.ServiceGatewayHandoffTransport(idf_test::now);
+  assert(transport.ble_handshake_active_);
+  const auto after = transport.gateway_handoff_.Status(
+      keyferry::protocol::GatewayHandoffOperation::kQuery, idf_test::now);
+  assert(after.phase != keyferry::protocol::GatewayHandoffPhase::kRecoveryUnavailable);
+  // Outside a handoff, a Bluetooth start still requires that no candidate exists.
+  transport.ble_handshake_active_ = false;
+  transport.ble_authentication_requested_ = true;
+  assert(!transport.StartBleTls(idf_test::now));
+  transport.CloseCurrentTls();
+}
+
 void TestTlsDeadlineAndIdentityBinding() {
   idf_test::Reset(); idf_test::tls_elapsed = 14990;
   Runtime runtime; EspTransport transport(Config(), runtime, 0);
@@ -327,6 +370,7 @@ int main() {
   TestHealthyHolderWithCompetingControllers(3);
   TestRealFailureTriesLastGoodThenFailsOverWithoutReplay();
   TestHandoffWaitsForCorrelatedNeutral();
+  TestBleRecoveryStartsTlsForTheSelectedCandidate();
   TestTlsDeadlineAndIdentityBinding();
   std::puts("esp_transport_test: ok (production Run; carriers/crypto simulated)");
 }

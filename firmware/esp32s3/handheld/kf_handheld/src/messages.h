@@ -3,7 +3,7 @@
 
 namespace keyferry::handheld {
 
-// Messages (ADR 0018 rule 15): a USB serial port (CDC-ACM) a program on the computer writes
+// Messages: a USB serial port (CDC-ACM) a program on the computer writes
 // lines to; they are shown on the screen and nothing else. Display only: no input, no files, no
 // path to Keyferry. The last kMaxMessages stay in RAM until the board restarts.
 //

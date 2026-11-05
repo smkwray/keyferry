@@ -1,4 +1,4 @@
-# Measured on the first owner unit: 16 MiB quad flash, 8 MiB octal AP PSRAM (ESP32-S3R8).
+# Measured on one unit: 16 MiB quad flash, 8 MiB octal AP PSRAM (ESP32-S3R8).
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_SPIRAM=y
@@ -7,7 +7,7 @@ CONFIG_SPIRAM_SPEED_80M=y
 # Keyferry's largest static objects go to PSRAM (EXT_RAM_BSS_ATTR in hil_endpoint app_main).
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
-# Handheld shell (ADR 0018): console on the USB-Serial/JTAG port Home keeps; LVGL fonts used by
+# Handheld shell: console on the USB-Serial/JTAG port Home keeps; LVGL fonts used by
 # the shell; LVGL allocations through malloc so large ones can live in PSRAM.
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
@@ -60,7 +60,7 @@ CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=20
 # CONFIG_LV_DRAW_SW_SUPPORT_L8 is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_AL88 is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_I1 is not set
-# USB Drive (ADR 0018 rule 4): the handheld serves one image file as mass storage. 4 KiB class
+# USB Drive: the handheld serves one image file as mass storage. 4 KiB class
 # buffer (internal RAM, also present while Keyferry runs); constant-time seeks inside images.
 CONFIG_TINYUSB_MSC_ENABLED=y
 CONFIG_TINYUSB_MSC_BUFSIZE=4096

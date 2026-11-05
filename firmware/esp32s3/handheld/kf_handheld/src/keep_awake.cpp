@@ -1,4 +1,4 @@
-// Keep Awake (ADR 0018): a standalone relative mouse that, after an explicit local Start, sends a
+// Keep Awake: a standalone relative mouse that, after an explicit local Start, sends a
 // (+1, 0) then (-1, 0) pair every 25 s. Stops when its timer runs out, and on unplug, suspend or
 // an unconfirmed report.
 #include "keep_awake.h"

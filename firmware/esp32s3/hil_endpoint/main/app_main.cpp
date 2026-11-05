@@ -851,7 +851,7 @@ class HilRuntime final : public keyferry::transport::Delegate,
   }
 
 #if defined(KEYFERRY_BOARD_HANDHELD)
-  // Handheld exit (ADR 0018). Leaving is terminal for this boot: it closes network admission,
+  // Handheld exit. Leaving is terminal for this boot: it closes network admission,
   // refuses provisioning, cable-local maintenance, commits and every restart source, ends the
   // session, withdraws the RAM volume and starts the keyboard-zero/mouse-zero barrier used before
   // file publication. Only the shell restarts the device, after HandheldNeutralConfirmed().
@@ -2391,6 +2391,9 @@ std::atomic_bool g_usb_suspended{false};
 #if defined(KEYFERRY_FILE_HANDOFF)
 std::atomic<std::uint32_t> g_usb_attach_generation{0};
 #endif
+// Counts ATTACHED (configured) events that arrive while already mounted: a host that resets the
+// bus and re-enumerates the device configures it again without a DETACHED event.
+std::atomic<std::uint32_t> g_usb_reattach_count{0};
 std::atomic_bool g_ble_control_usb{false};
 
 struct DeviceConfigContext {
@@ -2478,7 +2481,9 @@ void TinyUsbEventCallback(tinyusb_event_t* event, void*) {
     return;
   }
   if (event->id == TINYUSB_EVENT_ATTACHED) {
-    g_usb_mounted.store(true, std::memory_order_release);
+    if (g_usb_mounted.exchange(true, std::memory_order_acq_rel)) {
+      g_usb_reattach_count.fetch_add(1, std::memory_order_acq_rel);
+    }
     g_usb_suspended.store(false, std::memory_order_release);
 #if defined(KEYFERRY_FILE_HANDOFF)
     g_usb_attach_generation.fetch_add(1, std::memory_order_acq_rel);
@@ -3196,10 +3201,10 @@ extern "C" void tud_hid_set_report_cb(
     // provisioning or command authority.
     return;
   }
+  // Only the provisioning interface accepts output reports. Any other interface has none, so
+  // a stray SET_REPORT from the target is ignored: it must not end the authenticated session.
   if (instance == provisioning_instance && g_provisioning != nullptr) {
     g_provisioning->SetReport(instance, report_id, report_type, buffer, length);
-  } else if (g_runtime != nullptr) {
-    g_runtime->FailClosed(0);
   }
 }
 
@@ -3574,6 +3579,7 @@ extern "C" void app_main() {
 #endif
 
   bool was_mounted = false;
+  std::uint32_t seen_reattach_count = 0;
 #if defined(KEYFERRY_FILE_HANDOFF)
   bool file_refresh_waiting_for_attach = false;
   bool file_refresh_timed_out = false;
@@ -3621,15 +3627,29 @@ extern "C" void app_main() {
       }
     }
 #endif
+    // TinyUSB's configured state is required: a bus reset clears it at once, although no
+    // DETACHED event follows.
 #if defined(KEYFERRY_FILE_HANDOFF)
     const bool mounted = !file_refresh_waiting_for_attach &&
                          !g_usb_suspended.load(std::memory_order_acquire) &&
-                         g_usb_mounted.load(std::memory_order_acquire);
+                         g_usb_mounted.load(std::memory_order_acquire) &&
+                         tud_mounted();
 #else
     const bool mounted =
-        !g_usb_suspended.load(std::memory_order_acquire) &&
-        (g_usb_mounted.load(std::memory_order_acquire) || tud_mounted());
+        !g_usb_suspended.load(std::memory_order_acquire) && tud_mounted();
 #endif
+    const auto reattach_count =
+        g_usb_reattach_count.load(std::memory_order_acquire);
+    if (reattach_count != seen_reattach_count) {
+      seen_reattach_count = reattach_count;
+      if (was_mounted) {
+        // Re-enumerated without a detach: end the old attachment's session, pending work
+        // and in-flight transfer before the new one admits input.
+        runtime.SetUsbMounted(false);
+        provisioning_adapter.TransportLost();
+        was_mounted = false;
+      }
+    }
     if (mounted != was_mounted) {
       runtime.SetUsbMounted(mounted);
       if (!mounted) {

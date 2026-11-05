@@ -1,4 +1,4 @@
-# Copy into an ignored exact-unit evidence directory only from Phase 0 evidence.
+# Copy into an ignored exact-unit evidence directory and fill it only with values measured on that unit.
 # Never fill a field from a vendor listing, schematic, tutorial, or another unit.
 
 manifest_version = 2

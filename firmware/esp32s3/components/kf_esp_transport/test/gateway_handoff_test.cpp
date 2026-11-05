@@ -19,7 +19,7 @@ GatewayHandoffRequest Start() {
   output.target_installation_id.fill(0x22);
   output.readiness_nonce.fill(0x33);
   output.proof_digest.fill(0x44);
-  output.target_ipv4 = {192, 168, 30, 120};
+  output.target_ipv4 = {192, 168, 1, 120};
   output.target_port = keyferry::protocol::kRoamingDeviceTlsPort;
   output.target_valid_ms =
       keyferry::protocol::kRoamingGatewayHandoffTargetValidMs;

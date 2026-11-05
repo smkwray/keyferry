@@ -1,23 +1,23 @@
 # Firmware workspace
 
-The active endpoints are ESP32-S3 boards with native USB. Native ESP-IDF v6.0.3 is the pinned
-qualification authority; the canonical build is CMake/Ninja through `idf.py`. A required
+The endpoints are ESP32-S3 boards with native USB. Firmware builds with native ESP-IDF v6.0.3
+(pinned); the canonical build is CMake/Ninja through `idf.py`. A required
 `KEYFERRY_BOARD` selection loads one strict `boards/<profile>/board.json` manifest and generates the
 only C++ view used by firmware. Generic firmware branches on declared controller/capability enums,
 never on a vendor or board name.
 
 Current profiles:
 
-| Profile | Display | Qualification |
+| Profile | Display | Tested |
 | --- | --- | --- |
-| `waveshare_geek_v1_1_reference` | ST7789, 240×135 | recovery and production qualified on the bound owner unit |
-| `lilygo_t_dongle_s3` | ST7735, 160×80 | existing control/input image qualified on the owner unit; USB file capacity unqualified |
-| `m5stack_atoms3_lite` | none (RGB LED) | control, USB keyboard and pointer used with Windows targets; profile unqualified |
-| `waveshare_amoled_1_8` | CO5300 AMOLED, 368×448, touch | handheld shell (`esp32s3/handheld/`); its Keyferry function authenticated over the Bluetooth control link on one unit; profile unqualified |
+| `waveshare_geek_v1_1_reference` | ST7789, 240×135 | recovery and production firmware on one unit |
+| `lilygo_t_dongle_s3` | ST7735, 160×80 | control and USB input on one unit; USB file capacity untested |
+| `m5stack_atoms3_lite` | none (RGB LED) | control, USB keyboard and pointer used with Windows targets; full profile not yet tested |
+| `waveshare_amoled_1_8` | CO5300 AMOLED, 368×448, touch | handheld shell (`esp32s3/handheld/`); its Keyferry function authenticated over the Bluetooth control link on one unit; full profile not yet tested |
 
 The reusable board profile contains wiring, display geometry/orientation, electrical polarity,
 flash size, and optional capabilities. Per-unit MAC, factory backup, security state, secrets, and
-qualification remain private unit records and never enter a reusable board profile. Runtime pin
+test results remain private unit records and never enter a reusable board profile. Runtime pin
 autodetection is intentionally absent: a shared ESP32-S3 identity cannot prove board wiring.
 Firmware advertising `DISPLAY_ORIENTATION_V1` may persist a per-dongle Normal/180° override. Missing
 or malformed override data safely falls back to the board profile's declared `madctl` orientation.
@@ -60,22 +60,22 @@ the file layout preserves the installed bootloader, original app and pairing/set
 If normal startup changed NVS after the backup, `refresh-config` captures only the current
 configuration span twice into an empty private directory with owner-only permissions. Re-plan with
 `--current-config DIR`; every other saved-region comparison remains unchanged.
-The exact Waveshare owner unit published and read back `MESSAGE.TXT` byte-for-byte at 256 KiB on
-Windows with the original protocol. With file-set v2 firmware, the same named Waveshare-to-Windows
-path read back all 16 file names and all 256 KiB of content with matching SHA-256 digests. Clearing
-removed the old entries; a new two-file set then read back exactly; and a target write attempt was
-rejected. LILYGO USB file capacity and Mac/Linux USB mounting remain physically unqualified.
+Tested on one Waveshare GEEK unit with a Windows target: the original protocol published and read
+back `MESSAGE.TXT` byte-for-byte at 256 KiB. File-set v2 read back all 16 file names and all 256 KiB
+of content with matching SHA-256 digests; clearing removed the old entries, a new two-file set read
+back exactly, and a target write attempt was rejected. LILYGO USB file capacity and Mac/Linux USB
+mounting are not yet tested on hardware.
 
 ## Qualification image
 
-`esp32s3/` builds `keyferry_qualification`, a UART0 heartbeat mirrored to the S3's
-fixed-function USB Serial/JTAG console for enclosure-safe observation. It initializes no USB device
+`esp32s3/` builds `keyferry_qualification`, a recovery-test image: a UART0 heartbeat mirrored to
+the S3's fixed-function USB Serial/JTAG console for enclosure-safe observation. It initializes no USB device
 class, TinyUSB/HID, Wi-Fi, Bluetooth, display, touch, removable storage, NVS, PSRAM, secure boot, flash
 encryption, anti-rollback, or eFuse mutation path. `scripts/check_qualification.py` enforces those
 negative requirements both in source/defaults and, when passed a build directory, in generated
 artifacts.
 
-Build preparation is allowed before the board arrives:
+It builds without a board attached:
 
 ```text
 idf.py -C firmware/esp32s3 -B build/qualification-waveshare-v1_1 \
@@ -100,7 +100,7 @@ idf.py -C firmware/esp32s3/usb_executor -B build/usb-executor-waveshare-v1_1 \
 python scripts/check_usb_executor.py --build-dir build/usb-executor-waveshare-v1_1
 ```
 
-This image is build evidence, not approval to flash. TinyUSB owns the S3 internal USB PHY, so UART0
+This image is a build check, not a flashable release. TinyUSB owns the S3 internal USB PHY, so UART0
 is the only configured console for this slice; the device remains operable without opening its
 enclosure, but its logs are not observable unless a board exposes UART0 externally.
 
@@ -115,13 +115,13 @@ esp32s3/
 common/                  cross-language protocol codec and host tests
 ```
 
-Exactly one compile-time board profile is selected. Future security, protocol, persistence, and USB
+Exactly one compile-time board profile is selected. Security, protocol, persistence, and USB
 executor code must not name a vendor, display/touch controller, or GPIO. Optional peripherals use
 bounded adapters; none may arm the device, authorize input, or block release-all. Safety and current
 report state must remain in internal RAM. The portable `kf_status` component converts fixed runtime
 metadata into a bounded semantic presentation without colors, pixels, pins, or an input callback.
 The selected board adapter alone maps that presentation onto its display. A false display capability,
-initialization failure, transfer failure, or future local page-selection input leaves the headless core
+initialization failure, transfer failure, or local page-selection input leaves the headless core
 running and cannot reach command or HID authority.
 
 Validate a profile without configuring ESP-IDF:
@@ -141,22 +141,14 @@ powershell -File scripts/build_first_hil.ps1 \
 The runner defaults to 60% of logical CPUs. Use `-Jobs N` for a lower-impact build; values above
 that ceiling are rejected.
 
-This is build evidence only. A profile whose `qualified` field is false cannot inherit another
-unit's recovery or physical acceptance.
+A successful build does not test the board. A profile whose `qualified` field is false has not been
+tested on hardware and does not inherit another board's recovery or test results.
 
-## Promotion boundary
+## Flashing hardware
 
-The named owner units have their own recovery and production evidence. The qualification image and
-offline USB-executor slice do not provide networking; the production HIL endpoint uses authenticated
-Wi-Fi and Bluetooth. Any hardware activation remains an owner-visible write: retain the exact
-artifact hash, selected board, generated flash plan, and result.
+The qualification image and offline USB-executor slice do not provide networking; the production
+HIL endpoint uses authenticated Wi-Fi and Bluetooth. When you flash a board, keep the exact artifact
+hash, selected board, generated flash plan, and result.
 
 BLE is absent from the qualification image. Secure Boot, flash encryption, anti-rollback, and eFuse
-mutation are prohibited during qualification and require separate promotion on an identical
-sacrificial revision.
-
-## Legacy Cactus WHID
-
-The obsolete ESP8266, ATmega32U4, and temporary-programmer stubs were removed from the active firmware
-surface. Git history remains available; the actual recovery assets and exact conditional procedure
-are preserved under `hardware/legacy/cactus-whid/`. Never apply Caterina/AVR109 steps to an ESP32-S3.
+mutation are not used. eFuse changes are permanent; try them only on an identical spare board.

@@ -29,7 +29,7 @@ void TestStartAndStatus() {
   std::fill(input.begin() + 50, input.begin() + 82, std::uint8_t{0x44});
   input[82] = 192;
   input[83] = 168;
-  input[84] = 30;
+  input[84] = 1;
   input[85] = 120;
   WriteLe16(input.data() + 86, kRoamingDeviceTlsPort);
   WriteLe32(input.data() + 88, kRoamingGatewayHandoffTargetValidMs);
@@ -39,7 +39,7 @@ void TestStartAndStatus() {
   assert(DecodeGatewayHandoffRequest(input.data(), input.size(), &decoded) ==
          GatewayHandoffCodecError::kOk);
   assert(decoded.target_installation_id[0] == 0x22);
-  const std::array<std::uint8_t, 4> expected_address{192, 168, 30, 120};
+  const std::array<std::uint8_t, 4> expected_address{192, 168, 1, 120};
   assert(decoded.target_ipv4 == expected_address);
 
   GatewayHandoffStatusPayload status{};

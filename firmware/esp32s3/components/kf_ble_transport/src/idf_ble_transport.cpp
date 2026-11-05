@@ -231,6 +231,9 @@ int CharacteristicAccess(std::uint16_t connection_handle, std::uint16_t,
       ble_hs_mbuf_to_flat(context->om, fragment.data(), fragment.size(),
                           &copied) != 0 ||
       copied != size) {
+    // An empty, oversized or unreadable fragment breaks the stream like any rejected write.
+    MarkEvent(kEventFault);
+    TerminateCurrent();
     return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
   }
 

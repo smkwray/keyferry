@@ -30,7 +30,7 @@ endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${KEYFERRY_BOARD_MANIFEST}" "${KEYFERRY_BOARD_GENERATOR}")
 
-# A board whose manifest names a handheld shell links firmware/esp32s3/handheld (ADR 0018).
+# A board whose manifest names a handheld shell links firmware/esp32s3/handheld.
 file(READ "${KEYFERRY_BOARD_MANIFEST}" KEYFERRY_BOARD_MANIFEST_TEXT)
 string(JSON KEYFERRY_BOARD_HANDHELD_SHELL ERROR_VARIABLE KEYFERRY_BOARD_HANDHELD_ERROR
        GET "${KEYFERRY_BOARD_MANIFEST_TEXT}" handheld shell)

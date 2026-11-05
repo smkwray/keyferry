@@ -127,7 +127,9 @@ class EspTransport final : public endpoint::Effects {
   bool BeginEndpointTls(
       const endpoint::TlsObservation& observation,
       const config::RoamingPeerAuthorization& authorization);
-  bool StartBleTls(std::uint64_t now_ms);
+  // `handoff_candidate` is true when a gateway handoff has already selected the identity-bound
+  // Bluetooth candidate (recovery to the previous gateway); otherwise no candidate may exist.
+  bool StartBleTls(std::uint64_t now_ms, bool handoff_candidate = false);
   bool ServiceCurrentTls(std::uint64_t now_ms);
   bool ServiceEndpointRead(std::uint64_t now_ms);
   void PollBle(std::uint64_t now_ms);

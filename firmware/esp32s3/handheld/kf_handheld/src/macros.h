@@ -1,4 +1,4 @@
-// Macro presets (ADR 0018 rule 12): compiled-in key, media-key and mouse-button sequences, grouped
+// Macro presets: compiled-in key, media-key and mouse-button sequences, grouped
 // in pages. Data only, so the UI, the USB runner and the host preview share one table.
 #pragma once
 #include <cstdint>

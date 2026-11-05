@@ -1,4 +1,4 @@
-// Host test of the handheld USB Drive (ADR 0018 rule 4). Production drive.cpp runs unchanged on
+// Host test of the handheld USB Drive. Production drive.cpp runs unchanged on
 // ESP-IDF v6.0.3's own FatFs over a simulated SD card. The test plays the board's screen (the
 // public API in drive.h) and the computer (the TinyUSB MSC callbacks, with a FatFs of its own
 // mounted through READ(10)/WRITE(10)). An export is once per boot by design, so each boot runs as

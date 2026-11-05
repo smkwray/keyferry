@@ -41,6 +41,9 @@ class CommandExecutor final {
                     HeldKeyDeadlineScheduler& watchdog,
                     const std::array<std::uint8_t, 32>& accepted_profile_hash);
 
+    // Starts (or, after a disarm, restarts) execution under `epoch`. The input replay window
+    // belongs to the authenticated epoch: restarting the same epoch keeps it, so a command ID
+    // admitted before a disarm stays rejected afterwards; only a new epoch clears it.
     void BeginSession(std::uint64_t epoch, bool input_v1_enabled = false,
                       bool input_v2_enabled = false);
     void EndSession();
@@ -118,6 +121,8 @@ class CommandExecutor final {
     HeldKeyDeadlineScheduler& watchdog_;
     std::array<std::uint8_t, 32> accepted_profile_hash_{};
     std::uint64_t epoch_{0};
+    // The authenticated epoch `input_replay_` belongs to; EndSession leaves it in place.
+    std::uint64_t replay_epoch_{0};
     std::uint32_t arm_sequence_{0};
     bool input_v1_enabled_{false};
     bool input_v2_enabled_{false};

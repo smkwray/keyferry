@@ -1,4 +1,4 @@
-// Microphone (ADR 0018 rule 14). The ES8311 codec runs in recording mode only (its DAC off and the
+// Microphone. The ES8311 codec runs in recording mode only (its DAC off and the
 // speaker amplifier driven off); a capture task reads it over I2S in 2 ms blocks and applies the
 // computer's volume and both mutes. Blocks reach TinyUSB's UAC2 FIFO only on the TinyUSB task,
 // which also opens, closes and resets the stream, and each block carries the stream generation it

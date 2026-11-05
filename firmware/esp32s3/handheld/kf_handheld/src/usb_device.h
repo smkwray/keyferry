@@ -3,7 +3,7 @@
 
 namespace keyferry::handheld {
 
-// The handheld's own USB device, one personality per boot (ADR 0018 rule 5), each with its own
+// The handheld's own USB device, one personality per boot, each with its own
 // PID and interface set.
 enum class UsbPersonality : std::uint8_t {
   kKeepAwakeMouse,  // 303A:4010, relative mouse without report IDs

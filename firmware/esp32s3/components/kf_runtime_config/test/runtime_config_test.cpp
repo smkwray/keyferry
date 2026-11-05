@@ -172,7 +172,7 @@ StoredRuntime ValidStoredRuntime() {
               wifi.credential_length, wifi.credential.begin());
   auto& host = config.paired_hosts[0];
   host.host_id.fill(0x33);
-  host.ipv4 = {192, 168, 30, 137};
+  host.ipv4 = {192, 168, 1, 137};
   host.port = 7443;
   constexpr char kServerName[] = "keyferry-controller.invalid";
   host.server_name_length = sizeof(kServerName) - 1;
@@ -242,7 +242,7 @@ void TestStoredRuntimeOwnsExactViews() {
   assert(keyferry::runtime_config::BindStoredRuntime(expected_device_id, &stored) ==
          BindStatus::kOk);
   assert(stored.runtime.wifi_configured);
-  assert(std::strcmp(stored.runtime.host_ipv4, "192.168.30.137") == 0);
+  assert(std::strcmp(stored.runtime.host_ipv4, "192.168.1.137") == 0);
   assert(stored.runtime.host_ipv4 == stored.host_ipv4.data());
   assert(stored.runtime.tls.server_name == stored.server_name.data());
   assert(stored.runtime.wifi.ssid == stored.persisted.wifi_profiles[0].ssid.data());
@@ -268,7 +268,7 @@ void TestStoredRuntimeAllowsBleOnlyConfiguration() {
   assert(stored.runtime.wifi.ssid_length == 0);
   assert(stored.runtime.wifi.credential == nullptr);
   assert(stored.runtime.wifi.credential_length == 0);
-  assert(std::strcmp(stored.runtime.host_ipv4, "192.168.30.137") == 0);
+  assert(std::strcmp(stored.runtime.host_ipv4, "192.168.1.137") == 0);
 }
 
 void TestOwnerRoamingRuntimeNeedsNoPinnedHostOrWifi() {
@@ -374,7 +374,7 @@ void TestCompleteBootResolutionMatrix() {
   FakeStorage erased;
   assert(Resolve(erased, expected, &output, &selection) ==
          BootStatus::kPrivateBootstrap);
-  assert(std::strcmp(output.host_ipv4, "192.168.30.137") == 0);
+  assert(std::strcmp(output.host_ipv4, "192.168.1.137") == 0);
   assert(erased.write_attempts == 0);
 
   FakeStorage malformed;
@@ -407,7 +407,7 @@ void TestCompleteBootResolutionMatrix() {
          BootStatus::kStored);
   assert(selection.slot == keyferry::config::SlotId::kA &&
          selection.generation == 9);
-  assert(std::strcmp(output.host_ipv4, "192.168.30.137") == 0);
+  assert(std::strcmp(output.host_ipv4, "192.168.1.137") == 0);
   assert(valid_with_malformed_peer.write_attempts == 0);
 
   auto wrong_identity = expected;

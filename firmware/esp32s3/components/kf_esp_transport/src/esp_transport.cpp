@@ -1001,7 +1001,7 @@ void EspTransport::ServiceGatewayHandoffTransport(
       !endpoint_tls_started_) {
     if (ble_peripheral_.ready(ble_generation_)) {
       ble_authentication_requested_ = true;
-      if (!StartBleTls(now_ms)) {
+      if (!StartBleTls(now_ms, true)) {
         GatewayHandoffCandidateFailed(
             now_ms, protocol::GatewayHandoffReason::kTransportFailed);
         return;
@@ -1188,9 +1188,10 @@ bool EspTransport::BeginEndpointTls(
   return true;
 }
 
-bool EspTransport::StartBleTls(std::uint64_t now_ms) {
+bool EspTransport::StartBleTls(std::uint64_t now_ms, const bool handoff_candidate) {
+  const Path expected_candidate = handoff_candidate ? Path::kBluetooth : Path::kNone;
   if (arbiter_.active_path() != Path::kNone || session_.authenticated() ||
-      candidate_path_ != Path::kNone ||
+      candidate_path_ != expected_candidate ||
       !ble_authentication_requested_ || ble_generation_ == 0 ||
       !ble_peripheral_.ready(ble_generation_)) {
     return false;

@@ -5,9 +5,11 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "mbedtls/asn1.h"
 #include "mbedtls/md.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
+#include "roaming_profile.h"
 
 #if !defined(MBEDTLS_SSL_KEEP_PEER_CERTIFICATE)
 #error "Keyferry SPKI pinning requires MBEDTLS_SSL_KEEP_PEER_CERTIFICATE"
@@ -34,6 +36,39 @@ bool IsP256Spki(const mbedtls_x509_crt& certificate) {
   return certificate.pk_raw.p != nullptr && certificate.pk_raw.len == 91 &&
          std::equal(kP256SpkiPrefix.begin(), kP256SpkiPrefix.end(),
                     certificate.pk_raw.p);
+}
+
+char AsciiLower(const char value) {
+  return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
+}
+
+// A roaming peer must name this device exactly in a DNS subjectAltName. Mbed TLS hostname
+// verification alone would also accept a wildcard name or, without any SAN, the subject CN.
+bool NamesThisDeviceExactly(const mbedtls_x509_crt& certificate,
+                            const config::RoamingEndpointConfig& policy) {
+  roaming::DeviceGatewayName expected{};
+  if (!roaming::BuildDeviceGatewayName(policy.device_id, &expected)) {
+    return false;
+  }
+  bool exact = false;
+  for (const mbedtls_x509_sequence* entry = &certificate.subject_alt_names;
+       entry != nullptr; entry = entry->next) {
+    const auto tag = static_cast<unsigned char>(entry->buf.tag);
+    if ((tag & MBEDTLS_ASN1_TAG_VALUE_MASK) != MBEDTLS_X509_SAN_DNS_NAME ||
+        entry->buf.p == nullptr) {
+      continue;
+    }
+    const auto* name = reinterpret_cast<const char*>(entry->buf.p);
+    if (std::find(name, name + entry->buf.len, '*') != name + entry->buf.len) {
+      return false;
+    }
+    exact = exact || (entry->buf.len == roaming::kDeviceGatewayNameBytes &&
+                      std::equal(name, name + entry->buf.len, expected.data(),
+                                 [](const char left, const char right) {
+                                   return AsciiLower(left) == AsciiLower(right);
+                                 }));
+  }
+  return exact;
 }
 
 }  // namespace
@@ -84,7 +119,8 @@ bool VerifyMbedTlsRoamingPeer(
   }
 
   const mbedtls_x509_crt* peer = mbedtls_ssl_get_peer_cert(ssl);
-  if (peer == nullptr || !IsP256Spki(*peer)) {
+  if (peer == nullptr || !IsP256Spki(*peer) ||
+      !NamesThisDeviceExactly(*peer, policy)) {
     return false;
   }
   roaming::P256Spki peer_spki{};

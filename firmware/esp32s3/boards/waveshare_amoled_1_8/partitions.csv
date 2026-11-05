@@ -1,4 +1,4 @@
-# Handheld layout (ADR 0018). App-only updates preserve bootloader/table, config and NVS.
+# Handheld layout. App-only updates preserve bootloader/table, config and NVS.
 # No OTA, no executable images from SD, no payload storage.
 # Name, Type, SubType, Offset, Size, Flags
 factory, app, factory, 0x10000, 4M,

@@ -100,7 +100,10 @@ void CommandExecutor::BeginSession(const std::uint64_t epoch, const bool input_v
     input_v1_enabled_ = input_v1_enabled;
     input_v2_enabled_ = input_v2_enabled;
     command_arm_available_ = false;
-    input_replay_.Reset();
+    if (epoch != replay_epoch_) {
+        input_replay_.Reset();
+        replay_epoch_ = epoch;
+    }
     hid_.disarm();
 }
 

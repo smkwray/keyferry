@@ -1,4 +1,4 @@
-// Handheld screens (ADR 0018). LVGL only, no hardware calls: shell.cpp feeds status in and takes
+// Handheld screens. LVGL only, no hardware calls: shell.cpp feeds status in and takes
 // actions out, and the host preview (scripts/preview_handheld.py) renders this same code.
 #pragma once
 #include <cstdint>

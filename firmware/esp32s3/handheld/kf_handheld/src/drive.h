@@ -3,7 +3,7 @@
 
 namespace keyferry::handheld {
 
-// USB Drive (ADR 0018 rule 4): fixed-size image files in DRIVES/ on the SD card, one exported at
+// USB Drive: fixed-size image files in DRIVES/ on the SD card, one exported at
 // a time as a USB disk. Read-only unless chosen writable; writes reach the card, read back and
 // compared, before the computer is told they succeeded.
 

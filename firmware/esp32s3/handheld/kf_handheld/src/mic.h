@@ -2,7 +2,7 @@
 
 namespace keyferry::handheld {
 
-// Microphone (ADR 0018 rule 14): the board's microphone as a USB Audio Class 2 microphone,
+// Microphone: the board's microphone as a USB Audio Class 2 microphone,
 // 48 kHz mono 16-bit. Audio goes only to the USB host, only while it has the stream open.
 
 // Starts the audio chip (recording only), checks it answers and delivers sound, starts capture,

@@ -60,7 +60,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/../boards/load_board_profile.cmake")
 if(KEYFERRY_BOARD_HANDHELD)
     if(KEYFERRY_FILE_HANDOFF OR KEYFERRY_MSC_SIZE_PROBE)
         message(FATAL_ERROR
-            "Handheld file handoff is unqualified: its layout and capacity need their own gate")
+            "Handheld file handoff is not supported: its layout and capacity are untested")
     endif()
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../handheld/kf_handheld")
 endif()

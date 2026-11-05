@@ -489,6 +489,38 @@ void Mixed_cancellation_neutralizes_and_duplicate_chunks_do_not_reexecute() {
     assert(!fixture.hid.armed());
 }
 
+void Disarm_within_an_epoch_keeps_duplicate_rejection() {
+    MixedFixture fixture;
+    fixture.Arm();
+    const auto id = Id(13);
+    auto body = InputActions();
+    body[2] = 2;
+    assert(fixture.executor.HandleAuthenticated(7, Frame(2, Envelope(id, 5000, 4, body)), 10));
+    fixture.executor.UsbMouseReportAccepted(
+        fixture.hid.desired_mouse_report(), fixture.hid.desired_mouse_logical_token(), 11);
+    assert(fixture.executor.HandleAuthenticated(7, Frame(3, Envelope(id, 5000, 5, {})), 12));
+    fixture.executor.UsbReportAccepted({}, 13);
+    fixture.executor.UsbMouseReportAccepted({}, 0, 14);
+
+    // DISARM restarts execution under the same authenticated epoch.
+    fixture.executor.BeginSession(7, true);
+    fixture.executor.UsbReportAccepted({}, 15);
+    fixture.executor.UsbMouseReportAccepted({}, 0, 16);
+    fixture.Arm(4);
+    assert(fixture.executor.HandleAuthenticated(7, Frame(4, Envelope(id, 5000, 4, body)), 20));
+    const auto& repeated = fixture.results.input_events.back().evidence;
+    assert(repeated.result == ResultCode::kRejected);
+    assert(repeated.reason == ErrorCode::kDuplicate);
+
+    // A new authenticated epoch starts a new window.
+    fixture.executor.BeginSession(8, true);
+    fixture.executor.UsbReportAccepted({}, 21);
+    fixture.executor.UsbMouseReportAccepted({}, 0, 22);
+    assert(fixture.executor.CommandScopedArm(8, 2));
+    assert(fixture.executor.HandleAuthenticated(8, Frame(2, Envelope(id, 5000, 4, body)), 30));
+    assert(fixture.results.input_events.back().evidence.reason != ErrorCode::kDuplicate);
+}
+
 void Late_input_cancellation_is_rejected_after_the_original_terminal_result() {
     MixedFixture fixture;
     fixture.Arm();
@@ -989,6 +1021,7 @@ int main() {
     Release_follows_the_session_sequence_after_frames_the_executor_never_sees();
     Mixed_input_preserves_order_and_requires_both_terminal_neutrals();
     Mixed_cancellation_neutralizes_and_duplicate_chunks_do_not_reexecute();
+    Disarm_within_an_epoch_keeps_duplicate_rejection();
     Late_input_cancellation_is_rejected_after_the_original_terminal_result();
     Mixed_capability_rejection_clears_arm_and_release_confirms_both_zeros();
     std::cout << "command_executor_test: ok\n";

@@ -1,4 +1,4 @@
-// Handheld shell (ADR 0018): boot selection, power and buttons, the supervisor and the glue
+// Handheld shell: boot selection, power and buttons, the supervisor and the glue
 // between the screens (ui.cpp) and the functions (Keep Awake, Macros, USB Drive, Microphone,
 // Messages, Keyferry).
 // Functions are mutually exclusive: launching one records it in RTC memory and restarts, and
@@ -455,7 +455,7 @@ void SdCheckTask(void*) {
   vTaskDelete(nullptr);
 }
 
-// A live microphone keeps its Live state in sight (ADR 0018 rule 14): the screen dims instead of
+// A live microphone keeps its Live state in sight: the screen dims instead of
 // going black, whether from the timeout or from PWR.
 bool MicKeepsScreen() { return g_function == Function::kMic && MicLive(); }
 

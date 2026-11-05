@@ -1,4 +1,4 @@
-// USB Drive (ADR 0018 rule 4): one fixed-size image file from DRIVES/ on the SD card, exported
+// USB Drive: one fixed-size image file from DRIVES/ on the SD card, exported
 // as a removable USB disk with 512-byte sectors. The computer reaches only the bytes of that one
 // file: never the card's own file system, other images or spare space. Read-only unless chosen
 // writable; each write is on the card (written, read back, synced) before it is acknowledged.
@@ -30,7 +30,7 @@
 #error "USB Drive needs CONFIG_TINYUSB_MSC_ENABLED (board sdkconfig.defaults)"
 #endif
 #if defined(CONFIG_BSP_SD_FORMAT_ON_MOUNT_FAIL)
-#error "The SD card itself must never be formatted automatically (ADR 0018 rule 4)"
+#error "The SD card itself must never be formatted automatically"
 #endif
 #if !FF_USE_FASTSEEK
 #error "USB Drive needs CONFIG_FATFS_USE_FASTSEEK for constant-time seeks inside images"
@@ -315,7 +315,7 @@ void FailLocked(const char* what, FRESULT result) {
 
 // TinyUSB derives each READ(10)/WRITE(10) block size from the CBW (bytes / blocks, truncated) and
 // keeps the CBW to itself, so a host whose byte count disagrees with its block count cannot be
-// caught here in general (ADR 0018 rule 4 records this). Every chunk must still be whole sectors
+// caught here in general. Every chunk must still be whole sectors
 // at offset 0, and every byte stays inside the selected image either way.
 int32_t Transfer(std::uint32_t lba, std::uint32_t offset, void* buffer, std::uint32_t size, bool write) {
   if (offset != 0 || size == 0 || size % kSector != 0) {
