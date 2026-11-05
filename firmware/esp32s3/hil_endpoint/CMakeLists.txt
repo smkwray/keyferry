@@ -13,7 +13,7 @@ set(KEYFERRY_BLE_HID_SPIKE "off" CACHE STRING
 option(KEYFERRY_MSC_SIZE_PROBE
     "Unflashed, empty-medium MSC descriptor and resource measurement" OFF)
 option(KEYFERRY_MSC_MEMORY_PROBE
-    "Unflashed MSC internal-memory qualification image and candidate layout" OFF)
+    "Unflashed MSC internal-memory probe image and candidate layout" OFF)
 set(KEYFERRY_POINTER_DEFAULT OFF)
 if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite")
     set(KEYFERRY_POINTER_DEFAULT ON)
@@ -67,7 +67,7 @@ endif()
 
 if(KEYFERRY_BOARD STREQUAL "m5stack_atoms3_lite")
     if(KEYFERRY_FILE_HANDOFF OR KEYFERRY_MSC_SIZE_PROBE)
-        message(FATAL_ERROR "AtomS3 Lite file capacity is unmeasured; qualification required")
+        message(FATAL_ERROR "AtomS3 Lite file capacity is unmeasured; file builds are unsupported")
     endif()
     if(NOT KEYFERRY_POINTER_EXTENDED)
         message(FATAL_ERROR "AtomS3 Lite requires the extended pointer personality")
@@ -226,7 +226,7 @@ if(KEYFERRY_FILE_HANDOFF)
         endif()
     elseif(CONFIG_SPIRAM)
         message(FATAL_ERROR
-            "PSRAM is not qualified for this file-handoff board")
+            "PSRAM is untested on this file-handoff board")
     endif()
 endif()
 

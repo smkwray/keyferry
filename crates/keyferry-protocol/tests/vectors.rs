@@ -4,9 +4,9 @@
 //! the committed `decoded_hex` and `wire_hex` and round-trips them back to the
 //! semantic frame. Adding a vector file automatically extends Rust coverage;
 //! `scripts/check_seed.py` recomputes the same files independently, and the C++
-//! codec test consumes them too, giving cross-language agreement per the
-//! Phase-1 qualification gate. Standard library only: a minimal leaf-key reader
-//! avoids a JSON dependency on the Phase-1 surface.
+//! codec test consumes them too, giving cross-language agreement. Standard
+//! library only: a minimal leaf-key reader avoids a JSON dependency on the test
+//! suite.
 
 use keyferry_protocol::{decode_decoded, decode_wire, encode_decoded, encode_wire, Frame};
 use std::fs;

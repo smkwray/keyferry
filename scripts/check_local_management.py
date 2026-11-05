@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static gates for the bounded Local Management v1 codec foundation."""
+"""Static checks for the bounded Local Management v1 codec foundation."""
 
 from pathlib import Path
 
@@ -123,7 +123,8 @@ def main() -> None:
     require(
         protocol,
         (
-            "side-effect-free",
+            "does not enter maintenance",
+            "512-byte random pool",
             "first 16 bytes of request HMAC-SHA256",
             "exact monotonic sequence",
             "never causes blind retry",

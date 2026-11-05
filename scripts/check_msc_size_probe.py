@@ -167,7 +167,7 @@ def inspect_backup(build: Path, backup: Path, package: Path, unit_record: Path) 
     stage_start, stage_size = factory[3:5]
     footprint = (len(new_app) + 4095) // 4096 * 4096
     print("MSC_BACKUP_REVIEW non_authorizing=1 source_binding=PASS "
-          "migration_gate=OPEN physical_boot_gate=OPEN "
+          "migration_performed=false boot_test_performed=false "
           "retained_bootloader_code_equal=1 bootloader_write=0 "
           f"staging_offset={stage_start:#x} erase_footprint_bytes={footprint}")
     # Include the full old sector: a generated 3072-byte table is insufficient.
@@ -426,7 +426,7 @@ def inspect_file_handoff(build: Path) -> None:
     )):
         raise SystemExit("persistent MSC storage adapter linked")
     print(f"USB_FILE_BUILD image_bytes={image.stat().st_size} headroom_bytes={headroom} "
-          f"sha256={sha256(image)} physical_gate=OPEN")
+          f"sha256={sha256(image)} hardware_test_performed=false")
 
 
 def inspect(build: Path, baseline: Path | None = None,

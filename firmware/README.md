@@ -58,7 +58,7 @@ The bounded installer `scripts/install_file_firmware.py` requires an exact-unit 
 validated package/image and a digest-authorized plan. Never use generated full flash arguments:
 the file layout preserves the installed bootloader, original app and pairing/settings in place.
 If normal startup changed NVS after the backup, `refresh-config` captures only the current
-configuration span twice into an empty private directory with owner-only permissions. Re-plan with
+configuration span twice into an empty owner-only directory under `hardware/evidence/private/`. Re-plan with
 `--current-config DIR`; every other saved-region comparison remains unchanged.
 Tested on one Waveshare GEEK unit with a Windows target: the original protocol published and read
 back `MESSAGE.TXT` byte-for-byte at 256 KiB. File-set v2 read back all 16 file names and all 256 KiB
@@ -66,7 +66,7 @@ of content with matching SHA-256 digests; clearing removed the old entries, a ne
 back exactly, and a target write attempt was rejected. LILYGO USB file capacity and Mac/Linux USB
 mounting are not yet tested on hardware.
 
-## Qualification image
+## Recovery-test image
 
 `esp32s3/` builds `keyferry_qualification`, a recovery-test image: a UART0 heartbeat mirrored to
 the S3's fixed-function USB Serial/JTAG console for enclosure-safe observation. It initializes no USB device
@@ -108,10 +108,10 @@ enclosure, but its logs are not observable unless a board exposes UART0 external
 
 ```text
 esp32s3/
-  main/                 qualification composition only
+  main/                 recovery-test composition only
   boards/<profile>/     pin map, electrical assumptions, optional capabilities
   components/           portable core and narrow adapters
-  partitions.csv        qualification-only single factory app
+  partitions.csv        recovery-test-only single factory app
 common/                  cross-language protocol codec and host tests
 ```
 
@@ -138,17 +138,17 @@ powershell -File scripts/build_first_hil.ps1 \
   -BuildDir build/lilygo-hil -BoardProfile lilygo_t_dongle_s3
 ```
 
-The runner defaults to 60% of logical CPUs. Use `-Jobs N` for a lower-impact build; values above
-that ceiling are rejected.
+The runner reads its CPU budget from `project.toml`, with machine-specific overrides in
+`project.local.toml`. `-Jobs N` may lower concurrency but cannot exceed that budget.
 
-A successful build does not test the board. A profile whose `qualified` field is false has not been
-tested on hardware and does not inherit another board's recovery or test results.
+A successful build does not establish hardware behavior. The table above describes the testing
+reported for each profile; results do not transfer between boards.
 
 ## Flashing hardware
 
-The qualification image and offline USB-executor slice do not provide networking; the production
+The recovery-test image and offline USB-executor slice do not provide networking; the production
 HIL endpoint uses authenticated Wi-Fi and Bluetooth. When you flash a board, keep the exact artifact
 hash, selected board, generated flash plan, and result.
 
-BLE is absent from the qualification image. Secure Boot, flash encryption, anti-rollback, and eFuse
+BLE is absent from the recovery-test image. Secure Boot, flash encryption, anti-rollback, and eFuse
 mutation are not used. eFuse changes are permanent; try them only on an identical spare board.

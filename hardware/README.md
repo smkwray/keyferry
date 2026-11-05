@@ -1,6 +1,6 @@
 # Hardware evidence
 
-Exact-unit board manifests and recovery records belong under the ignored `evidence/private/` tree.
+Store exact-unit board manifests and recovery records privately.
 Unique MAC addresses, device IDs, eFuse fingerprints, host names, raw flash dumps, and credentials
 must never enter the tracked tree.
 

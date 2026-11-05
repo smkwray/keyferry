@@ -1686,7 +1686,7 @@ mod tests {
             let mut device = Self::roaming(material);
             // Legacy generation belongs to the KFC1 configuration slots and
             // is deliberately independent of the not-yet-created KFC2 policy
-            // sequence. The deployed owner device is legacy generation 1.
+            // sequence. This fixture uses legacy generation 1.
             device.generation = 1;
             device.policy_status = Some(PolicyIdentity {
                 state: keyferry_protocol::provisioning_policy_state::LEGACY,

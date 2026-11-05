@@ -1,5 +1,5 @@
 # Offline USB-executor slice: boot keyboard only; no network, persistence, optional peripherals,
-# secondary console, security promotion, or irreversible state.
+# secondary console, Secure Boot or flash encryption, or irreversible state.
 CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

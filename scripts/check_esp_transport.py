@@ -638,7 +638,7 @@ def build_checks(build: Path) -> None:
 
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     if "KEYFERRY_MSC_SIZE_PROBE:BOOL=ON" in cache:
-        fail("MSC size probe is unqualified and cannot pass production inspection")
+        fail("MSC size probe is a measurement build and cannot pass production inspection")
     if "KEYFERRY_PRIVATE_CONFIG_DIR:" in cache:
         fail("private configuration directory became a CMake cache input")
     match = re.search(
@@ -709,9 +709,9 @@ def check_handheld_msc(build: Path, cache: str, board: str) -> None:
     """
     profile = json.loads((BOARDS / board / "board.json").read_text(encoding="utf-8"))
     if "handheld" not in profile:
-        fail("MSC is unqualified and cannot pass production inspection")
+        fail("MSC is untested on this board and cannot pass production inspection")
     if "KEYFERRY_FILE_HANDOFF:BOOL=ON" in cache:
-        fail("handheld file handoff is unqualified and cannot pass production inspection")
+        fail("handheld file handoff is untested and cannot pass production inspection")
     link_map = build / "keyferry_hil_endpoint.map"
     if not link_map.is_file():
         fail("linker map is missing: cannot tell who serves mass storage")

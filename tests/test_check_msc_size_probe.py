@@ -486,10 +486,10 @@ class MscSizeProbeTests(unittest.TestCase):
         self.inspect_bound_backup()
         report = self.output.getvalue()
         self.assertIn(
-            "MSC_BACKUP_REVIEW non_authorizing=1 source_binding=PASS migration_gate=OPEN",
+            "MSC_BACKUP_REVIEW non_authorizing=1 source_binding=PASS migration_performed=false",
             report,
         )
-        self.assertIn("physical_boot_gate=OPEN", report)
+        self.assertIn("boot_test_performed=false", report)
         self.assertIn("MSC_BACKUP_REGION staging_slot", report)
         self.assertIn("all_ff=1", report)
 
@@ -499,8 +499,8 @@ class MscSizeProbeTests(unittest.TestCase):
         report = self.output.getvalue()
         self.assertIn("MSC_BACKUP_REGION staging_slot", report)
         self.assertIn("all_ff=0", report)
-        self.assertIn("migration_gate=OPEN", report)
-        self.assertIn("physical_boot_gate=OPEN", report)
+        self.assertIn("migration_performed=false", report)
+        self.assertIn("boot_test_performed=false", report)
 
     def test_incomplete_or_misbinding_backup_is_rejected(self):
         for field, value in (

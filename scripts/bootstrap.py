@@ -41,7 +41,7 @@ def main() -> None:
 
     print()
     print("Host/protocol work needs Python, Rust, and a C++17 compiler.")
-    print("The qualification build uses pinned ESP-IDF v6.0.3; hardware writes remain separately gated.")
+    print("The recovery-test build uses pinned ESP-IDF v6.0.3. This script does not flash hardware.")
     print("This script never installs packages or alters the system.")
     if missing_required:
         raise SystemExit(1)

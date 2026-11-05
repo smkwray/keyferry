@@ -81,7 +81,7 @@ def main():
         "version": inspector.app_version(args.build / members[0]).decode("ascii"),
         "artifacts": artifacts,
         "app_headroom_bytes": slot - artifacts[members[0]]["bytes"],
-        "hardware_writes": False, "physical_gate": "OPEN",
+        "hardware_writes": False, "hardware_test_performed": False,
         "update_plan": "requires exact installed build and installed plan",
     }
     if descriptor_check is not None:

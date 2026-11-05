@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact-unit ROM layout migration for the qualified Waveshare USB-file image.
+"""Exact-unit ROM layout migration for the Waveshare USB-file image.
 
 Plan is offline. Apply and rollback require a matching plan digest and physical
 ROM mode; neither is called by build or install scripts automatically.
@@ -129,7 +129,7 @@ def sources(backup: Path, package: Path, unit_record: Path, build: Path,
     if (receipt["port"] == "" or record["qualified_recovery_cycles"] < 2
             or expected_unit["secure_boot"] or expected_unit["flash_encryption"]
             or expected_unit["secure_download_mode"]):
-        raise ValueError("exact-unit recovery/security gate differs")
+        raise ValueError("exact-unit recovery/security state differs")
     common = {
         "schema": SCHEMA,
         "backup": str(backup.resolve()), "package": str(package.resolve()),

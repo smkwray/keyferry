@@ -203,7 +203,7 @@ def inspect_build(build, data, absolute_only):
         require(flash.get("0x120000") == "keyferry_hil_endpoint.bin", "app-only offset differs")
     elif board in ("m5stack_atoms3_lite", "lilygo_t_dongle_s3"):
         for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
-            require(token in cache, "Unqualified storage build enabled")
+            require(token in cache, "Unsupported storage build enabled")
         for token in ("# CONFIG_TINYUSB_MSC_ENABLED is not set", "# CONFIG_SPIRAM is not set",
                       "# CONFIG_TINYUSB_CDC_ENABLED is not set"):
             require(token in config, "No-MSC storage/PSRAM/CDC differs")
@@ -217,7 +217,7 @@ def inspect_build(build, data, absolute_only):
         # no-MSC sticks; the board's own functions (Drive, Microphone, Messages) bring their own
         # USB devices, so its MSC, CDC and PSRAM settings are expected here.
         for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
-            require(token in cache, "Unqualified storage build enabled")
+            require(token in cache, "Unsupported storage build enabled")
         no_msc_usb_descriptors(image, data, absolute_only)
         require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Factory app offset differs")
     else:
@@ -237,7 +237,7 @@ def main():
         personality = "absolute-only" if absolute_only else personality
         inspect_build(args.build_dir, descriptor(absolute_only=absolute_only), absolute_only)
 
-    print(f"check_hil_pointer: ok; IF2={personality}; USB=Generic / USB Input Device; serial=unchanged device-ID uppercase hex; physical_gate=OPEN")
+    print(f"check_hil_pointer: ok; IF2={personality}; USB=Generic / USB Input Device; serial=unchanged device-ID uppercase hex; hardware_test_performed=false")
 
 
 if __name__ == "__main__":

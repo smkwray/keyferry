@@ -1,10 +1,10 @@
 //! Property and bounded-fuzz coverage for the wire codec.
 //!
-//! Closes Phase-1 gate items: a CRC known-answer test, valid-frame round-trips,
+//! Tests a CRC known-answer test, valid-frame round-trips,
 //! and >=1,000,000 malformed/random parser cases that must never panic and never
 //! yield a frame outside the fixed 256-byte / 242-payload bounds. Standard
 //! library only: a deterministic xorshift keeps it reproducible without adding a
-//! fuzzing dependency to the Phase-1 surface.
+//! fuzzing dependency to the test suite.
 
 use keyferry_protocol::{
     cobs_decode, cobs_encode, crc16_ccitt_false, decode_decoded, decode_wire, encode_decoded,

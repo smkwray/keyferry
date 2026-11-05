@@ -19,11 +19,13 @@ HMAC-SHA256(recovery_secret,
 ```
 
 `CHALLENGE` (`0x10`) resets only an earlier unauthenticated or authenticated local-management
-session; it does not enter maintenance, stop networking, alter input state, or touch storage. Each
-challenge consumes 40 bytes of a 512-byte true-random pool the stick fills once per boot, shared with
-provisioning (see `provisioning-v1.md`). After about twelve challenges, from either protocol and
-whether or not they authenticate, further challenges fail until the stick restarts; unplugging it
-restores them. Its request is the operation byte followed by 63 zero bytes. Its response is:
+session; it does not enter maintenance, stop networking, alter input state, or touch storage.
+Local management and provisioning (see `provisioning-v1.md`) share a 512-byte random pool the stick
+fills once per boot. A successful local-management challenge consumes 40 bytes, whether or not the
+session later authenticates; a provisioning challenge consumes 32. An otherwise unused pool supports
+twelve local-management challenges or sixteen provisioning challenges. Mixed usage shares that
+budget; once it is exhausted, challenges fail until the stick restarts (for example, after
+unplugging it). Its request is the operation byte followed by 63 zero bytes. Its response is:
 
 | Bytes | Field |
 | ---: | --- |

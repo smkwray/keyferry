@@ -876,8 +876,7 @@ pub fn exact_observation_from_probe(
         && record.partition_map_sha256 == package.base_plan.partition_map_sha256
         && lower_hex(&record.efuse_sha256, 64)
         && record.efuse_sha256 == board.security.efuse_after_sha256.to_ascii_lowercase()
-        // The package validator already admits only two-cycle qualification or
-        // the exact LILYGO owner waiver. Keep the record consistent with it.
+        // Require the recovery-cycle count accepted by the validated board manifest.
         && record.qualified_recovery_cycles >= if board.recovery.cycle_b_passed { 2 } else { 1 };
     if !record_valid {
         return Err(PlanError::ExactUnitRecord);

@@ -557,7 +557,7 @@ def run_cpp_check(compiler: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--strict", action="store_true", help="require Rust and C++ toolchains")
-    parser.add_argument("--firmware-only", action="store_true", help="run source, Python and native firmware gates without Rust builds")
+    parser.add_argument("--firmware-only", action="store_true", help="run source, Python and native firmware checks without Rust builds")
     args = parser.parse_args()
 
     run([sys.executable, "scripts/check_process_spawns.py"])

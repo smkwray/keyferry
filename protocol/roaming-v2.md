@@ -106,7 +106,7 @@ never falls back to another device certificate.
 Both Wi-Fi and BLE begin with the unchanged TLS 1.2 stream. BLE characteristic bytes are ciphertext
 from byte zero under `ble-gatt-v1`; Wi-Fi discovery input remains an untrusted address hint.
 
-Before promotion, the device requires:
+Before a candidate becomes the active endpoint session, the device requires:
 
 1. TLS 1.2;
 2. `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`;
@@ -116,7 +116,7 @@ Before promotion, the device requires:
 6. server-auth usage and CA-false leaf constraints;
 7. an `installation_id` absent from the active revocation set;
 8. a successful existing Keyferry HMAC challenge under the derived `link_secret`; and
-9. a current unchanged policy generation between candidate creation and promotion.
+9. a current unchanged policy generation between candidate creation and session admission.
 
 The challenge's `host_id` field becomes `installation_id`. The candidate starts disarmed and cannot
 ARM or execute before `SESSION_READY`. There is one shared Wi-Fi/BLE candidate budget and exactly
@@ -340,4 +340,4 @@ certificate chain/name/usage validation, revocation, epoch rotation, and interru
 Negative tests include wrong owner, device, SAN, EKU, curve, SPKI length, recovery secret, epoch,
 policy generation, duplicate revocation, stale floor, missing SNI, unknown SNI, malformed chain,
 oversize certificate, altered HMAC transcript, simultaneous gateways, transport loss at every
-promotion step, and recovery without USB target readiness.
+session-admission step, and recovery without USB target readiness.

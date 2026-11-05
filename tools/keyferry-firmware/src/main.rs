@@ -1883,7 +1883,7 @@ mod tests {
             Err("input.output")
         );
         // The actual production coordinator must withhold the bulk-read grant
-        // until its first ROM observation matches the qualified unit.
+        // until its first ROM observation matches the recorded unit.
         let python = backend_paths().map(|paths| paths.0).unwrap_or_else(|_| {
             Path::new(if cfg!(windows) { "python" } else { "python3" }).to_path_buf()
         });
@@ -1928,7 +1928,7 @@ print(json.dumps({{'schema':'keyferry.backup-session-result.v1','size_bytes':167
                 &python,
                 &helper,
             );
-            assert!(result.is_err(), "{scenario} unexpectedly promoted");
+            assert!(result.is_err(), "{scenario} unexpectedly succeeded");
             assert!(!destination.join("full-flash.bin").exists());
             assert!(!destination.join("receipt.json").exists());
             assert_eq!(

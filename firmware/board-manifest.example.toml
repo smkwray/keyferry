@@ -6,7 +6,7 @@ status = "UNQUALIFIED"
 device_label = "owner-assigned-label"
 qualified_at = "UNMEASURED"
 qualified_by = "UNMEASURED"
-evidence_directory = "hardware/evidence/private/YYYY-MM-DD-device-label"
+evidence_directory = "path/to/private-unit-records"
 
 [identity]
 vendor = "UNMEASURED"

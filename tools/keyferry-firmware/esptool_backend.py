@@ -118,11 +118,7 @@ class _SummarySink(StringIO):
 
 
 def _efuse_summary_sha256(commands) -> str:
-    """Digest of the JSON summary in the CRLF form that every qualified unit record binds.
-
-    Qualification hashed `espefuse summary --format json --file` output saved on Windows, so the
-    recorded digests cover CRLF line endings. Fixing that form keeps the digest platform-neutral.
-    """
+    """Hash the eFuse JSON summary as UTF-8 with canonical CRLF line endings."""
     sink = _SummarySink()
     try:
         commands.summary([], "json", sink, False)

@@ -159,13 +159,13 @@ def validate_build(build: Path) -> None:
         "0x8000": "partition_table/partition-table.bin",
         "0x10000": "keyferry_secure_endpoint.bin",
     }:
-        fail("secure endpoint flash offsets differ from the qualified layout")
+        fail("secure endpoint flash offsets differ from the configured layout")
     if flash.get("flash_settings") != {
         "flash_mode": "dio",
         "flash_size": "16MB",
         "flash_freq": "80m",
     }:
-        fail("secure endpoint flash settings differ from the qualified board")
+        fail("secure endpoint flash settings differ from the selected board profile")
     raw_flash = json.dumps(flash).lower()
     for token in ("--force", "erase_flash", "erase-region", "burn_efuse"):
         if token in raw_flash:

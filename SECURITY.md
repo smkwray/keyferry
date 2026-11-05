@@ -111,10 +111,10 @@ phrases, or a general-purpose secret vault on the dongle.
    the caller proves that exact peer and the server checks its existing caller-bound route lease.
    When capture and holder differ, the requesting controller proves its own device grant through
    the actual holder (or is the holder). On every read the capture controller proves its own grant
-   through that holder and then asks the holder whether the caller holds a fresh route lease for the
-   device in the current endpoint session; only a stick-issued route proof creates that lease, and
-   the stick refuses revoked installations. Peer authentication remains owner-mTLS; no caller
-   credential or frame request is relayed. This explicitly grants non-revoked owner
+   through that holder. If the caller is that holder, no caller-lease query is needed; otherwise the
+   holder must confirm the caller's fresh route lease for the current endpoint session. Only a
+   stick-issued route proof creates that lease, and the stick refuses revoked installations.
+   Peer authentication remains owner-mTLS; no caller credential or frame request is relayed. This explicitly grants non-revoked owner
    controllers access to a configured device's controller capture sources, rather than treating
    tailnet membership as screen authority. Calibration must separately demonstrate that the source
    shows the machine driven by the stick; device proof alone cannot establish that visual binding.
@@ -158,12 +158,14 @@ phrases, or a general-purpose secret vault on the dongle.
     reconnect; the last authenticated address is one routing hint, never cached authorization.
     Endpoint handoff refuses an outstanding arm until its correlated emitted neutral result or
     completed explicit disarm. Rejected or uncertain results require explicit disarm.
-11. **Physical firmware update:** Plan accepts one strict package, a private record of the exact
-    unit, and an exact local serial port after manual ROM entry. It never discovers ports or
-    manufactures boot mode. Live ROM, canonical eFuse summary, flash, security, and exact-length
-    preserved-region evidence must match that unit record before a unit-binding hash is emitted.
-    Apply is a separate step that runs only with the exact Plan hash and re-observes the same values
-    before any write.
+11. **Physical firmware update:** Updates accept one validated package and a private record of the
+    exact unit. Online planning reads an exact local serial port after manual ROM entry and emits a
+    plan only when live ROM identity, the canonical eFuse summary, flash, security state and
+    exact-length preserved regions match that record. Offline planning (`offline-plan`) builds the
+    plan from the retained record without contacting hardware. Neither path discovers ports or
+    manufactures boot mode. Apply is a separate step that requires the plan's authorization hash
+    and re-observes live identity, security state and preserved regions before any write; an
+    offline plan additionally requires an explicit local port at Apply.
 
 ## Prohibited production patterns
 
@@ -233,7 +235,7 @@ Production source under `apps/`, `crates/`, and `firmware/` must not contain:
   selection and a metadata-only replacement count;
 - any BLE service or role other than the generated, bounded GATT byte pipe in the production
   ESP32-S3 profile;
-- eFuse mutation, Secure Boot, flash encryption, or anti-rollback enabling in qualification builds.
+- eFuse mutation, Secure Boot, flash encryption, or anti-rollback enabling in recovery-test builds.
 - firmware port discovery, remote serial schemes, automatic boot-mode reset, unpinned update tools,
   arbitrary esptool arguments, or a firmware write without the exact Plan hash supplied separately;
 - wildcard/all-interface UDP beacon binding or discovery packets containing command data, payloads,

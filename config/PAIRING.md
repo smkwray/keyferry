@@ -6,7 +6,7 @@ the firmware certificate and SPKI pin inputs, and the exact `keyferryd` secret-s
 listener configuration. It refuses to replace an existing bundle.
 
 ```text
-cargo run -p keyferry-pairing -- create --host-address 192.168.1.137 --host-port 7443
+cargo run -p keyferry-pairing -- create --host-address <CONTROLLER_LAN_IPV4> --host-port 7443
 ./scripts/set_first_hil_wifi.ps1
 cargo run -p keyferry-pairing -- validate
 ```

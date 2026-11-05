@@ -1,4 +1,4 @@
-# Qualification image: UART0 plus fixed-function USB Serial/JTAG output; no HID, radio, storage,
+# Recovery-test image: UART0 plus fixed-function USB Serial/JTAG output; no HID, radio, storage,
 # PSRAM, or irreversible security state.
 CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_PARTITION_TABLE_CUSTOM=y

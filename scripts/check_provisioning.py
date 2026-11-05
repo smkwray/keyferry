@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static gates for the portable authenticated provisioning core."""
+"""Static checks for the portable authenticated provisioning core."""
 
 from pathlib import Path
 

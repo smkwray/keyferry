@@ -1,6 +1,6 @@
 # Keyboard Sequence v1 canonical key registry.
 # For modifiers, code is the report modifier bit. Otherwise code is the Keyboard/Keypad usage.
-# Source names follow USB HID Usage Tables 1.7; portability is a Keyferry qualification class.
+# Source names follow USB HID Usage Tables 1.7; portability is a Keyferry compatibility class.
 name,class,code,portability
 A,non-modifier,0x04,boot-common
 B,non-modifier,0x05,boot-common
