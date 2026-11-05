@@ -2,7 +2,8 @@
 
 LVGL is compiled from the device build's managed component with that build's sdkconfig.h, so
 fonts and widgets match the firmware. Run a device build first (scripts/build_handheld.ps1).
-Writes one PNG per scene plus screens.png (all scenes on one sheet) to --out.
+Writes one PNG per scene plus screens.png (all scenes on one sheet) to --out; --readme also
+writes the README's framed strip of README_SCENES.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ SOURCES = [
     HANDHELD / "preview/preview.cpp",
 ]
 WIDTH, HEIGHT = 368, 448
+README_SCENES = ("keyferry", "home", "macros-1", "keep-awake-timer")
 
 
 def msvc_environment() -> dict[str, str]:
@@ -144,11 +146,30 @@ def render(exe: Path, out: Path) -> list[Path]:
     return images
 
 
+def frame(images: list[Path], path: Path) -> None:
+    """Scenes side by side, each in a rounded device bezel, on a transparent background."""
+    from PIL import Image, ImageDraw
+
+    bezel, radius, gap = 18, 44, 28
+    width, height = WIDTH + 2 * bezel, HEIGHT + 2 * bezel
+    sheet = Image.new("RGBA", (len(images) * (width + gap) - gap, height), (0, 0, 0, 0))
+    mask = Image.new("L", (WIDTH, HEIGHT), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, WIDTH - 1, HEIGHT - 1), radius - bezel, fill=255)
+    draw = ImageDraw.Draw(sheet)
+    for index, png in enumerate(images):
+        x = index * (width + gap)
+        box = (x, 0, x + width - 1, height - 1)
+        draw.rounded_rectangle(box, radius, fill=(17, 18, 20, 255), outline=(72, 76, 84, 255), width=2)
+        sheet.paste(Image.open(png), (x + bezel, bezel), mask)
+    sheet.save(path, optimize=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--build-dir", default="build/handheld-check", help="device build with config/sdkconfig.h")
     parser.add_argument("--out", default="build/handheld-preview")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    parser.add_argument("--readme", help="also write the README screen strip to this path")
     args = parser.parse_args()
     sdkconfig = (ROOT / args.build_dir / "config/sdkconfig.h").resolve()
     if not sdkconfig.is_file() or not (LVGL / "src").is_dir():
@@ -158,6 +179,9 @@ def main() -> int:
     exe = build(out, sdkconfig, args.jobs)
     images = render(exe, out)
     print(f"preview: {len(images)} scenes -> {out / 'screens.png'}")
+    if args.readme:
+        frame([out / f"{scene}.png" for scene in README_SCENES], ROOT / args.readme)
+        print(f"preview: README strip -> {args.readme}")
     return 0
 
 

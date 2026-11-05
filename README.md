@@ -1,280 +1,191 @@
 <div align="center">
-  <img src="apps/keyferry/assets/icons/png/keyferry-256.png" width="120" alt="Keyferry"/>
+  <img src="apps/keyferry/assets/icons/png/keyferry-256.png" width="112" alt="Keyferry"/>
   <h1>Keyferry</h1>
-  <p>Send text through a portable USB or Bluetooth keyboard, and hand off files over USB.</p>
+  <p><strong>A secure, portable network-to-USB keyboard bridge.</strong><br/>
+  Type, run hotkeys and drive the mouse on another computer from a trusted one,
+  with nothing installed on the computer you type into.</p>
+  <p>
+    <a href="#features">Features</a> ·
+    <a href="#hardware">Hardware</a> ·
+    <a href="#quick-start">Quick start</a> ·
+    <a href="#command-line">Command line</a> ·
+    <a href="#agent-control">Agent control</a> ·
+    <a href="#safety-and-privacy">Safety</a> ·
+    <a href="#building-from-source">Build</a>
+  </p>
 </div>
 
-Keyferry is an ESP32-S3 stick that sends keyboard input to a computer (the *target*) over USB or
-Bluetooth. USB keyboard mode also provides mouse input. The stick needs USB power in either mode,
-but the target needs no Keyferry app. From a trusted Windows or macOS computer (the *controller*),
-you send commands to the stick over Wi-Fi or, in USB keyboard mode, a separate Bluetooth control
-link. If another authorized controller holds the stick, Keyferry can route through it over Tailscale.
-File-capable firmware also provides a small read-only drive to the computer physically connected by USB.
-It does not transfer files over Bluetooth or copy them into a computer's folder.
+Keyferry is firmware for small ESP32-S3 boards plus a controller for Windows and macOS. The board
+plugs into a computer (the *target*) as its USB keyboard and mouse, or pairs with it as a
+Bluetooth keyboard. A trusted computer (the *controller*) sends it text, hotkeys and pointer input
+over a mutually authenticated TLS link, carried over Wi-Fi or Bluetooth. If another of your
+controllers holds the board, Keyferry routes through it over Tailscale.
 
-- **Text of any length**, typed at a steady, configurable pace, with progress and cancel.
-- **Hotkeys in press order**, such as `Ctrl + L` or `CapsLock + Space + J`. Keys are pressed in the
-  order given and released in reverse.
-- **Sequences** that combine text, taps, key combinations, waits, and repeats.
-- **USB or Bluetooth keyboard output.** USB mode includes a mouse; Bluetooth mode is keyboard-only.
-- **Bluetooth or Wi-Fi control.** In USB keyboard mode, the stick connects out to an authorized
-  controller over known Wi-Fi or a nearby Bluetooth control link. Bluetooth keyboard mode uses
-  Wi-Fi control only.
+> [!NOTE]
+> Keyferry is a preview and is qualified board by board. [Hardware](#hardware) lists what has
+> been tested on each board.
+
+## Features
+
+- **Typing.** Text of any length at a steady, configurable pace, with progress and cancel. Text
+  the keyboard layout cannot type is rejected before sending, or replaced with `?` if you choose.
+- **Hotkeys and sequences.** Keys are pressed in the order given and released in reverse
+  (`Ctrl + L`, `CapsLock + Space + J`). Sequences combine text, taps, key combinations, waits and
+  repeats; save reusable ones as local recipes.
+- **Keyboard output over USB or Bluetooth.** USB mode is a keyboard and mouse; Bluetooth mode is a
+  keyboard only.
+- **Control over Wi-Fi or Bluetooth.** The board connects out to an authorized controller over
+  known Wi-Fi or, in USB mode, a nearby Bluetooth control link.
+- **Secure text.** A masked, owner-only dialog types a password into the target. The text never
+  reaches an agent, logs, recipes or files.
+- **Agent screen control.** With an HDMI capture dongle, an agent can see the target's screen and
+  act on it through an MCP server: screenshots, OCR, calibrated pointer, keyboard and waits.
+- **USB file handoff.** Publish one `MESSAGE.TXT`, or up to 16 named files sharing 256 KiB, on a
+  read-only USB drive held only in the board's RAM.
 - **Desktop app and command line** on Windows and macOS.
-- **USB file handoff** on qualified firmware: publish one volatile `MESSAGE.TXT` or up to 16 named
-  files sharing 256 KiB on the tested Waveshare-to-Windows path.
-
-The multi-file firmware replaces the whole drive with each publication. On one Waveshare stick and
-USB-connected Windows target, 16 files totaling 256 KiB were read back byte-for-byte; clear and
-replacement with a two-file set also passed. Names can contain up to 64 ASCII letters, digits,
-spaces, dots, underscores and hyphens; folders, reserved Windows names and names differing only by case are
-rejected. Leading or trailing spaces and dots are also rejected. File contents can be any bytes.
-
-Keyferry is still being qualified board by board. Control and USB input work on the Waveshare
-ESP32-S3-GEEK and LILYGO T-Dongle-S3. Direct Bluetooth keyboard text output has been tested on a
-Windows target; broader Bluetooth keyboard use remains unqualified. File handoff has been tested on
-one Waveshare stick with a USB-connected Windows computer. LILYGO file capacity and Mac/Linux USB
-mounting remain unqualified.
 
 ## How it works
 
-```text
-desktop app / keyctl
-        |
-        | local API (relay through another authorized controller when needed)
-        v
-keyferryd on controller
-        ^
-        | stick connects out over TLS: Wi-Fi, or BLE control in USB mode
-        |
-   ESP32-S3 stick
-       /       \
-USB cable       Bluetooth keyboard (Wi-Fi control only)
-power, provisioning,          |
-optional file drive,    paired target computer
-keyboard/mouse in USB mode
-       |
-USB-connected computer
+```mermaid
+flowchart LR
+    client["Desktop app · keyctl · MCP"] -->|local API| daemon["keyferryd<br/>on the controller"]
+    daemon -.->|Tailscale, when another<br/>controller holds the board| peer["another of your<br/>controllers"]
+    board["Keyferry board<br/>ESP32-S3"] -->|"connects out over TLS<br/>(Wi-Fi or Bluetooth)"| daemon
+    board -->|"USB keyboard + mouse,<br/>file drive"| usb["USB target"]
+    board -->|Bluetooth keyboard| ble["Bluetooth target"]
 ```
 
-The USB cable powers the stick in both modes. Bluetooth keyboard mode has no Bluetooth controller
-link or USB keyboard/mouse output. USB provisioning remains available when connected, and file
-handoff on capable firmware still requires a physical USB connection. The USB-connected computer
-can differ from the Bluetooth keyboard target.
-
-`keyferryd` runs on each controller and is the only component that can issue commands. The stick
-has no inbound network command listener; it opens one pinned, mutually authenticated TLS control
-session to an authorized controller. Each controller holds its own credential, issued from the
-owner's encrypted owner kit, so one computer can be revoked without affecting the others.
-
-## Secure text
-
-For passwords, use **Secure text…** on the Send page instead of the plain text box: it opens the
-same masked dialog for the selected stick. An agent can request that dialog with
-`keyctl secure-text DEVICE_UUID [--wake none|mouse|mac-login]`. The optional argument preselects a
-visible, editable wake choice; requesting the dialog sends no input. Run it on the computer where the human will
-enter the text, in its logged-in desktop session with the local controller running. It opens a
-separate masked dialog for that exact stick. With the target's password field focused, the human
-enters text and presses Enter (or chooses **Send once**); Esc cancels. Results remain visible for
-30 seconds or until closed. **Press Enter after the text** is ticked by default; change that default under Typing. The command's
-`REQUESTED` output means the prompt process started, not that typing or unlock succeeded.
-
-The wake selector starts at **No wake** and is not saved. **Mouse movement** sends a tiny relative
-movement out and back without clicking, then waits one second; it requires relative mouse support
-(absolute-only firmware rejects it) and may affect hover or shift the pointer slightly.
-For a Mac login screen, **Mac login screen (Shift)** taps Shift and waits two seconds; it requires
-keyboard input and does not require mouse capability. Both options proceed only after the separate nonsecret
-command completes and the exact stick is ready again. A failed or uncertain wake sends no text;
-nothing is automatically retried. Completion proves neither that the display woke nor that the
-intended field has focus. These options do not change the target's sleep settings.
-
-The prompt expires after two minutes, rejects non-printable/non-ASCII text without replacement,
-clears its editor after use, and sends no entered text to the agent, app logs, saved recipes or
-files. Use U.S./ABC input and Caps Lock off. Do not put the secret into chat, arguments or stdin,
-and do not let an agent inspect the dialog while entering it. Cleanup guards overwrite owned text,
-request bodies and keyboard buffers after use, including errors. Finished daemon command records
-discard the value derived from their keystrokes and retain only receipt/control metadata. Active
-commands still need their input and comparison data. An uncertain send is never automatically retried.
-
-These protections assume a trusted controller and operating system. The editor and networking
-libraries make temporary RAM copies, and freeing memory does not guarantee overwriting it. The
-editor can also keep an input-method copy until the separate prompt window/process is destroyed;
-all results close after 30 seconds to bound this remaining RAM lifetime. This is not deliberate password-history storage.
-OS paging/crash files and explicit clipboard operations or Linux primary selection can retain text
-outside Keyferry. Complete memory erasure is not promised.
-
-An agent can also use `keyctl screen-power DEVICE_UUID off` (or `on`). Current source forwards
-that exact setting through the authenticated holder when needed. It requires capable firmware and
-an idle, disarmed device, persists the setting, and does not affect keyboard authority. After a
-lost response, inspect `keyctl screen-power DEVICE_UUID` before deciding what to do next.
-
-These additions are in source; the published preview packages do not include them yet. Software
-checks do not verify physical target focus, macOS unlock, or preboot/FileVault input.
+- `keyferryd` runs on each controller and is the only component that can issue commands.
+- The board has no web server, captive portal, inbound listener or access-point fallback. It opens
+  one pinned, mutually authenticated TLS session to an authorized controller.
+- Each controller holds its own credential, issued from the owner's encrypted *owner kit*, so one
+  computer can be revoked without affecting the others.
+- USB powers the board in both modes. Bluetooth keyboard mode is controlled over Wi-Fi only and has
+  no USB keyboard or mouse. USB provisioning and file handoff still need the cable, and the
+  USB-connected computer can differ from the Bluetooth target.
 
 ## Hardware
 
-| Board | Display | Status |
-| --- | --- | --- |
-| Waveshare ESP32-S3-GEEK | 240×135 ST7789 | Qualified on one owner unit: control, USB input, and 256 KiB USB file handoff to Windows |
-| LILYGO T-Dongle-S3 | 160×80 ST7735 | Control and USB input supported; USB file capacity unqualified |
+| Board | Form | Display | Status |
+| --- | --- | --- | --- |
+| Waveshare ESP32-S3-GEEK | USB stick | 240×135 LCD | Qualified on one unit: control, USB input, and 256 KiB file handoff to Windows |
+| LILYGO T-Dongle-S3 | USB stick | 160×80 LCD | Control and USB input supported; file capacity unqualified |
+| M5Stack AtomS3 Lite | USB stick | none (RGB LED) | Control, USB keyboard and pointer used with Windows targets; profile not yet qualified |
+| Waveshare ESP32-S3-Touch-AMOLED-1.8 | Touch handheld | 368×448 AMOLED | Keyferry authenticated and typed over the Bluetooth control link on one unit; preview |
 
-Board differences live in one profile per board under `firmware/esp32s3/boards/`.
+Bluetooth keyboard output has been tested on a Windows target. Mac typing and Mac/Linux USB drive
+mounting are not yet physically qualified. Board differences live in one profile per board under
+[`firmware/esp32s3/boards/`](firmware/esp32s3/boards/). The AMOLED board runs Keyferry inside a
+small touchscreen shell with a few extra on-device functions; see
+[Handheld deployment](#handheld-deployment).
 
-## Setup
+## Quick start
 
-These steps assume a provisioned stick and an owner kit. Preparing a new physical unit requires
-board-specific recovery, backup, firmware installation, and authorization; this is not yet a
-turnkey public setup flow. See [`firmware/README.md`](firmware/README.md) for board-specific build
-and recovery guidance.
+These steps assume a provisioned board and an owner kit. Preparing a new board needs board-specific
+recovery, backup, firmware installation and authorization, and is not yet a turnkey public flow;
+see [`firmware/README.md`](firmware/README.md).
 
-1. **Connect USB power to the stick.** For USB keyboard/mouse input or file handoff, plug it into the
-   computer that should receive those functions. Bluetooth keyboard output can use another USB power
-   source; nothing is installed on the target.
-2. **Download and install Keyferry on the controller.** Get the Windows x64 or macOS Apple silicon
-   package from [Releases](https://github.com/smkwray/keyferry/releases). The Windows ZIP contains
-   `keyferry.exe` and its required helpers; the macOS ZIP contains `Keyferry.app`. Extract the whole
-   package and follow its `README.txt` to run `install.ps1` or `install.sh`. The published preview
-   installer sets up Keyferry's background service but does not leave it running. By default the service listens for
-   sticks on every active private home or office network (`--lan-interface auto`, never Tailscale or
-   other point-to-point links); name an interface instead to restrict it. Installed services also
-   acquire nearby sticks over Bluetooth by default; `--bluetooth off` makes a controller
-   Wi-Fi/Tailscale-only (macOS then never asks for Bluetooth permission). You can also
-   [build from source](#building-from-source).
+1. **Connect the board to USB power.** For USB keyboard/mouse input or file handoff, plug it into
+   the computer that should receive them. Bluetooth keyboard output can use any USB power source.
+2. **Install Keyferry on the controller.** Download the Windows x64 or macOS Apple silicon package
+   from [Releases](https://github.com/smkwray/keyferry/releases), extract the whole package and run
+   `install.ps1` or `install.sh` as its `README.txt` describes. Or [build from source](#building-from-source).
 3. **Open Keyferry and choose Authorize this computer.** Pick the owner-kit file, enter the owner
-   password, and choose which stick this computer will control. The computer receives its own
-   credential for that stick.
-4. **Keep the control link reachable.** USB keyboard mode can use known Wi-Fi or the separate
-   Bluetooth control link; on macOS, allow Bluetooth access when asked. Do not pair the controller
-   to that control link in the operating system's Bluetooth settings. Bluetooth keyboard mode needs
-   Wi-Fi control, including from a Mac controller.
+   password and choose the board this computer will control. The computer receives its own
+   credential for that board.
+4. **Keep the control link reachable.** USB keyboard mode can use known Wi-Fi or the Bluetooth
+   control link; on macOS, allow Bluetooth access when asked. Do not pair the control link in the
+   operating system's Bluetooth settings. Bluetooth keyboard mode needs Wi-Fi control.
 
-These are preview builds. Windows executables are unsigned, and the macOS app is not notarized;
-macOS may require [manual approval on first launch](https://support.apple.com/en-us/102445).
+The installed service listens on every active private home or office network
+(`--lan-interface auto`, never Tailscale or other point-to-point links); name an interface to
+restrict it. It also picks up nearby boards over Bluetooth; `--bluetooth off` makes a controller
+Wi-Fi/Tailscale-only, and macOS then never asks for Bluetooth permission.
 
-To type into a Bluetooth target, select the stick under **Devices**, then choose **Keyboard &
-display → Bluetooth keyboard**. The stick restarts; pair its keyboard on the *target* through the
-target's Bluetooth settings. To return to USB keyboard/mouse output, choose **USB keyboard** on the
-same page; this also restarts the stick.
+These are preview builds: Windows executables are unsigned and the macOS app is not notarized, so
+macOS may require [approval on first launch](https://support.apple.com/en-us/102445). The published
+[September 27 preview](https://github.com/smkwray/keyferry/releases/tag/preview-2026-09-27) predates
+several features described here, including secure text and screen power control. In that preview
+the background service runs only while the app is open; current source installs a service that
+starts at login, keeps running when the app closes, and is started by `keyctl` when needed.
 
-The **Send** page shows the stick's status, a text box, and a hotkey field. Send when it shows
-**Ready**. **Stop** or Esc cancels active work. If another of your authorized controllers holds the
-stick, Keyferry uses it over Tailscale
-automatically when that controller is reachable.
+## Desktop app
 
-In the published [September 27 preview](https://github.com/smkwray/keyferry/releases/tag/preview-2026-09-27),
-the background service runs only while Keyferry is open: opening the app starts it, closing it stops
-it, and nothing starts at login. Current source instead installs a controller service that starts
-at user login and runs independently of the desktop app. Closing the app leaves that controller
-available; `keyctl` starts the installed service when needed without opening the desktop app.
+- **Send** shows the board's status, a text box and a hotkey field. Send when it shows **Ready**;
+  **Stop** or Esc cancels active work. The text box and hotkey field clear after sending.
+- **Devices** lists your boards. Select one to open **Connection / Wi-Fi**, **Keyboard & display**
+  or **USB maintenance**; each page acts only on that board and shows its device ID. USB
+  maintenance needs that board plugged into this computer and the owner-kit password.
+- **Bluetooth keyboard.** Under **Keyboard & display**, choose **Bluetooth keyboard**; the board
+  restarts and you pair it from the target's Bluetooth settings. **USB keyboard** switches back.
+- **Screen on / Screen off** (on supported firmware) applies without a restart and persists across
+  unplugging. To protect the panel, **Screen on** lights the display for 60 seconds after boot, a
+  status change, a BOOT press or choosing **Screen on** again, then lets it sleep; the image drifts
+  by a couple of pixels while lit.
+- **USB files.** **Save as USB file** publishes `MESSAGE.TXT` on the board's read-only `KEYFERRY`
+  drive. With multi-file firmware, **Choose USB files…** reviews names and sizes before publishing
+  a set together, and **Refresh drive** shows what is published. Open the files on the computer
+  connected by USB; publishing does not copy them anywhere or type them.
 
-In USB keyboard mode, an unheld stick advertises its Bluetooth *control* link. Choose the stick
-under **Devices**; there is no manual controller selection. Bluetooth keyboard pairing with the
-target is separate.
+In USB keyboard mode, an unheld board advertises its Bluetooth *control* link; choose it under
+**Devices** (there is no manual controller selection). Bluetooth keyboard pairing with the target
+is separate. **Setup & security** prepares additional boards.
 
-Select a stick in **Devices** to open its **Connection / Wi-Fi**, **Keyboard & display**, or
-**USB maintenance** controls. Each page shows the selected stick and its device ID. USB maintenance
-requires that exact stick to be plugged into this computer and the owner-kit password; its buttons
-act only on that stick. Preparing another stick is separate, under **Setup & security**.
+### Secure text
 
-On supported firmware, **Keyboard & display** offers **Screen on** and **Screen off** for the
-selected stick. The choice survives unplugging and takes effect without restarting the stick.
-The status distinguishes a saved choice from a change the display has finished applying.
-To protect the panel, **Screen on** lights the display for 60 seconds after boot, a status change,
-a BOOT-button press or choosing **Screen on** again, then lets it sleep; the image also drifts by
-a couple of pixels while lit. **Screen off** keeps it dark.
+For passwords, use **Secure text…** on the Send page instead of the plain text box. An agent can
+open the same dialog with `keyctl secure-text DEVICE_UUID [--wake none|mouse|mac-login]`; the
+request itself sends no input. Run it in the logged-in desktop session where the human will type,
+with the local controller running. With the target's password field focused, the human types into
+the masked dialog and presses Enter (or **Send once**); Esc cancels.
+
+- Accepts 1–256 printable ASCII characters and rejects anything else without replacement. Use the
+  U.S./ABC input source with Caps Lock off. **Press Enter after the text** is on by default (change
+  it under **Typing**).
+- An optional, unsaved wake step runs first: **Mouse movement** (a tiny move out and back, no click;
+  needs relative mouse support) or **Mac login screen (Shift)** (a Shift tap, then a two-second
+  wait). A failed or uncertain wake sends no text.
+- The prompt expires after two minutes, and results close after 30 seconds. `REQUESTED` means only
+  that the prompt opened, not that typing or an unlock succeeded. Nothing is retried automatically.
+- Never put the secret in chat, arguments or stdin, and never let an agent inspect the dialog.
+
+The protections assume a trusted controller and operating system; temporary RAM copies and OS
+paging or crash files are outside Keyferry's control. [SECURITY.md](SECURITY.md#agent-requested-secure-text)
+details the limits. Software checks do not verify target focus, macOS unlock or preboot/FileVault input.
 
 ## Command line
 
-`keyctl` talks to the local daemon. In current source it starts the installed service if needed;
-the published September 27 preview opens the desktop app instead. It is installed next to the app:
+`keyctl` talks to the local daemon and starts the installed service when needed. It is installed
+next to the app:
 
 - Windows: `%LOCALAPPDATA%\Programs\Keyferry\keyctl.exe`
 - macOS: `~/Applications/Keyferry.app/Contents/MacOS/keyctl`
 
 ```text
-keyctl devices                                  # list sticks; use one whose link is "authenticated"
-keyctl status DEVICE                            # read one stick's state, firmware and connection
-keyctl capabilities                             # read the controller's supported API features
-keyctl capture list                             # list local HDMI/UVC video sources (no daemon)
-keyctl capture frame --out screen.png            # capture one PNG to a new private path
-keyctl input-sequence --describe                 # supported pointer/keyboard actions and bounds
+keyctl devices                                  # list boards; use one whose link is "authenticated"
+keyctl status DEVICE                            # one board's state, firmware and connection
+keyctl capabilities                             # the controller's supported API features
 keyctl stream DEVICE --input message.txt        # type a UTF-8 file of any length
-keyctl file DEVICE path/to/message.txt           # publish bytes as KEYFERRY/MESSAGE.TXT
-keyctl files DEVICE path/to/a.txt path/to/b.txt   # replace the drive with named files (v2 firmware)
-keyctl file-status DEVICE                        # inspect the published file or list
-keyctl file-clear DEVICE                         # clear the whole drive
-keyctl screen-power DEVICE off                   # turn off the screen; use on to light it again
-keyctl screen-power DEVICE                       # read active and saved screen settings
 keyctl sequence DEVICE < hotkey.json            # run a key sequence (JSON on stdin)
 keyctl sequence --example                       # a valid starting sequence
-keyctl keys                                     # physical key names and aliases (COMMAND, OPTION, ...)
-keyctl recipe list                              # saved sequences on this computer (local)
+keyctl keys                                     # key names and aliases (COMMAND, OPTION, ...)
+keyctl cancel DEVICE                            # stop the running command
+keyctl secure-text DEVICE                       # open the masked secure-text dialog
+keyctl file DEVICE path/to/message.txt          # publish bytes as KEYFERRY/MESSAGE.TXT
+keyctl files DEVICE a.txt b.txt                 # replace the drive with named files (v2 firmware)
+keyctl file-status DEVICE                       # inspect the published file or list
+keyctl file-clear DEVICE                        # clear the whole drive
+keyctl screen-power DEVICE [on|off]             # read, or set, the board's screen
+keyctl recipe list                              # saved sequences on this computer
 keyctl recipe --example                         # a valid starting recipe
 keyctl recipe import open-url.json              # validate and save a recipe (the only writer)
-keyctl recipe inspect open-url                  # metadata, route and worst-case time; never actions
-keyctl recipe run DEVICE open-url < params.json # run once; parameters as a JSON object on stdin
-keyctl cancel DEVICE                            # stop the running command
+keyctl recipe inspect open-url                  # metadata, route and worst-case time
+keyctl recipe run DEVICE open-url < params.json # run once; parameters as JSON on stdin
+keyctl capture list                             # local HDMI/UVC video sources (no daemon)
+keyctl capture frame --out screen.png           # capture one PNG to a new private path
+keyctl input-sequence --describe                # supported pointer/keyboard actions and bounds
+keyctl mcp                                      # stdio MCP server for agents
 ```
-
-For agents, `keyctl --help` works without credentials or a running app. Use an exact device ID
-from `devices`; never choose silently between multiple sticks. `status DEVICE` includes the
-firmware capability flags and `link_path`/`via` showing whether another computer holds the stick.
-Check command exit status and its JSON result. A missing response, `UNKNOWN`, or a lost connection
-after submission means the action may have happened: read status to reconcile it, never resend it
-automatically. Sends use command-scoped arming; ordinary agents do not need a separate `arm` call.
-`status DEVICE` reports `firmware.keyboard_lock_state`; it is `unsupported` on current firmware,
-so Keyferry cannot see whether Caps Lock is on. Make sure it is off before sending text.
-
-Saved sequences (recipes) are defined in `protocol/recipe-v1.md`. Only `recipe import` writes this
-computer's library (`KEYFERRY_RECIPE_DIR`, or `recipes` in the per-user Keyferry state directory);
-`recipe run DEVICE NAME` expands the recipe here, reads parameter values only from stdin, posts
-one ordinary sequence and prints the usual `keyferry.command-result.v2` line. A run saves nothing.
-
-| Control | CLI | Effect and connection required |
-| --- | --- | --- |
-| Screen | `keyctl screen-power DEVICE [on\|off]` | Without a value, reads active/saved state. Changes live and persists. |
-| Screen rotation | `keyctl display-orientation DEVICE [normal\|rotated-180]` | A change restarts the stick. |
-| Keyboard output | `keyctl output-mode DEVICE [usb-hid\|ble-hid]` | A change restarts the stick. This selects where keystrokes go. |
-| Forget keyboard pairing | `keyctl forget-bluetooth DEVICE` | Forgets the bonded Bluetooth keyboard target and restarts pairing. |
-| Release held input | `keyctl disarm DEVICE` | Releases input and disarms. `cancel DEVICE` stops active work. |
-| USB status | `keyctl local-status --owner-kit PATH --device UUID` | Direct USB and owner password; reports safety/network metadata, not Wi-Fi passwords. |
-| Restart networking | `keyctl local-recover --owner-kit PATH --device UUID restart-network` | Direct USB and owner password; interrupts the control connection and clears any published USB file. |
-
-Screen, rotation, output mode and online pairing controls run on the computer holding the stick's
-authenticated Wi-Fi or Bluetooth connection. Settings are not forwarded over Tailscale. Wi-Fi versus
-Bluetooth **control** is selected automatically; `output-mode` changes the keyboard's output and
-does not select the controller connection. For screen status, `stored` is the saved preference;
-`active` can lag while the display task applies it. `available=false` does not prove the physical
-screen state.
-
-Local USB commands work even when the daemon or network is unavailable. Keep `--device UUID`
-explicit with a multi-device owner kit. The owner supplies the password as one stdin line; never
-put it in arguments, shell history, logs or an agent transcript. Other `local-recover` actions are
-`forget-bluetooth`, `cancel-enrollment`, `usb-hid`, `ble-hid` and `reboot`. Its stdout is JSONL:
-match the attempt's device/action and operation IDs to the terminal result. Partial output is not
-success, and a nonzero exit alone does not prove that nothing happened.
-
-Wi-Fi policy and owner administration use the installed sibling **`keyferry-pairing`** program;
-`keyferry-pairing --help` lists its arguments and stdin requirements:
-
-| Task | Helper command |
-| --- | --- |
-| Save an edited Wi-Fi policy file | `save-roaming-policy --output PATH --replace` (complete policy JSON on stdin) |
-| Apply that policy to one stick | `update-roaming --owner-kit PATH --device UUID --policy PATH` |
-| Recover the initial Wi-Fi policy into a new private file | `recover-initial-roaming-policy --owner-kit PATH --device UUID --output PATH` |
-| List owner-authorized sticks | `list-owner-devices --owner-kit PATH` |
-| Authorize a computer for one stick | `issue-installation --owner-kit PATH --device UUID --output DIRECTORY` |
-| Prepare another stick | `add-owner-device`, `grant-device-to-installation`, `materialize-device-bootstrap` |
-| Change the owner password | `change-owner-kit-passphrase --owner-kit PATH` (current/new/confirmation on stdin) |
-
-Before a USB Wi-Fi policy operation, pause the selected stick on its holding controller with
-`keyctl maintenance DEVICE begin`; afterwards run `keyctl maintenance DEVICE finish`, including
-when the helper fails. Finish resumes controller availability and does not repeat the USB action.
-Beginning maintenance interrupts the link and clears any published USB file.
-If the app is closed, the helper can operate directly without starting a daemon. Policy files hold
-Wi-Fi secrets: keep them private, preserve non-Wi-Fi policy fields, and do not print their contents.
-Setup commands create credentials or bootstrap files; they do not themselves install or flash a
-new stick. Owner administration should follow an explicit owner request.
 
 A hotkey pressed in order:
 
@@ -284,274 +195,181 @@ A hotkey pressed in order:
 ```
 
 `chord` presses its keys together in one report; `ordered_chord` presses them one after another.
-Both end with every key released. Key names are the registry names from `keyctl keys` or its
-aliases: `COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, with `LEFT_`/`RIGHT_` forms.
+Both end with every key released. Key names come from `keyctl keys`, with aliases such as
+`COMMAND`/`CMD` for the GUI key and `OPTION`/`OPT` for Alt, plus `LEFT_`/`RIGHT_` forms.
 
-### Agent screen control
+<details>
+<summary><strong>Notes for scripts and agents</strong></summary>
 
-`keyctl mcp` exposes a
-[stdio MCP server](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
-with newline-delimited JSON-RPC, tool discovery, bounded JPEG/PNG images and structured results. It creates no
-listener and never opens/restarts the controller app. Start the installed controller normally;
-input uses its existing token and sole daemon command writer. Install FFmpeg on the controllers
-with capture cards and grant Camera permission on macOS.
+- `keyctl --help` works without credentials or a running app.
+- Use an exact device ID from `devices`; never choose silently between several boards. `status`
+  includes firmware capability flags and `link_path`/`via`, showing whether another computer holds
+  the board.
+- Check the exit status and JSON result. A missing response, `UNKNOWN`, or a lost connection after
+  submission means the action may have happened: read status to reconcile it and never resend
+  automatically. `EMITTED` means the board sent the keystrokes, not that the focused application
+  received them.
+- Sends use command-scoped arming; ordinary callers need no separate `arm`.
+- `firmware.keyboard_lock_state` is `unsupported` on current firmware, so Keyferry cannot see Caps
+  Lock. Make sure it is off before sending text.
+- Recipes ([format](protocol/recipe-v1.md)) live in `KEYFERRY_RECIPE_DIR`, or `recipes` in the
+  per-user Keyferry state directory. `recipe run` expands the recipe locally, reads parameter
+  values only from stdin, posts one ordinary sequence and saves nothing.
 
-Configure your MCP client to launch the installed `keyctl` executable with `["mcp"]` as its
-arguments, using the platform installation path listed above. The server uses stdio; no network
-listener or per-device executable is needed. Registration needs no device UUID or capture source;
-select those through the tools when discovery is ambiguous. Keep explicit device/source overrides
-private. Rebuild and reinstall updated packages on each controller before starting a new MCP session.
-For reusable routines and their storage configuration, see the [recipe format](protocol/recipe-v1.md).
+</details>
 
-With no `--device`, the server selects the single authenticated authorized stick, including one
-held by another owner controller over the tailnet. A unique authenticated `POINTER_EXTENDED_V1`
-stick is preferred when other keyboard-only sticks are present. Ambiguity never selects by list
-position: call `list_devices` and `select_device`. Action tools require a selected device.
-With no `--source`, use the single recognized local HDMI capture device; if none is local,
-use the single recognized remote source. Multiple candidates require `list_capture_sources` and
-`select_capture_source`. `status` reports the exact selections and whether each was automatic,
-an argument override, or a selection tool. `--device UUID` and `--source NAME_OR_ID` remain available;
-global `--url` and `--token-file` select the existing loopback daemon.
+### Device settings and recovery
 
-The controller with the capture card owns one continuous FFmpeg stream per selected card, shared
-by local and remote clients. Remote frames and OCR travel through the existing owner-mTLS tailnet
-API. Eyes and hands may be on different controllers: both ends reprove the configured stick at
-its actual holder, and the capture peer serves its own frames directly. There is no frame relay
-chain or new listener. Capture source IDs include the authenticated controller installation;
-calibration binds that source to the exact stick, even when input and capture are remote.
-
-The read-only HTTP capture API is:
-
-| Route | Listener | Response |
+| Control | Command | Effect |
 | --- | --- | --- |
-| `GET /v1/capture/sources` | loopback bearer | local and authenticated peer inventories; local/peer discovery errors |
-| `POST /v1/capture/frame` | loopback bearer | local latest frame or one direct owner-mTLS peer read |
-| `GET /v1/devices/{id}/capture/sources` | existing owner-mTLS | that controller's local capture inventory only |
-| `POST /v1/devices/{id}/capture/frame` | existing owner-mTLS + fresh device proof | that controller's latest frame and optional native OCR |
+| Screen | `keyctl screen-power DEVICE [on\|off]` | Without a value, reads active and saved state. Changes live and persists. |
+| Screen rotation | `keyctl display-orientation DEVICE [normal\|rotated-180]` | A change restarts the board. |
+| Keyboard output | `keyctl output-mode DEVICE [usb-hid\|ble-hid]` | Where keystrokes go. A change restarts the board. |
+| Forget keyboard pairing | `keyctl forget-bluetooth DEVICE` | Forgets the bonded Bluetooth target and restarts pairing. |
+| Release held input | `keyctl disarm DEVICE` | Releases input and disarms. `cancel DEVICE` stops active work. |
+| USB status | `keyctl local-status --owner-kit PATH --device UUID` | Over USB with the owner password; safety and network metadata, never Wi-Fi passwords. |
+| Restart networking | `keyctl local-recover --owner-kit PATH --device UUID restart-network` | Over USB with the owner password; interrupts control and clears any published USB file. |
 
-Frame JSON requests require `device` and `source`; optional `after`/`epoch` wait for a fresh serial
-within the same daemon epoch, `region` crops native frame pixels, and `ocr:true` returns OCR boxes
-from that exact frame. Without `max_width` the image fits 1280x1280 (the agent view); `max_width`
-2..1920 bounds only the width, so 1920 returns native 1080p. OCR always reads native pixels and
-reports boxes in returned-image pixels. Responses include base64 PNG, dimensions,
-native dimensions, region, serial, daemon epoch, generation, frame age and capture status. Frames
-are memory-only, PNG is bounded to 8 MiB and response JSON to about 11.7 MiB. A service admits one
-read at a time, at most ten frame requests/second and four capture streams. MCP uses full-frame
-geometry; direct API callers must account for region/scale before driving a pointer.
+Screen, rotation, output-mode and pairing controls run on the computer holding the board's
+authenticated connection. Screen power is the only setting forwarded over Tailscale; it needs
+capable firmware and an idle, disarmed board, and after a lost response you read its state before
+deciding what to do. For screen status, `stored` is the saved preference and `active` can lag while
+the display applies it.
 
-First call `status` and `screenshot`, locate the cursor tip, then call `calibrate` with its
-`cursor_x,cursor_y` on a static, harmless approved target. Use `mode:"screen"` to bind without
-movement. Take a fresh `screenshot` before subsequent pointer input. The target HDMI output must be its only display or mirror the main
-display. Calibration sends eight absolute pointer probes (no clicks), isolates the cursor in
-three-frame differences, fits independent affine axes and verifies another position. It handles
-letterbox/pillarbox, scaling and modest overscan. Animation, ambiguous/missing cursor, rotated axes or
-excessive residuals fail explicitly. "Cursor not seen: capture may show a different machine" is a
-binding failure. Calibration is observational, not cryptographic proof of machine identity.
+Local USB commands work without the daemon or network. Keep `--device UUID` explicit with a
+multi-device owner kit, and give the owner password as one stdin line, never in arguments, shell
+history, logs or an agent transcript. Other `local-recover` actions are `forget-bluetooth`,
+`cancel-enrollment`, `usb-hid`, `ble-hid` and `reboot`. Output is JSONL: match the device, action
+and operation IDs to the terminal result. Partial output is not success, and a nonzero exit alone
+does not prove nothing happened.
 
-Only geometry is persisted per device UUID and resolved capture source in `capture-geometry` under
-the user's Keyferry state directory. Persisted geometry is inspectable; each new session must reprove
-binding. Resolution changes or capture restarts invalidate binding and require a fresh screenshot.
-Recalibrate after any HDMI/display arrangement or stick/target change, even at the same resolution.
-Coordinates are **screenshot pixels**, mapped to normalized HID and rounded to 0..32767 by the existing
-compiler; points outside the measured active rectangle reject. Calibration is session-scoped
-through MCP so the observed cursor and its capture stay together.
+### Owner administration
 
-Pointer tools refuse devices without authenticated `POINTER_EXTENDED_V1` (0x08000000); keyboard tools
-remain available. Explicit per-call `uncalibrated:true` bypasses binding and uses full-frame linear
-mapping, flagged in results. It still requires the capability and a fresh screenshot. This override
-accepts the risk of driving a different target or a cropped/scaled display.
+Wi-Fi policy and owner administration use the installed **`keyferry-pairing`** helper;
+`keyferry-pairing --help` lists its arguments and stdin requirements.
 
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `screenshot` | optional `format` = jpeg/png | image (JPEG by default), screenshot/native geometry, frame ID/age and capture status; no file export |
-| `move` | integer `x,y`; optional `glide_ms`, `uncalibrated` | absolute move receipt |
-| `click` | `x,y`; optional `button` = left/right/middle, `double`, `glide_ms`, `uncalibrated` | move then single/double click receipt |
-| `drag` | `from_x,from_y,to_x,to_y`; optional `button`, `glide_ms`, `uncalibrated` | balanced atomic drag, 40 ms hold |
-| `scroll` | `x,y,dx,dy`; optional `glide_ms`, `uncalibrated` | integer detents, each -127..127, not both zero |
-| `type_text` | `text` (1..4096 supported ASCII characters) | ordinary US-mapped text; unsupported characters reject |
-| `key` | `keys` (1..14 names/aliases) | tap or balanced chord through the `keyctl keys` table |
-| `wait_for_stable` | `timeout_ms` (1..30000); optional `region` | matched after at least 3 fresh frames below 0.002 mean normalized RGB difference for 300 ms; otherwise timed_out |
-| `wait_for_change` | same | matched above 0.01 mean difference from the initial frame; otherwise timed_out |
-| `find_text` | optional `query` | capture-controller OCR line boxes in screenshot pixels, case-insensitive substring filter |
-| `calibrate` | optional `mode` = probe/screen, observed `cursor_x,cursor_y` | binding and mapping; fresh sessions require the observed cursor position before any pointer motion; persists geometry only |
-| `status` | none | chosen device/source, selection reasons, authenticated state, capture errors/restarts and binding |
-| `list_devices` / `select_device` | none / exact `device` UUID | authorized inventory / choose authenticated stick and clear binding |
-| `list_capture_sources` / `select_capture_source` | none / exact `source` ID | local/remote inventory / choose capture source and clear binding |
+| Task | Command |
+| --- | --- |
+| Save an edited Wi-Fi policy file | `save-roaming-policy --output PATH --replace` (policy JSON on stdin) |
+| Apply that policy to one board | `update-roaming --owner-kit PATH --device UUID --policy PATH` |
+| Recover the initial Wi-Fi policy | `recover-initial-roaming-policy --owner-kit PATH --device UUID --output PATH` |
+| List owner-authorized boards | `list-owner-devices --owner-kit PATH` |
+| Authorize a computer for one board | `issue-installation --owner-kit PATH --device UUID --output DIRECTORY` |
+| Prepare another board | `add-owner-device`, `grant-device-to-installation`, `materialize-device-bootstrap` |
+| Change the owner password | `change-owner-kit-passphrase --owner-kit PATH` (current/new/confirmation on stdin) |
 
-Optional `glide_ms` requests HID travel time: integer 120..5000 in multiples of 10 for
-`move`, `click` and `scroll`; 120..280 for each leg of `drag` (approach and held drag).
-Higher values slow the same eased path. Omission preserves the distance-based 12..24 samples
-(about 120..240 ms). For example, `move {"x":800,"y":400,"glide_ms":1000}`.
-Network, command/chunk neutral reports, clicks and settling add end-to-end latency.
-This is per action, with no saved speed preference or firmware change. Older installed runtimes
-may reject the field; rebuild/reinstall before relying on it. Physical qualification of this option
-remains open.
-
-A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame. Positive `dy` is
-wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject
-unknown fields, null optionals and invalid ranges. Keyboard actions use the existing alias table and
-reject unsupported ASCII controls. Ordinary text only: **secrets stay in the owner-only secure-text
-dialog**. A routine can request the owner dialog; its content never enters MCP.
-
-Every action submits once through `/input-sequences` with existing authentication, command-scoped
-arm, admission and release guarantees. No cross-call held button, alternate writer or input retry
-exists. Failed/possible-start UNKNOWN results return `isError:true` with command IDs and evidence.
-Inspect/reconcile uncertain outcomes; never replay them. `EMITTED` proves emission, not visible target
-behavior. MCP cancellation reaches the existing daemon cancellation mechanism.
-
-Actions, batches and routines return receipts and observation metadata by default, without an
-image. Internal fresh-frame observation and settling still run. Use `return_screenshot:true` on
-the final action of a UI stretch, or call `screenshot` when a visual decision needs it; avoid both
-for the same checkpoint. Neither emission nor `settled:true` proves the intended application
-result. Wait tools and OCR can check intermediate steps without adding images to the conversation.
-
-The current pointer position stays in session memory. After starting a session or changing sticks,
-take a screenshot and supply its observed cursor tip as `cursor_x,cursor_y` to `calibrate`. Never
-guess a starting position. Without it, pointer input and probe calibration refuse before sending
-input; `mode:"screen"` can still bind without motion. This replaces the saved-position/centre-jump
-fallback and preserves glides from the observed position.
-
-One continuous ffmpeg pipe of unfiltered PNG frames retains the latest RGB frame, scaled
-proportionally to at most 1920 pixels on each axis; recognized cards stream a pinned native mode
-from one table (the Hagibis MS2130: 1920x1080 YUYV at 30 fps). MCP screenshots, OCR boxes, pointer
-coordinates and routines use the 1280-pixel agent view; OCR and calibration read native pixels.
-Comparison frames are bounded and memory-only. Capture faults clear the latest frame, report an explicit error
-and restart after backoff; counters remain visible. A stalled stream is a capture error, not a
-stable screen. Capture children belong to the daemon and stop when its capture service is dropped.
-`keyctl capture frame --out PATH` retains its independent one-shot behavior.
-
-Keyferry does not persist an execution history, submitted text, key/button lists, coordinates,
-screens or OCR. MCP has no screenshot file export. The explicit CLI `capture frame --out` is for
-deliberate exports; temporary inspection files must be removed as soon as inspection finishes.
-Saved recipes are intentional reusable configuration, not a record of executions: use parameters
-for task-specific text and never write run values or captured screens into recipes or reports.
-
-MCP clients and model providers can retain tool arguments (including typed text and keystrokes),
-results and images in their own conversations. Keyferry cannot erase or prevent that recording.
-Do not describe an agent-mediated run as having no retained history unless the client and provider
-also enforce it. Secrets belong to the owner-only secure-text dialog, outside MCP arguments.
-OCR runs on the capture controller and uses its local Windows.Media.Ocr language packs, with no
-cloud recognizer or downloaded model. A macOS or Linux agent can use OCR from a Windows capture
-controller. Capture controllers on macOS/Linux report `ocr.unsupported_platform` explicitly.
-Black/blue no-signal frames remain valid screenshots and may be stable; they are not target proof. Exact firmware/OS physical gates remain
-OPEN until the hardware window qualifies them.
-
-The original one-shot CLI loop is also available:
-
-Connect the target's HDMI output to a USB HDMI/UVC capture dongle on the controller host.
-`keyctl capture list` returns video source names and platform IDs as JSON. Install
-[FFmpeg](https://ffmpeg.org/download.html) on PATH; capture uses its
-[dshow, avfoundation or v4l2 backend](https://ffmpeg.org/ffmpeg-devices.html).
-On macOS, grant Camera permission to the terminal/app in System Settings → Privacy & Security.
-Default selection requires one recognized capture device; unknown or ambiguous sources require
-`--source NAME_OR_ID` from the list. Listing does not probe capture modes or include supported sizes.
-
-The loop is **capture → inspect/decide → input once → capture to verify**:
-
-```text
-keyctl capture frame --out before.png --source "Hagibis" --size 1920x1080
-keyctl devices
-keyctl status DEVICE
-keyctl input-sequence --describe
-keyctl input-sequence --validate --input action.json
-keyctl input-sequence DEVICE --input action.json
-keyctl capture frame --out after.png --source "Hagibis" --size 1920x1080
-```
-
-Every input needs the exact authenticated, idle/disarmed device; the daemon arms it for that command.
-Input Sequence v2 uses absolute positions, wheel/pan and balanced drag on devices with
-POINTER_EXTENDED_V1. Older images retain v1 relative-count motion, which undergoes target OS
-acceleration and cannot be interpreted as pixels. Mixed keyboard actions require
-`keyboard_profile:"windows-us"`; validate locally. Inspect the installed CLI
-`input-sequence --describe` and authenticated firmware capabilities.
-Never automatically resend input: missing responses or possible-start losses are **UNKNOWN**.
-`EMITTED` proves emission; a subsequent capture verifies the visible target result.
-
-Frames may show secrets. Capture writes one PNG **only to `--out`**, refuses existing paths, keeps
-intermediate pixels in memory, and sends no image, statistics or capture path to the daemon.
-Delete frames privately after inspection. `--size WxH` selects the input mode; optional
-`--scale WxH` reduces output size (each dimension 1…4096); translate coordinates back to the full
-frame before absolute input. The JSON `keyferry.capture-frame.v1` reports path, source, output
-width/height, host UTC `captured_at`, `signal` and mean Rec.709 luma (0…255). Near-uniform black/blue
-is `no-signal`; this heuristic can also label a blank real screen and cannot prove HDMI sync.
-Each FFmpeg invocation is bounded to 15 seconds and killed on timeout, without retry or temp frames.
-`capture --help` lists JSON error/exit conventions; `no-signal` itself is successful capture (exit 0).
+Before a USB Wi-Fi policy operation, pause the board on its holding controller with
+`keyctl maintenance DEVICE begin`, and run `keyctl maintenance DEVICE finish` afterwards, even when
+the helper fails. Beginning maintenance interrupts the link and clears any published USB file. If
+the app is closed, the helper works directly without a daemon. Policy files hold Wi-Fi secrets:
+keep them private and never print them. Setup commands create credentials or bootstrap files; they
+do not install or flash a board.
 
 ### Mac targets
 
-The profile `windows-us` is the wire name of the US-ASCII key mapping. It types correctly on a Mac
-that identifies the stick as an ANSI keyboard and uses the U.S. or ABC input source; `windows-us`
-does not claim that the target runs Windows. When Keyboard Setup Assistant appears after you plug in
-the stick, choose ANSI or send the keys it asks for yourself; Keyferry never types into it on its
-own. If the Mac treats the stick as ISO, `` ` `` and `~` come out as `§` and `±`: change the type in
-System Settings > Keyboard > Change Keyboard Type. Caps Lock must be off. Smart quotes, automatic
-capitalization and autocorrect can change typed text inside some apps. Mac typing is not yet
-physically qualified.
+The `windows-us` profile is the wire name of the US-ASCII key mapping, not a claim that the target
+runs Windows. It types correctly on a Mac that treats the board as an ANSI keyboard with the U.S. or
+ABC input source. If Keyboard Setup Assistant appears, choose ANSI or press the keys it asks for
+yourself; Keyferry never types into it. If the Mac treats the board as ISO, `` ` `` and `~` come out
+as `§` and `±`: change the type in System Settings › Keyboard › Change Keyboard Type. Keep Caps Lock
+off; smart quotes, auto-capitalization and autocorrect can alter typed text in some apps.
 
-The desktop's **Save as USB file** also publishes `MESSAGE.TXT` on the stick's read-only `KEYFERRY`
-drive, replacing its previous contents. With multi-file firmware, **Choose USB files…** reviews a
-set of names and sizes before publishing them together; **Refresh drive** shows the files currently
-published. Open them on the computer physically connected by USB. Publishing does not copy them
-into Downloads or type them.
-The Waveshare-to-Windows path is qualified for 16 files sharing 256 KiB, including exact USB
-readback, whole-drive clear and read-only enforcement. LILYGO file capacity and Mac/Linux USB
-mounting remain unqualified. Files are held in volatile memory and clear on power or
-controller-session loss. The USB-connected computer may retain a copy after you clear it.
+## Agent control
 
-A result of `EMITTED` means the stick sent the keystrokes. It does not confirm that the focused
-application on the target received them. Commands that may have started are never retried.
+`keyctl mcp` is a [stdio MCP server](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+that lets an agent see a target through an HDMI capture dongle and act on it. Point your MCP client
+at the installed `keyctl` with `["mcp"]` as arguments; it opens no network listener and needs no
+device or source argument when there is exactly one of each. Install FFmpeg on controllers with
+capture cards, and grant Camera permission on macOS.
 
-## Safety
+| Tools | Purpose |
+| --- | --- |
+| `screenshot`, `find_text` | Capture the target screen (JPEG/PNG) and OCR it on the capture controller |
+| `calibrate` | Bind the capture to the exact board from the observed cursor before pointer input |
+| `move`, `click`, `drag`, `scroll` | Absolute pointer actions in screenshot pixels, with optional smooth `glide_ms` |
+| `type_text`, `key` | Ordinary US-mapped text and key taps or chords |
+| `wait_for_stable`, `wait_for_change` | Wait on the screen instead of sleeping |
+| `status`, `list_devices`, `select_device`, `list_capture_sources`, `select_capture_source` | Inspect and choose the board and capture source |
 
-- The stick starts disarmed. Sending authorizes and arms it for that command; **Stop** or Esc cancels
-  active work.
-- Reboot, reconnect, cancellation, and every fault path release all keys. Pending work is discarded.
-- The stick runs no web server, captive portal, or inbound listener, and has no automatic Wi-Fi
-  access-point fallback. Knowing the Wi-Fi password grants no ability to type.
-- Wi-Fi settings change only through an authenticated USB connection to the stick, never remotely.
-- Text the target keyboard layout cannot type is rejected before sending, unless you choose to
-  replace it with `?`. Keyferry cannot see Caps Lock; keep it off when sending text.
+Every action submits once with the daemon's normal authentication, arming and release guarantees,
+and an `UNKNOWN` result is reconciled, never replayed. Secrets stay in the owner-only secure-text
+dialog, never in MCP arguments. Keyferry stores no execution history, screens or OCR, but MCP
+clients and model providers may retain tool arguments, results and images. Capture and OCR can run
+on a different controller from the one holding the board, over the existing owner-mTLS tailnet API.
 
-## Privacy
+[`apps/keyctl/AGENT-CONTROL.md`](apps/keyctl/AGENT-CONTROL.md) is the full reference: selection
+rules, calibration, the HTTP capture API, tool arguments, retention and the one-shot CLI loop.
 
-Keyferry does not persist sent payloads. It holds submitted text, hotkeys, sequences, and file
-contents in memory while processing them. A USB file remains in the stick's volatile memory until
-cleared or the power or controller session is lost; the target may save its own copy.
+## Safety and privacy
 
-- Command outcomes are kept in memory for ten minutes so a client can ask how a send ended.
-- The app clears the text box and hotkey field after sending. Its diagnostics view is off by
-  default and held only in memory.
-- The stick stores its configuration and pairing credentials persistently, but not payloads or
-  keystrokes. USB file contents stay in RAM.
-- On macOS the background service writes a connection log (link events and errors, no content) to
-  `~/Library/Application Support/keyferry/logs/`.
-- Saved sequences are the exception to not persisting: `keyctl recipe import` stores the recipe as
-  written (owner-only on macOS) until you delete it. Use parameters for ordinary task-specific
-  values; send secrets through the owner-only secure-text dialog, never recipe parameters or agent
-  arguments. Runs and parameter values are never saved by Keyferry.
-- Choosing a file with **Send a file…** may add its name to the operating system's recent-files
-  list; pasting the path instead avoids that.
+- The board starts disarmed. Sending authorizes and arms it for that command only; **Stop** or Esc
+  cancels active work.
+- Reboot, reconnect, cancellation and every fault path release all keys and discard pending work.
+  A command that may have started is never retried.
+- Knowing the Wi-Fi password grants no ability to type. Wi-Fi settings change only through an
+  authenticated USB connection to the board, never remotely.
+- Keyferry does not persist sent text, hotkeys, sequences or file contents; it holds them in memory
+  while processing them. Command outcomes stay in memory for ten minutes so a client can ask how a
+  send ended.
+- A USB file stays in the board's RAM until cleared or until power or the controller session is
+  lost. The USB-connected computer may keep its own copy.
+- The board stores its configuration and pairing credentials, never payloads or keystrokes.
+- On macOS the service writes a connection log (link events and errors, no content) to
+  `~/Library/Application Support/keyferry/logs/`. The app's diagnostics view is off by default and
+  held only in memory.
+- Saved recipes are the exception: `keyctl recipe import` stores a recipe as written (owner-only on
+  macOS) until you delete it. Runs and parameter values are never saved.
+- Choosing a file with **Send a file…** may add its name to the operating system's recent files;
+  pasting the path avoids that.
+
+[SECURITY.md](SECURITY.md) has the full security contract and threat model.
+
+## Handheld deployment
+
+<p align="center">
+  <img src="firmware/esp32s3/handheld/preview/handheld-screens.png" width="780"
+       alt="Handheld screens: Keyferry status, Home, Macros shortcuts and the Keep Awake timer"/>
+  <br/>
+  <sub>Keyferry, Home, Macros and Keep Awake, rendered from the firmware's own UI code by
+  <code>scripts/preview_handheld.py</code>.</sub>
+</p>
+
+On the Waveshare ESP32-S3-Touch-AMOLED-1.8 (touchscreen, microSD slot, microphone, BOOT and PWR
+buttons, USB-C), Keyferry runs inside a small touchscreen shell. **Keyferry** is the main function
+and works as described above, with its status on screen; USB file handoff is not available on this
+board. **End Keyferry**, or holding BOOT, leaves only after every key and button is confirmed
+released.
+
+The shell adds a few functions that use this board's hardware. They are separate from Keyferry:
+each runs alone (choosing one from Home restarts the board into it with only its own USB device,
+and leaving restarts to Home), and none has a path into Keyferry's command executor.
+
+| Function | What it does |
+| --- | --- |
+| **Keep Awake** | A USB mouse that makes a tiny relative move out and back every 25 s, for 30 min, 1 h, 2 h or until stopped. It starts only when you tap Start and stops on sleep or unplug. |
+| **Macros** | Thirty built-in presets on five pages: Media, Shortcuts, Edit, Present and Mouse. Shortcuts follow a Windows or Mac setting. One tap plays a preset once; presets hold no text or secrets. |
+| **USB Drive** | Serves one disk image from the microSD card (`DRIVES/*.IMG`) as a USB drive, writable by default or read-only. What the computer saves stays on the card, so eject the drive there before unplugging; an image left without a clean eject is flagged. The board can also create FAT32 drives of 64 MB, 256 MB or 1 GB. |
+| **Microphone** | The board's microphone as a standard USB microphone (48 kHz mono), with mute and adjustable sensitivity. Audio goes only to the computer, only while it records. |
+| **Messages** | A USB serial port: programs on the computer show notices, alerts and Yes/No questions. Display-only; see [Messages](firmware/esp32s3/handheld/MESSAGES.md). |
+
+**Settings** holds brightness, the screen-off delay (15 s to 5 min) and the Macros OS, plus a Board
+Check screen. **PWR** blanks or wakes the screen (while the microphone is live it dims instead), and
+the first touch on a dark screen only wakes it. **BOOT** returns to Home; in Keyferry, hold it.
+[SECURITY.md](SECURITY.md#amoled-handheld-deployment) covers how these functions are kept apart
+from Keyferry and what each one can reach.
 
 ## Building from source
 
 Requires Rust (pinned in `rust-toolchain.toml`), Python 3.11 or newer, and a C++17 compiler for the
-strict checks. Firmware builds additionally require ESP-IDF v6.0.3.
-
-Build runners read the CPU budget from `project.toml`. For a machine-specific override, create an
-ignored `project.local.toml` with the following entry, replacing `example-builder` with the local
-hostname. Keep machine names and local overrides out of the tracked configuration.
-
-```toml
-[build.hosts.example-builder]
-cpu_percent = 75
-```
+strict checks. Firmware builds also need ESP-IDF v6.0.3 and an explicit board profile; see
+[`firmware/README.md`](firmware/README.md).
 
 ```text
 cargo fetch --locked              # populate dependencies for the offline checks
 python scripts/check.py --strict  # formatting, lints, tests, protocol vectors, repository checks
 ```
 
-Release archives are built by the native package gates, which also strip local paths from the
+Release archives come from the native package gates, which also strip local paths from the
 binaries:
 
 ```text
@@ -560,20 +378,29 @@ sh scripts/check_macos_package.sh                     # macOS
 python scripts/package_controller_release.py ...      # canonical, scanned release ZIP
 ```
 
-Firmware builds require an explicit board profile. See `firmware/README.md`, `protocol/`, and
-`SECURITY.md` for the device protocol and security model.
+Build runners read the CPU budget from `project.toml`. For a machine-specific override, create an
+ignored `project.local.toml`, replacing `example-builder` with the local hostname:
+
+```toml
+[build.hosts.example-builder]
+cpu_percent = 75
+```
+
+`python scripts/preview_handheld.py` renders every handheld screen on a computer from the device
+build's LVGL configuration.
 
 ## Repository layout
 
 ```text
-apps/keyferry/        desktop app (Slint)
-apps/keyferryd/       controller daemon: command authority, TLS and Bluetooth links, local API
-apps/keyctl/          command-line client
-crates/               protocol, keyboard layouts, gateway credentials, simulator, local management
-firmware/esp32s3/     stick firmware and board profiles
-protocol/             protocol specification, key registry, golden vectors
-tools/                pairing/credential helper and firmware update tool
-scripts/              checks, installers, packaging
+apps/keyferry/              desktop app (Slint)
+apps/keyferryd/             controller daemon: command authority, TLS and Bluetooth links, local API
+apps/keyctl/                command-line client and MCP server
+crates/                     protocol, keyboard layouts, gateway credentials, simulator, local management
+firmware/esp32s3/           board firmware and board profiles
+firmware/esp32s3/handheld/  AMOLED handheld shell, functions and screen previews
+protocol/                   protocol specification, key registry, golden vectors
+tools/                      pairing/credential helper and firmware update tool
+scripts/                    checks, installers, packaging
 ```
 
 ## License
