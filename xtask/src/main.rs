@@ -11,7 +11,7 @@ fn main() -> ExitCode {
         Some("check") => run_check(),
         Some("gen-protocol") => generate_protocol(),
         Some("package") => {
-            eprintln!("release packaging is deliberately disabled until the Phase 7 gate");
+            eprintln!("release packaging is not available through xtask; use scripts/package_controller_release.py");
             ExitCode::from(2)
         }
         Some("--help") | Some("-h") | None => {
@@ -30,7 +30,7 @@ fn help() {
     println!("cargo run -p xtask -- doctor");
     println!("cargo run -p xtask -- check");
     println!("cargo run -p xtask -- gen-protocol");
-    println!("cargo run -p xtask -- package   # intentionally blocked until Phase 7");
+    println!("cargo run -p xtask -- package   # not available; use scripts/package_controller_release.py");
 }
 
 fn doctor() -> ExitCode {

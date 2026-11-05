@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Hushrun recipient: inherit secret stdin, retain only typed USB status metadata."""
+"""Pass the owner-kit passphrase through on inherited standard input to `keyctl local-status`;
+retain only typed USB status metadata."""
 
 import argparse
 import json

@@ -1,7 +1,7 @@
 # Input Sequence v2: extended pointer
 
-This defines the pointer protocol and USB descriptor contract. Physical qualification is specific
-to the exact firmware, board and target operating system. Consumer/system reports, keyboard LEDs,
+This defines the pointer protocol and USB descriptor contract. A hardware test result applies only
+to the exact firmware, board and target operating system tested. Consumer/system reports, keyboard LEDs,
 BOOT latch, wake and BLE mouse are outside this contract.
 
 ## USB personality
@@ -55,13 +55,13 @@ pointer and rejects a legacy-pointer or MSC configuration. Its USB-HID PID is
 0x4004, bcdDevice 0x0104; Waveshare remains 0x4008 with MSC. Atom first install
 uses the board's 3 MiB factory slot at 0x10000 after exact-unit recovery proof;
 the Waveshare app-only procedure below does not apply to Atom. Static resource
-fit does not close Atom runtime TLS heap, USB attach or target-input gates.
+fit does not verify Atom runtime TLS heap, USB attach or target input.
 
 The existing personality PID is retained, with bcdDevice 0x0102 -> 0x0103 for
 pointer.5's added absolute-report pan byte (pointer.4 used 0x0102), 0x0104
 for pointer.8's Stylus collection (report bytes unchanged) and 0x0105 for
 pointer.10's absolute-only personality.
-No public PID allocation is requested by this lane. Microsoft's USB flags key
+Microsoft's USB flags key
 includes VID, PID and revision, and revision participates in hardware IDs:
 [device registry](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/usb-device-specific-registry-settings),
 [standard descriptors](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/standard-usb-descriptors).
@@ -72,8 +72,8 @@ used and fresh Windows/macOS paths; stop if the old boot descriptor remains.
 Do not delete arbitrary HID devices. The report design follows ordinary Generic
 Desktop absolute mouse axes, as used by
 [PiKVM](https://github.com/pikvm/kvmd/blob/master/kvmd/apps/otg/hid/mouse.py).
-macOS mapping, display arrangement, capture crops and host pointer policy remain
-physical qualification questions. USB emission does not prove pixel placement.
+macOS mapping, display arrangement, capture crops and host pointer policy must
+be checked on hardware. USB emission does not prove pixel placement.
 
 ## Public contract
 
@@ -146,18 +146,17 @@ reconnect starts disarmed and never resumes a command. Lost possible-start resul
 remain UNKNOWN even if a later generation is neutral. Correlation includes
 report ID, exact serialized bytes/length, token, epoch and attachment generation.
 
-## Off-device and physical gates
+## Verification
 
 `python scripts/check.py`, generated-registry check, cargo fmt/clippy/workspace
-suite, native C++ suite and `check_hil_pointer.py --build-dir BUILD` gate source,
+suite, native C++ suite and `check_hil_pointer.py --build-dir BUILD` check source,
 protocol and the exact image. The legacy checker remains separate and checks
-its unchanged boot descriptor. Frozen image requires SHA256/size for BIN/ELF,
+its unchanged boot descriptor. A frozen image records SHA256/size for BIN/ELF,
 map/static RAM/partition reserve, source commit, pinned locks, config and app-only
-installer Plan. Build-time static RAM is not measured runtime free heap; obtain
-runtime heap/internal-RAM observations during owner-authorized qualification.
+installer Plan. Build-time static RAM is not measured runtime free heap; measure
+runtime heap and internal RAM on the board.
 
-Before hardware qualification, build and freeze the exact image. An exact-unit app-only Plan,
-a retained rollback image and explicit authorization are prerequisites for a write. Each supported
-firmware/target-OS combination must pass corners/centre, right/middle clicks, wheel/pan, drag and
-disconnect release on an approved idle target. Source checks and compilation alone do not close
-these physical gates.
+Before testing on hardware, build and freeze the exact image. A write needs an exact-unit app-only
+Plan, a retained rollback image and the exact Plan hash. Each supported firmware/target-OS
+combination must pass corners/centre, right/middle clicks, wheel/pan, drag and disconnect release
+on an idle target with no unsaved work. Source checks and compilation alone do not verify this.

@@ -7,8 +7,7 @@ pub const MAX_STEPS: usize = 256;
 const MAX_ROUTINE_MS: u64 = 180_000;
 const HID_MAX: f64 = 32767.0;
 
-/// The single glide configuration (D-20261010-10: agent pointer motion always glides, never
-/// jumps). The stick paces one absolute report per 10 ms HID poll, so `min_steps..=max_steps`
+/// The single glide configuration (agent pointer motion always glides, never jumps). The stick paces one absolute report per 10 ms HID poll, so `min_steps..=max_steps`
 /// reports take 120-240 ms; 24 steps keep a held drag span inside one bounded chunk.
 pub struct Glide {
     pub min_steps: u32,

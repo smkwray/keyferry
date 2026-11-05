@@ -89,8 +89,9 @@ the outcome.
 
 ## Claim and authority
 
-The current private-bootstrap image is already claimed: its distinct recovery secret is generated
+The private-bootstrap image is already claimed: its distinct recovery secret is generated
 off-device, retained in the ignored private bundle, and compiled into that development image. An
 ordinary target computer cannot establish configuration authority merely by being attached over USB.
-Generic retail first claim remains closed until a physical-presence or manufacturing-root procedure
-meets the same authenticated-write boundary. There is no unauthenticated first-write exception.
+There is no generic first claim for an unprovisioned retail board; any such procedure (physical
+presence or a manufacturing root) must meet the same authenticated-write boundary. There is no
+unauthenticated first-write exception.

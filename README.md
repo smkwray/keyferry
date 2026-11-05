@@ -22,7 +22,7 @@ over a mutually authenticated TLS link, carried over Wi-Fi or Bluetooth. If anot
 controllers holds the board, Keyferry routes through it over Tailscale.
 
 > [!NOTE]
-> Keyferry is a preview and is qualified board by board. [Hardware](#hardware) lists what has
+> Keyferry is a preview and is tested board by board. [Hardware](#hardware) lists what has
 > been tested on each board.
 
 ## Features
@@ -68,13 +68,13 @@ flowchart LR
 
 | Board | Form | Display | Status |
 | --- | --- | --- | --- |
-| Waveshare ESP32-S3-GEEK | USB stick | 240×135 LCD | Qualified on one unit: control, USB input, and 256 KiB file handoff to Windows |
-| LILYGO T-Dongle-S3 | USB stick | 160×80 LCD | Control and USB input supported; file capacity unqualified |
-| M5Stack AtomS3 Lite | USB stick | none (RGB LED) | Control, USB keyboard and pointer used with Windows targets; profile not yet qualified |
+| Waveshare ESP32-S3-GEEK | USB stick | 240×135 LCD | Tested on one unit: control, USB input, and 256 KiB file handoff to Windows |
+| LILYGO T-Dongle-S3 | USB stick | 160×80 LCD | Control and USB input supported; file capacity untested |
+| M5Stack AtomS3 Lite | USB stick | none (RGB LED) | Control, USB keyboard and pointer used with Windows targets; full profile not yet tested |
 | Waveshare ESP32-S3-Touch-AMOLED-1.8 | Touch handheld | 368×448 AMOLED | Keyferry authenticated and typed over the Bluetooth control link on one unit; preview |
 
 Bluetooth keyboard output has been tested on a Windows target. Mac typing and Mac/Linux USB drive
-mounting are not yet physically qualified. Board differences live in one profile per board under
+mounting are not yet tested on hardware. Board differences live in one profile per board under
 [`firmware/esp32s3/boards/`](firmware/esp32s3/boards/). The AMOLED board runs Keyferry inside a
 small touchscreen shell with a few extra on-device functions; see
 [Handheld deployment](#handheld-deployment).
@@ -369,7 +369,7 @@ cargo fetch --locked              # populate dependencies for the offline checks
 python scripts/check.py --strict  # formatting, lints, tests, protocol vectors, repository checks
 ```
 
-Release archives come from the native package gates, which also strip local paths from the
+Release archives come from the native package checks, which also strip local paths from the
 binaries:
 
 ```text

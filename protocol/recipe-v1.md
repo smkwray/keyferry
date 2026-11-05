@@ -109,7 +109,8 @@ never inferred from the controller OS or claimed as observed target identity. A 
 Metadata: optional `tags` (16 strings, 1..32 characters), `author` (200 characters), and
 `verified:false` until live success. After live observation use
 `verified:{date:"YYYY-MM-DD",os_version:"observed OS version",success_count:1}`. Verification
-metadata is an author's claim, never a hardware gate or automatic promotion. `true` alone rejects.
+metadata is an author's claim; Keyferry never treats it as a hardware test or changes behavior
+because of it. `true` alone rejects.
 Parameters add `description`, full-match regex `pattern` (256 bytes, bounded compilation), and
 `integer` type with required `minimum`/`maximum` in -127..10000. Text remains bounded by
 `max_chars`; routine text rejects unsupported characters and never normalizes. Optional text
@@ -189,12 +190,11 @@ Additional stable codes: `recipe.metadata`, `recipe.verification`, `recipe.param
 `recipe.checkpoint_failed`, `recipe.text_not_unique`, `recipe.owner_completion_required`,
 `params.pattern`, `params.bounds`. All are payload-free.
 
-## ADR: host routine extension to ADR 0016 H1
+## Design notes
 
-Status: implemented under the owner-approved generalized routine objective. The former per-user
-import-only library gains a shared skill layer and an explicit shared writer, using the existing
-validation/publication primitive. Target OS metadata is now needed because shortcut/navigation
-behavior differs by target. Checkpoints require multiple host submissions; each still uses the
+Routines add a shared skill layer and an explicit shared writer to the per-user import-only recipe
+library, using the existing validation/publication primitive. Target OS metadata is required because
+shortcut/navigation behavior differs by target. Checkpoints require multiple host submissions; each still uses the
 existing command-scoped daemon writer and release evidence. There is no firmware macro, persisted
 command queue or new authority. Contiguous input is deliberately one command; another controller
 can act between checkpoint-separated commands, so a checkpoint is an observation, not a global

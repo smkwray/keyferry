@@ -1,8 +1,5 @@
 # Keyferry portable roaming v2
 
-Status: draft implementation contract. It does not authorize a firmware write until Work Order 08's
-off-device security, recovery, package, size, and RAM gates close.
-
 ## Purpose
 
 Portable roaming makes the stick the stable product identity. An owner-authorized Windows or macOS
@@ -332,8 +329,7 @@ between gateways. A command lacking an authenticated terminal outcome after poss
 - no owner CA or recovery secret in an ordinary installation;
 - no compiled operational trust after migration;
 - no policy rollback or silent revocation eviction;
-- no device write for ordinary credential issuance or roaming;
-- no firmware write authorized by this draft.
+- no device write for ordinary credential issuance or roaming.
 
 ## Required vectors and negative cases
 

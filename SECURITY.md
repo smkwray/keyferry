@@ -17,8 +17,8 @@ boot, or recovery screens. The system is deny-by-default and must fail closed.
 
 ## Public artifact boundary
 
-The public boundary is fail-closed. A release is acceptable only when the tracked source,
-every reachable Git object, and the exact final ZIP pass the ignored private-identifier registry in
+The public boundary is fail-closed. A release is built only when the tracked source, every
+reachable Git object, and the exact final ZIP pass a local, untracked private-identifier registry in
 binary form. The release builder accepts a fixed program manifest, rejects links and extra members,
 uses a canonical archive name, and scans both its staging tree and final ZIP.
 
@@ -37,11 +37,10 @@ a public release archive. This is credential-bound identity, not non-clonable ph
 identity: copying a credential directory clones that principal. Issue one directory per controller
 computer and do not duplicate it.
 
-Before publishing, run `python scripts/check_public_tree.py --history --require-private-registry`
-with the ignored private-identifier registry present, then scan each exact canonical ZIP with
-`--artifact ZIP --require-private-registry`. A clean current tree is not enough: any private value
-retained by an earlier commit requires a clean-history export or an explicitly authorized history
-rewrite before a public remote is added.
+To check a tree before publishing it, run
+`python scripts/check_public_tree.py --history --require-private-registry` with the registry present,
+then scan each exact canonical ZIP with `--artifact ZIP --require-private-registry`. A clean current
+tree is not enough: a private value retained by an earlier commit stays in the published history.
 
 ## Threats in scope
 
@@ -61,8 +60,8 @@ rewrite before a public remote is added.
 
 ## Threats acknowledged but not fully solved on portable hardware
 
-- Before a separately qualified secure-boot/flash-encryption promotion, a determined physical attacker
-  may be able to read or replace firmware and recover stored Wi-Fi/link material.
+- Secure Boot and flash encryption are not enabled, so a determined physical attacker may be able to
+  read or replace firmware and recover stored Wi-Fi/link material.
 - Radio jamming and network flooding can deny service.
 - USB HID cannot observe the focused application or verify that the target displayed the intended
   text.
@@ -101,19 +100,21 @@ phrases, or a general-purpose secret vault on the dongle.
    installation, the device, and the holder, verifies under this installation's own secret, and
    repeats the proof before every request that can start input. Configuration other than screen power, maintenance,
    handoff, and requests that themselves arrived remotely are never forwarded; nothing is retried
-   after possible start. Trust boundary: the loopback bearer now carries that installation's
-   owner-mTLS authority for its configured devices across the tailnet, which only a holder of the
-   installation credential could exercise before.
+   after possible start. Trust boundary: the loopback bearer carries that installation's owner-mTLS
+   authority for its configured devices across the tailnet.
    The owner-mTLS API additionally serves controller-local capture inventory and frames at
    `/v1/devices/{id}/capture/sources` and `/capture/frame`. Local clients use the existing loopback
-   bearer at `/v1/capture/sources` and `/v1/capture/frame`. Legacy remote bearers cannot reach these
-   routes. Discovery inventory is authenticated metadata, never permission to read a frame.
+   bearer at `/v1/capture/sources` and `/v1/capture/frame`; the owner-mTLS listener does not serve
+   those loopback routes, and neither do legacy remote bearers. Discovery inventory is authenticated
+   metadata, never permission to read a frame.
    Every remote frame request repeats fresh device proof. If the capture peer holds the stick,
    the caller proves that exact peer and the server checks its existing caller-bound route lease.
    When capture and holder differ, the requesting controller proves its own device grant through
-   the actual holder (or has its own live local session), and the capture controller independently
-   proves its own grant through that holder on every read. Peer authentication remains owner-mTLS;
-   no caller credential or frame request is relayed. This explicitly grants non-revoked owner
+   the actual holder (or is the holder). On every read the capture controller proves its own grant
+   through that holder and then asks the holder whether the caller holds a fresh route lease for the
+   device in the current endpoint session; only a stick-issued route proof creates that lease, and
+   the stick refuses revoked installations. Peer authentication remains owner-mTLS; no caller
+   credential or frame request is relayed. This explicitly grants non-revoked owner
    controllers access to a configured device's controller capture sources, rather than treating
    tailnet membership as screen authority. Calibration must separately demonstrate that the source
    shows the machine driven by the stick; device proof alone cannot establish that visual binding.
@@ -150,24 +151,24 @@ phrases, or a general-purpose secret vault on the dongle.
     named target for six seconds, and otherwise restores only the exact previous installation during
     a separate bounded recovery phase. The target exposes no command authority before correlated
     ACCEPT. Lost START responses are observed and never retried; the controller changes authority
-    only after the target proves `transferred`. See ADR 0012.
+    only after the target proves `transferred`.
     A healthy authenticated holder is retained across other-controller beacons/restarts and
     failures of an unused carrier; no selection timer or losing candidate may revoke it. Ordinary
     discovery stops while held. A real transport failure clears input and authority before bounded
     reconnect; the last authenticated address is one routing hint, never cached authorization.
     Endpoint handoff refuses an outstanding arm until its correlated emitted neutral result or
     completed explicit disarm. Rejected or uncertain results require explicit disarm.
-11. **Physical firmware update:** Plan accepts one strict package, qualified private unit record, and
-    exact local serial port after manual ROM entry. It never discovers ports or manufactures boot
-    mode. Live ROM, canonical eFuse summary, flash, security, and exact-length preserved-region
-    evidence must match the private qualified-unit record before a public unit-binding hash is
-    emitted. Apply re-observes the same values before any write and remains a separately hash-authorized operation and is
-    unavailable until its physical gate is explicitly opened.
+11. **Physical firmware update:** Plan accepts one strict package, a private record of the exact
+    unit, and an exact local serial port after manual ROM entry. It never discovers ports or
+    manufactures boot mode. Live ROM, canonical eFuse summary, flash, security, and exact-length
+    preserved-region evidence must match that unit record before a unit-binding hash is emitted.
+    Apply is a separate step that runs only with the exact Plan hash and re-observes the same values
+    before any write.
 
 ## Prohibited production patterns
 
-The opt-in USB file-handoff build requires qualification on each named board/target path before
-general promotion. It may expose one immutable, read-only snapshot bounded by the protocol registry
+The USB file-handoff build is opt-in and is tested separately for each board and target operating
+system. It may expose one immutable, read-only snapshot bounded by the protocol registry
 (up to the generated protocol limit) from volatile memory, only after an authenticated controller completes bounded transfer
 and digest validation. The USB target cannot publish, replace, or clear that snapshot or use SCSI
 as a command channel. Publication and withdrawal require the existing device writer exclusion,
@@ -176,7 +177,7 @@ arms HID. Incomplete staging is never readable; target reads cannot change a mou
 The implementation must wipe buffers on clear, expiry, controller loss, detach or fault, preserving
 only a committed snapshot across its own deliberate enumeration. File bytes, filenames, digests and
 transfer receipts must not be persisted or logged. Uncertain commit responses are reconciled by
-read-only status and never automatically replayed. Qualification probes are not release images.
+read-only status and never automatically replayed. Probe builds are not release images.
 Multi-file firmware bounds both the aggregate content and manifest independently. It authenticates
 and hashes the entire manifest and contents before exposing any file. Names are flat, bounded ASCII
 names with a restricted character set, case-insensitive uniqueness and Windows reserved-name
@@ -185,11 +186,10 @@ Per-file sector padding is synthesized as zeroes and does not consume the advert
 Replacing a set withdraws and wipes the previous set first; failure leaves no previous copy to
 restore. Listing is authenticated and read-only. Selecting or removing a file in the controller's
 pending selection does not edit a mounted volume: publication replaces the entire set at once.
-Older firmware must reject the new capability-specific operation before any mutation, and the
-single-file protocol remains available for existing installations.
+Firmware without the multi-file capability rejects its operation before any mutation, and the
+single-file protocol remains available.
 The firmware installer rejects versions with a `probe` prerelease identifier even when they are
-valid for authenticated inventory. An offline layout review never authorizes a partition-table
-write; the existing app-only updater must continue rejecting the relocated qualification layout.
+valid for authenticated inventory. The app-only updater rejects the relocated probe layout.
 Probe memory readings use the existing owner-authenticated, read-only USB status operation.
 They contain only bounded numeric measurements and allocation outcomes. Ordinary firmware returns
 unsupported; the host rejects inconsistent samples and never retries a failed exchange.
@@ -235,7 +235,7 @@ Production source under `apps/`, `crates/`, and `firmware/` must not contain:
   ESP32-S3 profile;
 - eFuse mutation, Secure Boot, flash encryption, or anti-rollback enabling in qualification builds.
 - firmware port discovery, remote serial schemes, automatic boot-mode reset, unpinned update tools,
-  arbitrary esptool arguments, or a firmware write without an exact separately approved Plan hash;
+  arbitrary esptool arguments, or a firmware write without the exact Plan hash supplied separately;
 - wildcard/all-interface UDP beacon binding or discovery packets containing command data, payloads,
   credentials, keys, pins, or authentication tags.
 
@@ -246,7 +246,8 @@ not a security proof.
 
 - Development examples contain placeholders only.
 - Secrets are generated locally from an operating-system CSPRNG.
-- Controller secrets use the operating-system credential store once platform integration begins.
+- Controller credentials are files in the user's private Keyferry state directory; the
+  operating-system credential store is not used.
 - The recovery secret is exportable once as a Base32 string and QR payload and may be re-exported only
   after fresh local authorization.
 - No secret appears in command-line arguments where the process list can expose it.
@@ -327,10 +328,10 @@ Both require the existing owner-mTLS holder and fresh exact-device proof. Only t
 the capability, idle/disarmed, maintenance and strict on/off checks; local links still win. No new
 hardware privilege, HID arm or typing is granted. A lost POST result remains uncertain, never
 replayed; GET can reconcile the active/stored state after connectivity returns. Other settings,
-maintenance, handoff and events remain excluded. See ADR 0017.
+maintenance, handoff and events remain excluded.
 
 HID emission cannot establish the connected target, focus, layout, lock state, or successful unlock.
-Secure-text software tests and rendering never close a target unlock or preboot/FileVault gate.
+Secure-text software tests and rendering do not verify a target unlock or preboot/FileVault input.
 
 ## Security-relevant changes
 
@@ -339,12 +340,13 @@ interfaces, update/recovery, arm policy, retry semantics, or parser limits requi
 
 1. a focused threat-model update;
 2. tests for both success and rejection paths;
-3. an ADR when it changes a settled decision;
+3. an update to this document or the protocol specification when it changes documented behavior;
 4. evidence that failure leaves the dongle disarmed with all keys released.
 
 ## Vulnerability handling
 
-Keep reports private until the owner decides otherwise. A report should include the exact build,
+Report vulnerabilities privately, not in a public issue, and keep them private until the maintainer
+agrees to disclosure. A report should include the exact build,
 hardware revision, reproduction steps, expected boundary, observed result, and whether unauthorized
 input or secret exposure occurred. Never include real Wi-Fi, link, TLS, recovery, or dictated content
 in a report.
@@ -362,31 +364,7 @@ exactly one additional device, unchanged computer identity and unchanged existin
 A no-op, multiple additions, removal, replacement or re-signing of an existing grant is rejected.
 A fully validated private temporary directory is published by atomic non-replacing rename; an
 existing destination, including an empty directory, cannot be overwritten. No hard links are used.
-Expansion does not activate a device, change firmware, contact a controller or close a physical gate.
-
-## Owner-run new-stick provisioning
-
-The first-install runner uses one Hushrun stdin delivery for the existing mint, grant and private
-header producers. It stages encrypted owner authority and preserves the installation principal;
-partial preparation is retained for reconciliation, never another mint. The prepared identity is
-bound to one observed chip MAC in a private index before any erase. Preparing before attachment
-allocates an unbound candidate; reusing an already bound chip cannot assign that candidate to it.
-
-Real first installs require an attributable owner record ratifying the proposed automatic-ROM
-recovery gate and authorizing the narrow new-device full-install scope. Until that replacement is
-ratified, the runner refuses before the secret prompt. This does not change the existing qualified
-unit updater's manual-ROM or exact-hash authorization boundary. Writes require a validated private
-full plan, exact profile/flash agreement, inactive security and readable zero-valued download-disable
-eFuses. Security-enabling build configuration, ambiguous serial discovery and identity changes stop
-the flow. No force flag, eFuse write, input submission or automatic uncertain-write replay exists.
-
-Write intent is durable before erase; reruns re-observe identity and select verification only.
-Policy bootstrap uses the existing authenticated journaled producer once; unknown completion stops
-for journal reconciliation. Receipt fields are allowlisted metadata. READY requires a local
-authenticated, idle, disarmed inventory with the exact ELF/profile and authenticated pointer bit.
-The daemon exposes that raw capability mask as metadata, granting no additional command authority.
-Enabled download eFuses prove current state, not permanent immunity to later eFuse burns. Automatic
-reset and app boot remain exact-board hardware evidence, and never close physical gates in simulation.
+Expansion does not activate a device, change firmware or contact a controller.
 
 ## Host-side routine boundary
 

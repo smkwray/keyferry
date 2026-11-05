@@ -705,8 +705,7 @@ HANDHELD_DRIVE_OBJECT = "esp-idf/kf_handheld/libkf_handheld.a(drive.cpp.obj)"
 def check_handheld_msc(build: Path, cache: str, board: str) -> None:
     """Mass storage passes only on a handheld board, served by its USB Drive function alone.
 
-    The bridge's own file handoff stays unqualified and out of production images (ADR 0018
-    rules 4 and 11); the linker map shows which library defines the storage callbacks.
+    The bridge's own file handoff stays out of production images; the linker map shows which library defines the storage callbacks.
     """
     profile = json.loads((BOARDS / board / "board.json").read_text(encoding="utf-8"))
     if "handheld" not in profile:

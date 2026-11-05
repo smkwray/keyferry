@@ -18,9 +18,12 @@ HMAC-SHA256(recovery_secret,
             "keyferry/local-admin-key/v1" || device_id)
 ```
 
-`CHALLENGE` (`0x10`) is side-effect-free. It resets only an earlier unauthenticated or authenticated
-local-management session; it does not enter maintenance, stop networking, alter input state, or
-touch storage. Its request is the operation byte followed by 63 zero bytes. Its response is:
+`CHALLENGE` (`0x10`) resets only an earlier unauthenticated or authenticated local-management
+session; it does not enter maintenance, stop networking, alter input state, or touch storage. Each
+challenge consumes 40 bytes of a 512-byte true-random pool the stick fills once per boot, shared with
+provisioning (see `provisioning-v1.md`). After about twelve challenges, from either protocol and
+whether or not they authenticate, further challenges fail until the stick restarts; unplugging it
+restores them. Its request is the operation byte followed by 63 zero bytes. Its response is:
 
 | Bytes | Field |
 | ---: | --- |
@@ -246,7 +249,7 @@ keyctl local-recover --owner-kit PATH ACTION
 argument, environment value, log field, or result field. Status returns one compact
 `keyferry.local-status.v1` JSON object containing only the typed pages above.
 
-`local-probe` is an opt-in, authenticated read-only capture for a separately authorized
+`local-probe` is an opt-in, authenticated read-only capture for an
 MSC memory-probe image. It emits metadata-only NDJSON samples with a sample index and
 shared nonzero sample sequence. Each sample reads all three probe pages and retries a changing
 sequence at most four times; sustained churn is an explicit error. `--samples` defaults to 1 and

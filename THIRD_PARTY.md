@@ -35,7 +35,7 @@ The command CLI uses the Rust standard library for its small localhost HTTP/1
 client and does not speak the dongle protocol. The separate pairing tool uses
 HIDAPI only for the authenticated configuration interface.
 
-The qualification firmware pins ESP-IDF v6.0.3 at commit
+The firmware pins ESP-IDF v6.0.3 at commit
 `76f5dedd9950a3012fee8fb7d5586df21fc67802`; `firmware/esp32s3/dependencies.lock` records the IDF
 constraint. ESP-IDF is Apache-2.0 licensed; its bundled component licenses remain subject to the
 upstream manifest. Managed components come from the
@@ -68,10 +68,9 @@ embed glyphs from Montserrat and Font Awesome 5 Free; both fonts are under the S
 managed components must be exactly locked and added here with source, license, and integrity
 evidence.
 
-Relevant hardware references to verify during Phase 0:
+Hardware references:
 
-- Waveshare ESP32-S3-GEEK resources for the delivered SKU and PCB revision.
+- Waveshare ESP32-S3-GEEK resources for the SKU and PCB revision in hand.
 - Espressif ESP32-S3 boot-mode, USB, security, partition, and tooling documentation.
-- Exact USB descriptors and board identity observed from the owner's physical unit.
 
-Documentation is not a substitute for evidence from the exact device.
+Documentation does not replace checking board identity and USB descriptors on the exact device.

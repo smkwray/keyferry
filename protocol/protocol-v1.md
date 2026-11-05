@@ -196,7 +196,7 @@ During `TARGETING` it admits only the named target installation and address. A n
 target remains provisional until ACCEPT matches the transaction and nonce and its proof digest is
 the digest of a route proof verified in that new session. Timeout enters `RESTORING`, which admits
 only the exact previous installation over its recorded source route. START may arrive over Wi-Fi or
-the qualified Bluetooth gateway pipe; the named target is Wi-Fi. A prior Wi-Fi route restores only
+the Bluetooth gateway pipe; the named target is Wi-Fi. A prior Wi-Fi route restores only
 its saved address, while a prior Bluetooth route temporarily advertises only for the recorded
 installation. QUERY is read-only and works only for the retained matching transaction. Terminal
 phases are `TRANSFERRED`, `RESTORED`, `NOT_STARTED`, and
@@ -228,7 +228,7 @@ frame on the next sequence: that frame consumes it, and a `COMMAND` on any later
 correlated `REJECTED`. It is also cleared by disarm, session loss, reboot, or fault. A command-scoped
 `ARM` the endpoint cannot honour now (output not yet neutral) returns `ERROR` `BUSY`. Temporary arming
 requires `lease_ms` in `1..=600000`. Always-ready is an explicit opt-in and requires `lease_ms = 0`.
-An endpoint may reject optional policies it has not qualified.
+An endpoint may reject optional policies it does not support.
 
 `DISARM` (`0x53`) has an empty payload. It clears pending work, changes the desired report to zero,
 and attempts the zero report before acknowledging whenever USB remains usable.
@@ -416,8 +416,8 @@ padding from the immutable validated bundle. Its geometry includes the worst-cas
 rounding independently of the payload capacity. Beginning replacement first withdraws and wipes the
 previous snapshot. A failed replacement leaves the drive empty. Deliberate publication refresh
 retains only the committed set; controller loss, power loss and fault discard it. A lost response
-never triggers automatic replay after possible admission. Physical qualification of the original
-single-file version does not qualify multi-file directory behavior on any target OS.
+never triggers automatic replay after possible admission. Hardware tests of the original
+single-file version do not cover multi-file directory behavior on any target OS.
 
 An old single-file STATUS request reports `unavailable` while a file-set transaction or snapshot
 occupies the medium, rather than mislabeling it as MESSAGE.TXT or returning an oversized v1 length.

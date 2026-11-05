@@ -72,7 +72,7 @@ stable screen. Capture children belong to the daemon and stop when its capture s
 ## Calibration
 
 First call `status` and `screenshot`, locate the cursor tip, then call `calibrate` with its
-`cursor_x,cursor_y` on a static, harmless approved target. Use `mode:"screen"` to bind without
+`cursor_x,cursor_y` on a static, harmless target. Use `mode:"screen"` to bind without
 movement. Take a fresh `screenshot` before subsequent pointer input. The target HDMI output must be its only display or mirror the main
 display. Calibration sends eight absolute pointer probes (no clicks), isolates the cursor in
 three-frame differences, fits independent affine axes and verifies another position. It handles
@@ -91,8 +91,8 @@ through MCP so the observed cursor and its capture stay together.
 The current pointer position stays in session memory. After starting a session or changing sticks,
 take a screenshot and supply its observed cursor tip as `cursor_x,cursor_y` to `calibrate`. Never
 guess a starting position. Without it, pointer input and probe calibration refuse before sending
-input; `mode:"screen"` can still bind without motion. This replaces the saved-position/centre-jump
-fallback and preserves glides from the observed position.
+input; `mode:"screen"` can still bind without motion. Glides start from the observed position;
+there is no saved-position or centre-jump fallback.
 
 Pointer tools refuse devices without authenticated `POINTER_EXTENDED_V1` (0x08000000); keyboard tools
 remain available. Explicit per-call `uncalibrated:true` bypasses binding and uses full-frame linear
@@ -124,8 +124,8 @@ Higher values slow the same eased path. Omission preserves the distance-based 12
 (about 120..240 ms). For example, `move {"x":800,"y":400,"glide_ms":1000}`.
 Network, command/chunk neutral reports, clicks and settling add end-to-end latency.
 This is per action, with no saved speed preference or firmware change. Older installed runtimes
-may reject the field; rebuild/reinstall before relying on it. Physical qualification of this option
-remains open.
+may reject the field; rebuild/reinstall before relying on it. This option is not yet tested on
+every board and target.
 
 A region is `{x,y,width,height}` in screenshot pixels, entirely inside the frame. Positive `dy` is
 wheel-up, positive `dx` pan-right; target natural-scrolling policy can invert it. Schemas reject
@@ -164,7 +164,7 @@ OCR runs on the capture controller and uses its local Windows.Media.Ocr language
 cloud recognizer or downloaded model. A macOS or Linux agent can use OCR from a Windows capture
 controller. Capture controllers on macOS/Linux report `ocr.unsupported_platform` explicitly.
 Black/blue no-signal frames remain valid screenshots and may be stable; they are not target proof.
-Exact firmware/OS physical gates remain OPEN until the hardware window qualifies them.
+Agent control is not yet tested on every firmware and target operating system combination.
 
 ## One-shot CLI loop
 

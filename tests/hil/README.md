@@ -1,10 +1,9 @@
 # Hardware-in-loop tests
 
-This directory remains documentation-only until Phase 0 accepts the board manifest. Every HIL run
-must record:
+This directory holds documentation only. Every hardware-in-loop run must record:
 
 - device label and hardware manifest hash;
-- ESP, AVR, daemon, and controller commit/image hashes;
+- firmware, daemon, and controller commit/image hashes;
 - host and target OS/build;
 - AP/router model and relevant settings;
 - exact test selection and result artifact;

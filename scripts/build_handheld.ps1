@@ -1,4 +1,4 @@
-# Build the AMOLED handheld Board Check image (ADR 0018 phase 1) under the build governor.
+# Build the AMOLED handheld Board Check image under the build governor.
 param(
     [ValidatePattern('^build/[A-Za-z0-9._-]+$')]
     [string]$BuildDir = 'build/handheld-check',

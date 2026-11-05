@@ -946,7 +946,7 @@ fn modifier_for_name(name: &str) -> Option<u8> {
         .map(|key| key.code)
 }
 
-/// The version-1 named keys: the typed actions listed in `docs/decisions.md`.
+/// The version-1 named keys.
 const NAMED_KEYS: [&str; 5] = ["ENTER", "ESCAPE", "BACKSPACE", "TAB", "SPACE"];
 
 fn named_key(name: &str) -> Option<Keystroke> {

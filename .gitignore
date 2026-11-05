@@ -27,6 +27,13 @@ firmware/**/platformio.local.ini
 hardware/evidence/private/
 /hardware/board-manifest.toml
 
+# Local-only maintainer tools
+/scripts/provision_stick.py
+/scripts/provision_stick.ps1
+/scripts/control_check.py
+/tests/test_provision_stick.py
+/tests/provision_fakes.py
+
 # Agent orchestration (private, never tracked)
 /.claude/
 /.codex/

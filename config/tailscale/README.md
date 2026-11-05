@@ -1,6 +1,6 @@
 # Tailscale discovery
 
-Keyferry uses the same direct-peer shape as MeshElf. Every normal Windows/macOS installation runs
+Keyferry connects controllers directly to each other. Every normal Windows/macOS installation runs
 its own daemon. The controller asks the local Tailscale client which peers are online and probes
 their Tailscale IPv4 addresses directly:
 

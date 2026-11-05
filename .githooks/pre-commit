@@ -36,10 +36,8 @@ _AN="$(git config user.name  || true)"
 [ "$_AE" = "45633267+smkwray@users.noreply.github.com" ] || _ident_bad "$_AN" "$_AE"
 [ "$_AN" = "smkwray" ] || _ident_bad "$_AN" "$_AE"
 
-# --- Rule 0: control-file integrity, ALWAYS ---
-# do/ is gitignored and Rule 1 below refuses to stage it, so a staged-file scan
-# can never see the control surface. This runs before the no-staged-files exit
-# so a commit is never the moment a corrupt ledger slips through unchecked.
+# --- Rule 0: local control-file integrity, when the checker is installed ---
+# The checked files are gitignored, so a staged-file scan never sees them.
 if [[ -x scripts/hygiene_check.sh && -f scripts/control_check.py ]]; then
   if ! scripts/hygiene_check.sh --controls; then
     echo "" >&2

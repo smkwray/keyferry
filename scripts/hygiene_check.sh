@@ -3,18 +3,18 @@ set -euo pipefail
 
 # hygiene_check.sh — Repo hygiene scan for tracked-eligible files.
 #
-# Enforces the project git-hygiene rules (documented in the project AGENTS.md contract):
+# Enforces the repository git-hygiene rules:
 #   - no machine-specific absolute paths in tracked-eligible files
 #   - no references to ../data.md or sibling data inventory paths in src/, tests/, configs/
 #   - git diff --check passes
 #
 # Warns (does not fail) on:
-#   - AI tool name mentions in tracked-eligible files (deferred pre-public scrub)
+#   - AI tool name mentions in tracked-eligible files
 #
 # Usage:
 #   scripts/hygiene_check.sh              # scan the whole repo
 #   scripts/hygiene_check.sh --staged     # scan only staged paths (pre-commit)
-#   scripts/hygiene_check.sh --controls   # control-file integrity only (private do/ surface)
+#   scripts/hygiene_check.sh --controls   # local control-file integrity check, when installed
 #
 # Exit codes:
 #   0 = pass (possibly with warnings)
@@ -155,7 +155,7 @@ done
 
 if [[ -n "$warn_ai" ]]; then
   ai_count="$(printf '%s' "$warn_ai" | grep -c .)"
-  echo "hygiene_check: WARN — ${ai_count} AI/tool-name mention(s) in tracked-eligible files (deferred pre-public scrub):" >&2
+  echo "hygiene_check: WARN — ${ai_count} AI/tool-name mention(s) in tracked-eligible files:" >&2
   printf '%s' "$warn_ai" | head -20 >&2
   if [[ "$ai_count" -gt 20 ]]; then
     echo "  ... and $((ai_count - 20)) more." >&2
