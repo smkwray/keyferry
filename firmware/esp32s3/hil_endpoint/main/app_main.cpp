@@ -61,6 +61,7 @@
 #include "nvs_flash.h"
 
 #include "device/dcd.h"
+#include "device/usbd_pvt.h"
 #include "provisioning_adapter.h"
 #include "usb_attachment.h"
 
@@ -74,8 +75,12 @@ namespace {
 using keyferry::hid::BootKeyboardReport;
 using keyferry::hid::PointerReport;
 
-// Bus resets latch here from the USB interrupt; reports go only to the confirmed attachment.
+// Bus resets, unplugs and unconfigurations latch here; reports go only to the confirmed
+// attachment.
 keyferry::hil::UsbAttachmentLatch g_usb_attachment;
+
+// Queues HilRuntime::SubmitUsbReport on the TinyUSB task (defined after the runtime).
+void RequestUsbReportService();
 
 constexpr char kTag[] = "keyferry_hil";
 #if defined(KEYFERRY_BOARD_RGB_STATUS)
@@ -694,16 +699,25 @@ class HilRuntime final : public keyferry::transport::Delegate,
     return report;
   }
 
+  // Main task. BLE-HID output is serviced here; USB reports are submitted from the TinyUSB
+  // task, where bus reset and (re)configuration processing cannot interleave with them.
   void ServiceUsb() {
     if (output_mode_ != keyferry::protocol::OutputMode::kUsbHid) {
       ServiceBleHid();
       return;
     }
-    if (!Lock()) {
+    RequestUsbReportService();
+  }
+
+  // TinyUSB task only (deferred by RequestUsbReportService). TinyUSB reopens endpoints only
+  // while processing SET_CONFIGURATION in this same task, so an attachment admitted here is
+  // still the one a report is submitted to.
+  void SubmitUsbReport() {
+    if (output_mode_ != keyferry::protocol::OutputMode::kUsbHid || !Lock()) {
       return;
     }
-    // A bus reset since the main loop confirmed this attachment closes admission until the
-    // loop has ended the old session; checked under the runtime lock, just before submission.
+    // A bus reset, unplug or unconfiguration since the main loop confirmed this attachment
+    // closes admission until the loop has ended the old session.
     if (!usb_mounted_ || usb_transfer_in_flight_ || !hid_.report_needed() ||
         !g_usb_attachment.Admits()) {
       Unlock();
@@ -2400,6 +2414,28 @@ std::atomic_bool g_usb_suspended{false};
 std::atomic<std::uint32_t> g_usb_attach_generation{0};
 #endif
 std::atomic_bool g_ble_control_usb{false};
+std::atomic_bool g_usb_service_queued{false};
+std::atomic<std::uint32_t> g_usb_service_queued_ms{0};
+
+void SubmitUsbReportOnUsbTask(void*) {
+  g_usb_service_queued.store(false, std::memory_order_release);
+  if (g_runtime != nullptr) {
+    g_runtime->SubmitUsbReport();
+  }
+}
+
+void RequestUsbReportService() {
+  const auto now_ms = static_cast<std::uint32_t>(
+      keyferry::command::IdfHeldKeyWatchdog::NowMs());
+  // One request is outstanding at a time. A request the TinyUSB event queue dropped would
+  // otherwise stall reports, so an old one is issued again; a duplicate is harmless.
+  if (g_usb_service_queued.exchange(true, std::memory_order_acq_rel) &&
+      now_ms - g_usb_service_queued_ms.load(std::memory_order_acquire) < 100U) {
+    return;
+  }
+  g_usb_service_queued_ms.store(now_ms, std::memory_order_release);
+  usbd_defer_func(SubmitUsbReportOnUsbTask, nullptr, false);
+}
 
 struct DeviceConfigContext {
   keyferry::config::IdfConfigStorage storage;
@@ -2492,6 +2528,8 @@ void TinyUsbEventCallback(tinyusb_event_t* event, void*) {
     g_usb_attach_generation.fetch_add(1, std::memory_order_acq_rel);
 #endif
   } else if (event->id == TINYUSB_EVENT_DETACHED) {
+    // Also raised by SET_CONFIGURATION(0), which no bus reset precedes.
+    g_usb_attachment.End();
     g_usb_mounted.store(false, std::memory_order_release);
     g_usb_suspended.store(false, std::memory_order_release);
     if (g_provisioning != nullptr) {
@@ -3190,7 +3228,7 @@ extern "C" std::uint16_t tud_hid_get_report_cb(
 extern "C" void tud_event_hook_cb(const std::uint8_t, const std::uint32_t event_id,
                                   const bool) {
   if (event_id == DCD_EVENT_BUS_RESET || event_id == DCD_EVENT_UNPLUGGED) {
-    g_usb_attachment.BusReset();
+    g_usb_attachment.End();
   }
 }
 
@@ -3591,7 +3629,7 @@ extern "C" void app_main() {
 #endif
 
   bool was_mounted = false;
-  std::uint32_t seen_resets = g_usb_attachment.Resets();
+  std::uint32_t seen_ends = g_usb_attachment.Ends();
 #if defined(KEYFERRY_FILE_HANDOFF)
   bool file_refresh_waiting_for_attach = false;
   bool file_refresh_timed_out = false;
@@ -3639,10 +3677,10 @@ extern "C" void app_main() {
       }
     }
 #endif
-    // Observe the reset count before the mount state, so a reset that follows is never
-    // credited to the attachment confirmed below. TinyUSB's configured state is required: a
-    // bus reset clears it at once, although no DETACHED event follows.
-    const auto observed_resets = g_usb_attachment.Resets();
+    // Observe the attachment-end count before the mount state, so an end that follows is
+    // never credited to the attachment confirmed below. TinyUSB's configured state is
+    // required: a bus reset clears it at once, although no DETACHED event follows.
+    const auto observed_ends = g_usb_attachment.Ends();
 #if defined(KEYFERRY_FILE_HANDOFF)
     const bool mounted = !file_refresh_waiting_for_attach &&
                          !g_usb_suspended.load(std::memory_order_acquire) &&
@@ -3652,11 +3690,12 @@ extern "C" void app_main() {
     const bool mounted =
         !g_usb_suspended.load(std::memory_order_acquire) && tud_mounted();
 #endif
-    if (observed_resets != seen_resets) {
-      seen_resets = observed_resets;
+    if (observed_ends != seen_ends) {
+      seen_ends = observed_ends;
       if (was_mounted) {
-        // Reset (and possibly re-enumerated) without a detach: end the old attachment's
-        // session, pending work and in-flight transfer before the new one admits input.
+        // Reset, unplugged or unconfigured (and possibly configured again) since the last
+        // poll: end the old attachment's session, pending work and in-flight transfer before
+        // the new one admits input.
         runtime.SetUsbMounted(false);
         provisioning_adapter.TransportLost();
         was_mounted = false;
@@ -3664,7 +3703,7 @@ extern "C" void app_main() {
     }
     if (mounted != was_mounted) {
       if (mounted) {
-        g_usb_attachment.Confirm(observed_resets);
+        g_usb_attachment.Confirm(observed_ends);
       }
       runtime.SetUsbMounted(mounted);
       if (!mounted) {

@@ -5,31 +5,32 @@
 
 namespace keyferry::hil {
 
-// A USB bus reset ends the current attachment. TinyUSB reports it from the USB interrupt before
-// the host re-enumerates the device, but configures the device again without a DETACHED event.
-// Input reports are admitted only on the attachment the main loop last confirmed: a reset that
-// lands anywhere after the loop observed the reset count blocks submission until the loop has
-// ended the old session and confirmed the new attachment.
+// Counts the ends of USB attachments: bus resets and unplugs (reported from the USB interrupt
+// before the host re-enumerates the device) and unconfiguration (SET_CONFIGURATION(0)). TinyUSB
+// configures the device again without telling the main loop the old attachment ended. Input
+// reports are admitted only on the attachment the main loop last confirmed: an end counted any
+// time after the loop observed the count blocks submission until the loop has ended the old
+// session and confirmed the new attachment.
 class UsbAttachmentLatch final {
  public:
   // Interrupt-safe: one lock-free atomic increment.
-  void BusReset() noexcept { resets_.fetch_add(1, std::memory_order_acq_rel); }
+  void End() noexcept { ends_.fetch_add(1, std::memory_order_acq_rel); }
 
-  [[nodiscard]] std::uint32_t Resets() const noexcept {
-    return resets_.load(std::memory_order_acquire);
+  [[nodiscard]] std::uint32_t Ends() const noexcept {
+    return ends_.load(std::memory_order_acquire);
   }
 
-  // Confirms an attachment with the reset count observed before its mount state was checked.
-  void Confirm(const std::uint32_t observed_resets) noexcept {
-    confirmed_.store(observed_resets, std::memory_order_release);
+  // Confirms an attachment with the count observed before its mount state was checked.
+  void Confirm(const std::uint32_t observed_ends) noexcept {
+    confirmed_.store(observed_ends, std::memory_order_release);
   }
 
   [[nodiscard]] bool Admits() const noexcept {
-    return Resets() == confirmed_.load(std::memory_order_acquire);
+    return Ends() == confirmed_.load(std::memory_order_acquire);
   }
 
  private:
-  std::atomic<std::uint32_t> resets_{0};
+  std::atomic<std::uint32_t> ends_{0};
   std::atomic<std::uint32_t> confirmed_{0};
 };
 
