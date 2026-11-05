@@ -219,6 +219,20 @@ class ProvisionTests(unittest.TestCase):
         with p.process_lock(self.private):
             pass
 
+    def test_plan_erase_follows_the_partition_table(self):
+        # Handheld layout (ADR 0018): 4 MiB app, kf_cfg_a/b and a 24 KiB NVS, erased as 0xE000.
+        self.tools.layout = (0x400000, 0xE000)
+        self.run_flow()
+        image = self.tools.run / "image"
+        self.assertEqual(p.check_plan(image, self.profile)["erase_before_first_install"][0]["size_bytes"], 0xE000)
+        plan = json.loads((image / "first-install-plan.json").read_text())
+        plan["erase_before_first_install"][0]["size_bytes"] = 0xB000  # the stick size on this table
+        plan.pop("proposal_sha256")
+        plan["proposal_sha256"] = p.digest(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode())
+        (image / "first-install-plan.json").write_text(json.dumps(plan))
+        with self.assertRaisesRegex(p.Stop, "UNEXPECTED_ERASE_RANGE"):
+            p.check_plan(image, self.profile)
+
     def test_plan_rejects_image_tamper_and_security_burning_build(self):
         self.run_flow()
         image = self.tools.run / "image"

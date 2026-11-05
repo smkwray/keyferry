@@ -212,6 +212,14 @@ def inspect_build(build, data, absolute_only):
         if board == "m5stack_atoms3_lite":
             from check_esp_transport import build_checks
             build_checks(build)
+    elif board == "waveshare_amoled_1_8":
+        # Handheld (ADR 0018): Keyferry presents the same three-interface HID personality as the
+        # no-MSC sticks; the board's own functions (Drive, Microphone, Messages) bring their own
+        # USB devices, so its MSC, CDC and PSRAM settings are expected here.
+        for token in ("KEYFERRY_FILE_HANDOFF:BOOL=OFF", "KEYFERRY_MSC_SIZE_PROBE:BOOL=OFF"):
+            require(token in cache, "Unqualified storage build enabled")
+        no_msc_usb_descriptors(image, data, absolute_only)
+        require(flash.get("0x10000") == "keyferry_hil_endpoint.bin", "Factory app offset differs")
     else:
         require(False, "unsupported extended-pointer board: " + board)
 

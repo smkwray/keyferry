@@ -132,6 +132,20 @@ def check_observation(observed, flash_bytes):
             raise Stop("INCOMPLETE_ROM_IDENTITY")
 
 
+def state_region(table):
+    """The kf_cfg_a + kf_cfg_b + nvs range of a binary partition table: what a first install erases."""
+    entries = {}
+    for start in range(0, len(table) - 31, 32):
+        entry = table[start:start + 32]
+        if entry[:2] == b"\xaa\x50":
+            entries[entry[12:28].split(b"\0", 1)[0]] = (int.from_bytes(entry[4:8], "little"),
+                                                       int.from_bytes(entry[8:12], "little"))
+    parts = [entries.get(name) for name in (b"kf_cfg_a", b"kf_cfg_b", b"nvs")]
+    if None in parts or any(a[0] + a[1] != b[0] for a, b in zip(parts, parts[1:])):
+        raise Stop("UNEXPECTED_STATE_PARTITIONS")
+    return parts[0][0], sum(size for _, size in parts)
+
+
 def check_plan(directory, profile):
     plan = load(directory / "first-install-plan.json")
     unsigned = dict(plan)
@@ -173,7 +187,9 @@ def check_plan(directory, profile):
     if len(erases) != 1:
         raise Stop("UNEXPECTED_ERASE_SET")
     erase = erases[0]
-    if (erase["offset"] != ends[-1] or erase["size_bytes"] != 0xB000
+    # The written partition table names the state region (stick 0xB000, handheld 0xE000).
+    if ((erase["offset"], erase["size_bytes"]) != state_region((directory / writes[1]["file"]).read_bytes())
+            or erase["offset"] != ends[-1]
             or erase["offset"] + erase["size_bytes"] > plan["flash_size_bytes"]):
         raise Stop("UNEXPECTED_ERASE_RANGE")
     return plan

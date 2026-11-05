@@ -10,6 +10,14 @@ EFUSES = ("SECURE_BOOT_EN", "SPI_BOOT_CRYPT_CNT", "DIS_DOWNLOAD_MODE",
           "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE", "DIS_USB_OTG", "DIS_USB_OTG_DOWNLOAD_MODE")
 
 
+def partition_table(*entries):
+    """ESP-IDF binary partition table: (label, type, subtype, offset, size) entries, then end padding."""
+    data = b"".join(b"\xaa\x50" + bytes([kind, subtype]) + offset.to_bytes(4, "little")
+                    + size.to_bytes(4, "little") + label.encode().ljust(16, b"\0") + bytes(4)
+                    for label, kind, subtype, offset, size in entries)
+    return data + b"\xff" * 32
+
+
 class FakeTools:
     def __init__(self, profile):
         self.profile = profile
@@ -21,6 +29,7 @@ class FakeTools:
         self.fail_auto_entry = False
         self.mac = "02:00:00:00:00:01"
         self.device = None
+        self.layout = (0x300000, 0xB000)  # (app slot, kf_cfg_a + kf_cfg_b + nvs): the AtomS3 layout
 
     def preflight(self):
         self.calls.append("preflight")
@@ -45,8 +54,12 @@ class FakeTools:
         directory.mkdir()
         records = []
         artifacts = {}
+        slot, state = self.layout
+        table = partition_table(("factory", 0, 0, 0x10000, slot), ("kf_cfg_a", 1, 0x40, 0x10000 + slot, 0x4000),
+                                ("kf_cfg_b", 1, 0x41, 0x14000 + slot, 0x4000),
+                                ("nvs", 1, 2, 0x18000 + slot, state - 0x8000))
         for offset, name in ((0, "bootloader.bin"), (0x8000, "partition-table.bin"), (0x10000, "app.bin")):
-            data = b"synthetic " + name.encode()
+            data = table if name == "partition-table.bin" else b"synthetic " + name.encode()
             (directory / name).write_bytes(data)
             record = {"size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             artifacts[name] = record
@@ -59,8 +72,8 @@ class FakeTools:
             artifacts[name] = {"size_bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         plan = {"schema": "keyferry.first-install-plan.v1", "artifact_role": "DEVICE_PRIVATE_CANDIDATE",
                 "flash_size_bytes": profile["flash"]["size_mb"] * 1024 * 1024,
-                "application_headroom_bytes": 0x200000, "application_slot_bytes": 0x300000,
-                "erase_before_first_install": [{"offset": 0x310000, "size_bytes": 0xB000}],
+                "application_headroom_bytes": 0x200000, "application_slot_bytes": slot,
+                "erase_before_first_install": [{"offset": 0x10000 + slot, "size_bytes": state}],
                 "writes": records, "artifacts": artifacts, "version": "0.3.0-pointer.2",
                 "producer_commit": subprocess.check_output(["git", "rev-parse", "HEAD"],
                     cwd=Path(__file__).resolve().parents[1]).decode().strip()}
