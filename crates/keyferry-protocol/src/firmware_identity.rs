@@ -6,6 +6,7 @@ pub const RELEASE_BYTES: usize = 32;
 pub const BOARD_WAVESHARE_GEEK_V1_1_REFERENCE: u32 = 1;
 pub const BOARD_LILYGO_T_DONGLE_S3: u32 = 2;
 pub const BOARD_M5STACK_ATOMS3_LITE: u32 = 3;
+pub const BOARD_WAVESHARE_AMOLED_1_8: u32 = 4;
 pub const DIGEST_ESP_APP_ELF_SHA256: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,7 +95,10 @@ pub fn decode_v1(payload: &[u8]) -> Result<FirmwareIdentityV1, FirmwareIdentityE
         u32::from_le_bytes(payload[40..44].try_into().expect("exact slice"));
     if !matches!(
         board_compatibility_id,
-        BOARD_WAVESHARE_GEEK_V1_1_REFERENCE | BOARD_LILYGO_T_DONGLE_S3 | BOARD_M5STACK_ATOMS3_LITE
+        BOARD_WAVESHARE_GEEK_V1_1_REFERENCE
+            | BOARD_LILYGO_T_DONGLE_S3
+            | BOARD_M5STACK_ATOMS3_LITE
+            | BOARD_WAVESHARE_AMOLED_1_8
     ) {
         return Err(FirmwareIdentityError::Board);
     }
@@ -162,6 +166,7 @@ mod tests {
             BOARD_WAVESHARE_GEEK_V1_1_REFERENCE,
             BOARD_LILYGO_T_DONGLE_S3,
             BOARD_M5STACK_ATOMS3_LITE,
+            BOARD_WAVESHARE_AMOLED_1_8,
         ] {
             let mut candidate = payload();
             candidate[40..44].copy_from_slice(&board.to_le_bytes());
@@ -181,7 +186,7 @@ mod tests {
             (1, 0, FirmwareIdentityError::Capability),
             (5, 2, FirmwareIdentityError::Protocol),
             (8, 0, FirmwareIdentityError::Release),
-            (40, 4, FirmwareIdentityError::Board),
+            (40, 5, FirmwareIdentityError::Board),
             (44, 2, FirmwareIdentityError::Digest),
         ];
         for (offset, value, expected) in cases {

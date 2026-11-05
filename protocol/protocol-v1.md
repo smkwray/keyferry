@@ -113,7 +113,7 @@ protocol_major         1 byte   # exactly 1
 protocol_min_minor     1 byte   # exactly 0 in v1
 protocol_max_minor     1 byte   # exactly 0 in v1
 semantic_release      32 bytes  # 1-31 ASCII SemVer bytes, then NUL padding
-board_compatibility_id 4 bytes  # little-endian; 1 = waveshare_geek_v1_1_reference, 2 = lilygo_t_dongle_s3
+board_compatibility_id 4 bytes  # little-endian; 1 = waveshare_geek_v1_1_reference, 2 = lilygo_t_dongle_s3, 3 = m5stack_atoms3_lite, 4 = waveshare_amoled_1_8
 digest_kind            1 byte   # 1 = ESP application ELF SHA-256
 elf_sha256             32 bytes
 ```

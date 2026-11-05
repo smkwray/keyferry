@@ -296,6 +296,8 @@ void TestConfigurationValidation() {
   identity.board_compatibility_id = 3;
   assert(keyferry::endpoint::ValidateFirmwareIdentity(identity));
   identity.board_compatibility_id = 4;
+  assert(keyferry::endpoint::ValidateFirmwareIdentity(identity));
+  identity.board_compatibility_id = 5;
   assert(!keyferry::endpoint::ValidateFirmwareIdentity(identity));
 }
 

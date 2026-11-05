@@ -26,6 +26,7 @@ constexpr std::size_t kFirmwareIdentityPayloadBytes = 77;
 constexpr std::uint32_t kWaveshareGeekV1_1CompatibilityId = 1;
 constexpr std::uint32_t kLilygoTDongleS3CompatibilityId = 2;
 constexpr std::uint32_t kM5stackAtomS3LiteCompatibilityId = 3;
+constexpr std::uint32_t kWaveshareAmoled18CompatibilityId = 4;
 
 struct FirmwareIdentity {
   std::array<std::uint8_t, kFirmwareIdentityReleaseBytes> release{};
