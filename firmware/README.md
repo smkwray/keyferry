@@ -12,6 +12,8 @@ Current profiles:
 | --- | --- | --- |
 | `waveshare_geek_v1_1_reference` | ST7789, 240×135 | recovery and production qualified on the bound owner unit |
 | `lilygo_t_dongle_s3` | ST7735, 160×80 | existing control/input image qualified on the owner unit; USB file capacity unqualified |
+| `m5stack_atoms3_lite` | none (RGB LED) | control, USB keyboard and pointer used with Windows targets; profile unqualified |
+| `waveshare_amoled_1_8` | CO5300 AMOLED, 368×448, touch | handheld shell (`esp32s3/handheld/`); its Keyferry function authenticated over the Bluetooth control link on one unit; profile unqualified |
 
 The reusable board profile contains wiring, display geometry/orientation, electrical polarity,
 flash size, and optional capabilities. Per-unit MAC, factory backup, security state, secrets, and

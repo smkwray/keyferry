@@ -10,6 +10,7 @@ Thumbs.db
 *.log
 .tmp-*
 /release/
+/cp/
 /dist/
 /secrets/
 /.private-denylist

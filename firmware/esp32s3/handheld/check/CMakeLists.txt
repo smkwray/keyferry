@@ -1,5 +1,5 @@
-# Board Check image for the AMOLED handheld: Home, Board Check and Settings only.
-# No radio, no application USB class, no SD writes (ADR 0018 phase 1).
+# Board Check image for the AMOLED handheld: the handheld shell without the Keyferry bridge.
+# No radio; it links the shell's local functions (USB classes, SD drive) for bring-up and tests.
 cmake_minimum_required(VERSION 3.16)
 set(IDF_TARGET "esp32s3" CACHE STRING "ESP-IDF target")
 set(PROJECT_VER "0.0.1-handheld-check")

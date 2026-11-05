@@ -5,11 +5,14 @@ it as a serial port named "Keyferry Messages" (USB 303A:4014). Any program that 
 to that port can put a message on the screen; nothing needs installing.
 
 The port is display-only. It cannot type, click, read files or reach Keyferry, and the board keeps
-the last 16 messages in memory until it restarts (ADR 0018 rule 15).
+the last 16 messages in memory until it restarts. Anything on the computer can write to the port,
+so a message is only that computer's claim ([security notes](../../../SECURITY.md#amoled-handheld-deployment)).
 
 ## Lines
 
-Computer to board, one per line (UTF-8; up to 160 characters are shown):
+Computer to board, one per line in UTF-8. The screen shows at most 160 printable ASCII characters:
+tabs become spaces; curly quotes, en and em dashes, ellipses and bullets become their plain ASCII
+forms; any other non-ASCII character becomes `?`; control characters are dropped.
 
 | Line | Shows |
 |---|---|

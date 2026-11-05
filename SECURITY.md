@@ -307,8 +307,8 @@ secret accessibility value is blank. The sender borrows the editor's shared text
 its guarded request, avoiding another whole-password allocation. This does not make the editor's
 allocation wipeable. Slint editing temporaries and undo strings are ordinary RAM allocations;
 discarding the editor releases them without guaranteeing erasure. A window input-method snapshot
-can retain plaintext until the window/process is destroyed. Successful prompts close after three
-seconds; failed or uncertain results remain visible until the owner closes them. These paths do
+can retain plaintext until the window/process is destroyed. Every result, successful, failed or
+uncertain, closes after 30 seconds unless the owner closes it first. These paths do
 not deliberately write a password history. Shared HTTP/parser/TLS storage can retain other copies.
 
 The memory protections assume a trusted controller and OS and reduce accidental persistence and
@@ -402,3 +402,42 @@ The owner dialog's REQUESTED receipt cannot authorize following input. A screen 
 before further input, and an omitted optional marker leaves awaiting_owner true. Input/checkpoint
 failure stops and preserves correlated command receipts; no automatic replay or dialog retry exists.
 Screens, OCR text and ordinary parameter values remain memory-only and absent from diagnostics.
+
+## AMOLED handheld deployment
+
+The Waveshare AMOLED handheld runs the bridge as one function of a touchscreen shell. Inside that
+function every bridge rule in this document applies unchanged. Elsewhere in this document,
+statements that the device stores no payloads, serves only a volatile authenticated file snapshot
+and emits input only for an authenticated controller describe the bridge; the shell's other
+functions have the boundaries below.
+
+- **Isolation.** Functions are mutually exclusive. Choosing one records the choice in RTC memory
+  and restarts the board into that function alone, with its own USB identity; switching always
+  restarts through Home. Only the bridge starts Wi-Fi or Bluetooth or runs the command executor,
+  and no other function has a path into it. A bridge crash or restart returns to the bridge; a
+  fourth start without 60 s of stable running falls back to Home.
+- **Leaving the bridge** is terminal for that boot. It closes network admission, refuses
+  provisioning and maintenance, ends the session, disarms and waits for confirmed keyboard and
+  mouse neutral before it detaches USB and restarts to Home. If neutral is not confirmed within
+  3 s, the bridge stays stopped and the screen asks for an unplug; nothing resumes or retries. The
+  bridge's volatile USB file handoff is disabled on this board.
+- **Local input.** Keep Awake and Macros send HID input chosen by a person touching the board,
+  without a controller. Keep Awake sends a +1/-1 relative mouse pair every 25 s only after an
+  explicit Start, and stops on suspend, unplug, an unconfirmed report, its timer or a restart.
+  Macros plays compiled presets with no text or pointer movement, one at a time, never queued or
+  retried. Every press is followed by a release that the USB stack must confirm; an unconfirmed
+  release refuses further presets and repeats all-released reports until one is confirmed.
+- **Persistent storage.** USB Drive gives the USB-connected computer one image file on the microSD
+  card, writable by default. Data the computer writes persists on the card, which is not encrypted:
+  anyone holding the card can read it. The computer reaches only that file's sectors. Writes are
+  acknowledged after they reach the card, the card is never formatted automatically, a writable
+  session that ends without the computer's eject leaves the image flagged, and a card fault stops
+  serving.
+- **Microphone.** Audio goes only to the USB host while it has the stream open; it is never
+  stored, logged or sent elsewhere. Board or host mute sends silence. The codec records only
+  inside this function.
+- **Messages** is an unauthenticated, display-only serial port. Any program on the USB-connected
+  computer can put text on the screen, including misleading prompts, so its content is only that
+  computer's claim. Text is reduced to 160 printable ASCII characters, the last 16 messages stay
+  in RAM until restart, logs carry IDs and kinds only, and Yes/No answers go only to the program
+  holding the port in the current USB session. It has no path to input, files or the bridge.
