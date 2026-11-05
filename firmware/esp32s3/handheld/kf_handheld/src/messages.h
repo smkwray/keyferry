@@ -9,9 +9,12 @@ namespace keyferry::handheld {
 //
 // Computer -> board, one line each (UTF-8, LF or CRLF, longer than kMaxText is cut):
 //   text      a notice          !text   an alert          ?text   a Yes/No question
+//   .!text    a notice "!text" (likewise .? ./ ..)
 //   /clear    removes them all  /ping   answers "pong"
 // Board -> computer, one line each: "ready" when a program opens the port, "ok <id>" for each
 // message, "read <id>" when one is tapped, "yes <id>" or "no <id>" when a question is answered.
+// Replies go only to the program that has the port open (DTR) when they are made; a line equal
+// to one of them is ignored, since macOS and Linux echo a port's input back while it is open.
 
 constexpr int kMaxMessages = 16;
 constexpr int kMaxText = 160;

@@ -479,6 +479,18 @@ def run_cpp_check(compiler: str) -> None:
              fatfs / "port/freertos/ffsystem.c", handheld / "src/drive.cpp",
              handheld / "test/drive_test.cpp"],
         ))
+        # Messages: production messages.cpp over a simulated USB serial port.
+        messages_shims = tmp / "idf-messages"
+        for header in ("device/usbd_pvt.h", "esp_heap_caps.h", "esp_log.h", "esp_timer.h",
+                       "freertos/FreeRTOS.h", "freertos/semphr.h", "tinyusb_cdc_acm.h", "tusb.h"):
+            path = messages_shims / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('#include "messages_test_stubs.h"\n', encoding="utf-8")
+        checks.append((
+            "handheld-messages-test",
+            [messages_shims, handheld / "test", handheld / "src"],
+            [handheld / "src/messages.cpp", handheld / "test/messages_test.cpp"],
+        ))
         for name, includes, sources in checks:
             executable = tmp / (f"{name}.exe" if sys.platform == "win32" else name)
             if msvc:

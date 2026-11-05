@@ -1397,7 +1397,13 @@ Screen Active() {
 }
 
 void ShowWakeShield() {
-  if (g.wake_shield != nullptr) lv_obj_set_hidden(g.wake_shield, false);
+  if (g.wake_shield == nullptr) return;
+  lv_obj_set_hidden(g.wake_shield, false);
+  // A finger already down when the screen goes black must not click what was under it on
+  // release: LVGL drops that press (PRESS_LOST) and ignores the pointer until it lifts.
+  for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev != nullptr; indev = lv_indev_get_next(indev)) {
+    if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) lv_indev_wait_release(indev);
+  }
 }
 
 void RefreshHome(const HomeView& view) {

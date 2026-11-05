@@ -16,6 +16,7 @@ Computer to board, one per line (UTF-8; up to 160 characters are shown):
 | `text` | a notice |
 | `!text` | an alert (red) |
 | `?text` | a question with Yes and No buttons |
+| `.text` | a notice whose text starts with `!`, `?`, `/` or `.` |
 | `/clear` | removes every message |
 | `/ping` | nothing; the board answers `pong` |
 
@@ -45,8 +46,10 @@ function Send-Keyferry {
     if (-not $device -or $device.Name -notmatch '\((COM\d+)\)') {
         throw 'Keyferry Messages is not connected: open Messages on the handheld.'
     }
-    $prefix = @{ notice = ''; alert = '!'; question = '?' }[$Kind]
     $port = [System.IO.Ports.SerialPort]::new($Matches[1])
+    $prefix = @{ notice = ''; alert = '!'; question = '?' }[$Kind]
+    if ($Kind -eq 'notice' -and $Text -match '^[!?/.]') { $prefix = '.' }  # shown as written
+    $port.Encoding = [System.Text.UTF8Encoding]::new($false)
     $port.NewLine = "`n"
     $port.DtrEnable = $true
     $port.ReadTimeout = 2000
@@ -79,6 +82,12 @@ open is not sent later.
 
 Without the function, from any shell: `cmd /c "echo OCR finished> COM7"` (use the COM number
 Device Manager shows for Keyferry Messages).
+
+## macOS and Linux
+
+While Messages is open the handheld is the only `usbmodem` port it presents, so a notice is one
+line: `printf 'OCR finished\n' > /dev/cu.usbmodem*` (Linux: `/dev/ttyACM*`). These systems echo
+what a port receives back to it while it is open; the board ignores its own replies coming back.
 
 ## If it does not appear
 

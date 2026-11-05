@@ -68,6 +68,8 @@ void NudgeTask(void*) {
       StopWith(KeepAwakeState::kStoppedUnconfirmed);
       continue;
     }
+    // The return leg always follows a delivered outward one, even across a Stop, so the pointer
+    // ends where it started; Stop takes effect before the next pair.
     vTaskDelay(pdMS_TO_TICKS(20));  // the return leg goes out on a later poll
     if (!Nudge(-1)) {
       StopWith(KeepAwakeState::kStoppedUnconfirmed);

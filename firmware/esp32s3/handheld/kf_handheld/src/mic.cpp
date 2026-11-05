@@ -1,8 +1,9 @@
 // Microphone (ADR 0018 rule 14). The ES8311 codec runs in recording mode only (its DAC off and the
 // speaker amplifier driven off); a capture task reads it over I2S in 2 ms blocks and applies the
 // computer's volume and both mutes. Blocks reach TinyUSB's UAC2 FIFO only on the TinyUSB task,
-// which also opens, closes and resets the stream, so a block can never land in a stream other
-// than the one open when it is written. Nothing is stored or sent anywhere else.
+// which also opens, closes and resets the stream, and each block carries the stream generation it
+// was captured in, so a block only ever lands in that recording. Nothing is stored or sent
+// anywhere else.
 #include "mic.h"
 
 #include <algorithm>
@@ -60,6 +61,14 @@ std::atomic<std::int16_t> g_host_volume[2] = {};
 std::atomic<std::int32_t> g_gain_q16{1 << 16};
 std::atomic<bool> g_streaming{false};
 std::atomic<std::uint32_t> g_stream_session{0};
+// Changes whenever the computer opens or closes the stream: a block is sent only into the
+// recording it was captured for, never into the next one.
+std::atomic<std::uint32_t> g_stream_generation{0};
+
+struct Block {
+  std::uint32_t generation;  // g_stream_generation before the samples were read
+  std::int16_t samples[kBlockSamples];
+};
 
 // Open by the computer in the current USB session (a bus reset or re-enumeration starts a new one).
 bool Streaming() {
@@ -129,12 +138,15 @@ bool StartCodec(int gain_db) {
 // would overwrite unread audio is dropped instead.
 void Submit(void*) {
   g_submit_pending.store(false);
-  std::int16_t block[kBlockSamples];
-  while (xMessageBufferReceive(g_blocks, block, sizeof(block), 0) == sizeof(block)) {
-    if (g_stopped.load() || g_fault.load() || !Streaming()) continue;
+  Block block;
+  while (xMessageBufferReceive(g_blocks, &block, sizeof(block), 0) == sizeof(block)) {
+    if (g_stopped.load() || g_fault.load() || !Streaming() ||
+        block.generation != g_stream_generation.load()) {
+      continue;
+    }
     tu_fifo_t* fifo = tud_audio_get_ep_in_ff();
-    if (fifo == nullptr || tu_fifo_remaining(fifo) < sizeof(block)) continue;
-    tud_audio_write(block, sizeof(block));
+    if (fifo == nullptr || tu_fifo_remaining(fifo) < sizeof(block.samples)) continue;
+    tud_audio_write(block.samples, sizeof(block.samples));
   }
 }
 
@@ -144,10 +156,12 @@ bool ReadBlock(std::int16_t* block) {
 }
 
 void CaptureTask(void*) {
-  std::int16_t block[kBlockSamples];
+  Block captured;
+  std::int16_t* const block = captured.samples;
   int failures = 0;
   bool was_streaming = false;
   for (;;) {
+    captured.generation = g_stream_generation.load();
     if (!ReadBlock(block)) {
       if (++failures < kFaultReads) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -161,25 +175,26 @@ void CaptureTask(void*) {
     }
     failures = 0;
     int peak = 0;
-    for (const std::int16_t sample : block) peak = std::max(peak, std::abs(static_cast<int>(sample)));
+    for (const std::int16_t sample : captured.samples) peak = std::max(peak, std::abs(static_cast<int>(sample)));
     int seen = g_peak.load();
     while (peak > seen && !g_peak.compare_exchange_weak(seen, peak)) {
     }
     const bool streaming = Streaming();  // a hint; Submit() decides on the TinyUSB task
     if (streaming != was_streaming) {
-      ESP_LOGI(kTag, "computer %s the stream", streaming ? "opened" : "closed");
+      ESP_LOGI(kTag, "computer %s the stream (stack free %u B)", streaming ? "opened" : "closed",
+               static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
       was_streaming = streaming;
     }
     if (!streaming || g_stopped.load()) continue;
     if (g_board_mute.load() || g_host_mute[0].load() || g_host_mute[1].load()) {
-      std::memset(block, 0, sizeof(block));
+      std::memset(captured.samples, 0, sizeof(captured.samples));
     } else {
       const std::int32_t gain = g_gain_q16.load();
       if (gain < (1 << 16)) {
-        for (std::int16_t& sample : block) sample = static_cast<std::int16_t>((sample * gain) >> 16);
+        for (std::int16_t& sample : captured.samples) sample = static_cast<std::int16_t>((sample * gain) >> 16);
       }
     }
-    xMessageBufferSend(g_blocks, block, sizeof(block), 0);  // full: this block is dropped
+    xMessageBufferSend(g_blocks, &captured, sizeof(captured), 0);  // full: this block is dropped
     if (!g_submit_pending.exchange(true)) usbd_defer_func(Submit, nullptr, false);
   }
 }
@@ -208,7 +223,7 @@ bool CaptureReady(int gain_db) {
 
 bool MicStart(int gain_db) {
   UpdateGain();
-  g_blocks = xMessageBufferCreate(4 * (kBlockSamples * sizeof(std::int16_t) + sizeof(std::size_t)));
+  g_blocks = xMessageBufferCreate(4 * (sizeof(Block) + sizeof(std::size_t)));
   if (g_blocks == nullptr || !StartCodec(gain_db) || !CaptureReady(gain_db) ||
       xTaskCreate(CaptureTask, "kf_mic", 3072, nullptr, 6, nullptr) != pdPASS) {
     ESP_LOGE(kTag, "audio chip did not start");
@@ -253,12 +268,16 @@ extern "C" bool tud_audio_set_itf_cb(std::uint8_t, tusb_control_request_t const*
   if (TU_U16_LOW(request->wIndex) == kh::kStreamingInterface) {
     kh::g_stream_session.store(kh::UsbDeviceSession());
     kh::g_streaming.store(TU_U16_LOW(request->wValue) != 0);
+    kh::g_stream_generation.fetch_add(1);
   }
   return true;
 }
 
 extern "C" bool tud_audio_set_itf_close_ep_cb(std::uint8_t, tusb_control_request_t const* request) {
-  if (TU_U16_LOW(request->wIndex) == kh::kStreamingInterface) kh::g_streaming.store(false);
+  if (TU_U16_LOW(request->wIndex) == kh::kStreamingInterface) {
+    kh::g_streaming.store(false);
+    kh::g_stream_generation.fetch_add(1);
+  }
   return true;
 }
 

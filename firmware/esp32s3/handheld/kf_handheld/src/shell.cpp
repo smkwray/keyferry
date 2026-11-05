@@ -270,6 +270,7 @@ int g_mic_gain = 5;        // index into ui::kMicGainDb
 macros::Host g_host = macros::Host::kWindows;
 bool g_blanked = false;
 bool g_dimmed = false;  // Microphone: dimmed, not blanked, while live
+std::uint32_t g_last_idle_ms = 0;  // LVGL inactive time at the last pass: a drop means a touch
 bool g_boot_down = false;
 bool g_boot_long = false;
 std::int64_t g_boot_down_since = 0;
@@ -454,16 +455,31 @@ void SdCheckTask(void*) {
   vTaskDelete(nullptr);
 }
 
+// A live microphone keeps its Live state in sight (ADR 0018 rule 14): the screen dims instead of
+// going black, whether from the timeout or from PWR.
+bool MicKeepsScreen() { return g_function == Function::kMic && MicLive(); }
+
+void Dim() {
+  if (!g_dimmed) bsp_display_brightness_set(kMinBrightness);
+  g_dimmed = true;
+}
+
 void Blank() {
   if (g_blanked) return;
+  if (MicKeepsScreen()) {
+    Dim();
+    return;
+  }
+  g_dimmed = false;
   g_blanked = true;
   bsp_display_brightness_set(0);
   ui::ShowWakeShield();
 }
 
 void Wake() {
-  if (!g_blanked) return;
+  if (!g_blanked && !g_dimmed) return;
   g_blanked = false;
+  g_dimmed = false;
   bsp_display_brightness_set(g_brightness);
   lv_display_trigger_activity(nullptr);
 }
@@ -891,7 +907,7 @@ void OnTick(lv_timer_t*) {
     if (events) ESP_LOGI(kTag, "PWR event 0x%02x", events);
     if (events & kPwrShort) {
       ++g_pwr_short_count;
-      if (g_blanked) {
+      if (g_blanked || g_dimmed) {
         Wake();
       } else {
         Blank();
@@ -920,22 +936,18 @@ void OnTick(lv_timer_t*) {
     }
   }
 
-  // A live microphone keeps its Live state in sight: the screen dims instead of blanking.
+  // Screen timeout. A dimmed screen brightens on the next touch; one that was black when the
+  // computer opened the microphone comes back dimmed, its wake shield still taking that touch.
   const std::uint32_t blank_after_ms = ui::kScreenOffSeconds[g_screen_off] * 1000U;
   const std::uint32_t idle_ms = lv_display_get_inactive_time(nullptr);
-  if (g_dimmed && idle_ms < blank_after_ms) {
-    g_dimmed = false;
-    bsp_display_brightness_set(g_brightness);
+  const bool touched = idle_ms < g_last_idle_ms;
+  g_last_idle_ms = idle_ms;
+  if (g_dimmed && touched) Wake();
+  if (g_blanked && MicKeepsScreen()) {
+    g_blanked = false;
+    Dim();
   }
-  if (!g_blanked && idle_ms >= blank_after_ms) {
-    if (g_function == Function::kMic && MicLive()) {
-      if (!g_dimmed) bsp_display_brightness_set(kMinBrightness);
-      g_dimmed = true;
-    } else {
-      g_dimmed = false;
-      Blank();
-    }
-  }
+  if (!g_blanked && idle_ms >= blank_after_ms) Blank();
 }
 
 void OnRenderReady(lv_event_t*) { g_renders.fetch_add(1); }

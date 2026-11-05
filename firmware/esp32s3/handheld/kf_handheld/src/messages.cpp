@@ -40,18 +40,26 @@ int g_count = 0;
 std::uint32_t g_next_id = 1;
 std::atomic<std::uint32_t> g_serial{0};
 std::atomic<std::uint32_t> g_received{0};
+// A program has the port open (DTR) in this USB session. TinyUSB clears DTR on a bus reset or
+// unplug without a line-state callback, so a later session ends the connection by itself.
 std::atomic<bool> g_listening{false};
-int g_reply_count = 0;
-std::size_t g_line_length = 0;  // TinyUSB task only
+std::atomic<std::uint32_t> g_listen_session{0};
+int g_reply_count = 0;                     // guarded by g_lock, like the listening transitions
+std::atomic<bool> g_flush_pending{false};  // one deferred flush at a time
+std::size_t g_line_length = 0;             // TinyUSB task only
+std::uint32_t g_line_session = 0;          // TinyUSB task only: session of the partial line
 
 struct Lock {
   Lock() { xSemaphoreTake(g_lock, portMAX_DELAY); }
   ~Lock() { xSemaphoreGive(g_lock); }
 };
 
-// TinyUSB task: writes every queued reply. Replies made while no program has the port open are
-// dropped there, so a program never reads an earlier one's answers.
-void FlushReplies(void*) {
+bool Listening() { return g_listening.load() && g_listen_session.load() == UsbDeviceSession(); }
+
+// TinyUSB task: writes every queued reply, whole lines only (a program that stopped reading loses
+// replies, never half of one, and never a message).
+void FlushReplies(void* = nullptr) {
+  g_flush_pending.store(false);
   char lines[kReplySlots][24];
   int count = 0;
   {
@@ -60,27 +68,35 @@ void FlushReplies(void*) {
     std::memcpy(lines, g_store->replies, sizeof(lines));
     g_reply_count = 0;
   }
-  if (!g_listening.load()) return;
+  if (count == 0 || !Listening()) return;
+  bool wrote = false;
   for (int i = 0; i < count; ++i) {
-    tinyusb_cdcacm_write_queue(kPort, reinterpret_cast<const std::uint8_t*>(lines[i]), std::strlen(lines[i]));
+    const std::size_t length = std::strlen(lines[i]);
+    if (tud_cdc_n_write_available(kPort) < length) continue;
+    tinyusb_cdcacm_write_queue(kPort, reinterpret_cast<const std::uint8_t*>(lines[i]), length);
+    wrote = true;
   }
-  tinyusb_cdcacm_write_flush(kPort, 0);
+  if (wrote) tinyusb_cdcacm_write_flush(kPort, 0);
 }
 
-// Any task, without the lock held.
+// Any task, without the lock held. Queues a reply for the program that has the port open now; with
+// none it is dropped here, so a later program never reads an earlier one's answers. The TinyUSB
+// task then flushes it itself; other tasks call ScheduleFlush().
 void Reply(const char* word, std::uint32_t id) {
-  {
-    Lock lock;
-    if (g_reply_count == kReplySlots) return;  // a program that never reads loses replies, not messages
-    if (id == 0) {
-      std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s\r\n", word);
-    } else {
-      std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s %u\r\n", word,
-                    static_cast<unsigned>(id));
-    }
-    ++g_reply_count;
+  Lock lock;
+  if (!Listening() || g_reply_count == kReplySlots) return;
+  if (id == 0) {
+    std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s\r\n", word);
+  } else {
+    std::snprintf(g_store->replies[g_reply_count], sizeof(g_store->replies[0]), "%s %u\r\n", word,
+                  static_cast<unsigned>(id));
   }
-  usbd_defer_func(FlushReplies, nullptr, false);
+  ++g_reply_count;
+}
+
+// Not on the TinyUSB task: it never queues work for itself (its queue could be full).
+void ScheduleFlush() {
+  if (!g_flush_pending.exchange(true)) usbd_defer_func(FlushReplies, nullptr, false);
 }
 
 // One UTF-8 code point from `text`, or -1 for a malformed sequence; advances *at.
@@ -129,11 +145,29 @@ void Sanitize(const char* in, std::size_t length, char* out, std::size_t size) {
   out[used] = '\0';
 }
 
+// True for a line that is one of the board's own replies. macOS and Linux open a serial port with
+// echo on, so `printf ... > /dev/cu.usbmodem*` sends the board's replies straight back while the
+// port is open; taking them as messages would answer each with another reply, without end.
+bool OwnReply(const char* line, std::size_t length) {
+  const auto is = [&](const char* word) {
+    return std::strlen(word) == length && std::memcmp(line, word, length) == 0;
+  };
+  if (is("ready") || is("pong")) return true;
+  for (const char* word : {"ok ", "read ", "yes ", "no "}) {
+    const std::size_t prefix = std::strlen(word);
+    if (length <= prefix || std::memcmp(line, word, prefix) != 0) continue;
+    std::size_t digits = prefix;
+    while (digits < length && line[digits] >= '0' && line[digits] <= '9') ++digits;
+    if (digits == length) return true;
+  }
+  return false;
+}
+
 // TinyUSB task: one complete line from the computer.
 void Accept(const char* line, std::size_t length) {
   while (length > 0 && (line[length - 1] == ' ' || line[length - 1] == '\t')) --length;
   while (length > 0 && (*line == ' ' || *line == '\t')) ++line, --length;
-  if (length == 0) return;
+  if (length == 0 || OwnReply(line, length)) return;
   if (length == 6 && std::memcmp(line, "/clear", 6) == 0) {
     MessagesClear();
     return;
@@ -146,6 +180,9 @@ void Accept(const char* line, std::size_t length) {
   if (*line == '!' || *line == '?') {
     kind = *line == '!' ? MessageKind::kAlert : MessageKind::kQuestion;
     ++line;
+    --length;
+  } else if (length > 1 && *line == '.' && std::memchr("!?/.", line[1], 4) != nullptr) {
+    ++line;  // ".!", ".?", "./", "..": a notice whose text starts with that character
     --length;
   }
   std::uint32_t id = 0;
@@ -171,7 +208,12 @@ void Accept(const char* line, std::size_t length) {
   Reply("ok", id);
 }
 
+// TinyUSB task. Each line's reply is written before the next line is read.
 void OnReceive(int, cdcacm_event_t*) {
+  if (g_line_session != UsbDeviceSession()) {  // an unfinished line never spans an unplug
+    g_line_session = UsbDeviceSession();
+    g_line_length = 0;
+  }
   std::uint8_t chunk[64];
   std::size_t received = 0;
   while (tinyusb_cdcacm_read(kPort, chunk, sizeof(chunk), &received) == ESP_OK && received > 0) {
@@ -180,6 +222,7 @@ void OnReceive(int, cdcacm_event_t*) {
       if (c == '\n') {
         Accept(g_store->line, g_line_length);
         g_line_length = 0;
+        FlushReplies();
       } else if (c != '\r' && g_line_length < kMaxLine) {
         g_store->line[g_line_length++] = c;
       }
@@ -187,13 +230,23 @@ void OnReceive(int, cdcacm_event_t*) {
   }
 }
 
+// TinyUSB task. A program opening the port starts clean: no replies, unfinished line or unsent
+// bytes from an earlier one.
 void OnLineState(int, cdcacm_event_t* event) {
   const bool listening = event->line_state_changed_data.dtr;
-  if (listening == g_listening.exchange(listening)) return;
-  if (listening) {
-    tud_cdc_n_write_clear(kPort);  // nothing left over from an earlier program
-    Reply("ready", 0);
+  if (listening == Listening()) return;  // an RTS change, or DTR held across a session ends
+  {
+    Lock lock;
+    g_reply_count = 0;
+    g_listen_session.store(UsbDeviceSession());
+    g_listening.store(listening);
   }
+  if (!listening) return;
+  g_line_session = UsbDeviceSession();
+  g_line_length = 0;
+  tud_cdc_n_write_clear(kPort);
+  Reply("ready", 0);
+  FlushReplies();
 }
 
 Message* FindLocked(std::uint32_t id) {
@@ -234,7 +287,7 @@ int MessagesList(Message* out, int max, std::uint32_t* serial) {
 
 std::uint32_t MessagesSerial() { return g_serial.load(); }
 std::uint32_t MessagesReceived() { return g_received.load(); }
-bool MessagesListening() { return g_listening.load(); }
+bool MessagesListening() { return Listening(); }
 
 void MessagesMarkRead(std::uint32_t id) {
   bool changed = false;
@@ -249,6 +302,7 @@ void MessagesMarkRead(std::uint32_t id) {
   if (!changed) return;
   g_serial.fetch_add(1);
   Reply("read", id);
+  ScheduleFlush();
 }
 
 void MessagesAnswer(std::uint32_t id, bool yes) {
@@ -264,6 +318,7 @@ void MessagesAnswer(std::uint32_t id, bool yes) {
   if (!changed) return;
   g_serial.fetch_add(1);
   Reply(yes ? "yes" : "no", id);
+  ScheduleFlush();
 }
 
 void MessagesClear() {
