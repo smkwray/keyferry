@@ -31,6 +31,7 @@ hardware/evidence/private/
 /scripts/provision_stick.py
 /scripts/provision_stick.ps1
 /scripts/control_check.py
+/scripts/remote_build.ps1
 /tests/test_provision_stick.py
 /tests/provision_fakes.py
 

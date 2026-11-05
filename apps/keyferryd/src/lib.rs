@@ -982,7 +982,7 @@ pub struct ActionsRequest {
 
 /// A public typed action. Version 1 accepts only `text`, `tap`, and `chord`,
 /// addressed by key NAME. Raw HID usages are an internal representation and are
-/// deliberately not accepted here (`docs/api-v1.md`): the host owns the mapping.
+/// deliberately not accepted here: the host owns the mapping.
 /// Unknown fields are rejected so a raw-HID attempt fails loudly.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2127,13 +2127,18 @@ impl OwnerTlsListener {
 
     /// Starts a bounded handshake for an accepted TCP connection; excess ones are closed.
     fn start_handshake(&mut self, stream: tokio::net::TcpStream, address: SocketAddr) {
-        let from_address = self.pending_per_address.entry(address.ip()).or_insert(0);
+        // Check the limits before recording anything, so a refused address leaves no entry.
+        let from_address = self
+            .pending_per_address
+            .get(&address.ip())
+            .copied()
+            .unwrap_or(0);
         if self.handshakes.len() >= OWNER_TLS_PENDING_HANDSHAKES
-            || *from_address >= OWNER_TLS_PENDING_PER_ADDRESS
+            || from_address >= OWNER_TLS_PENDING_PER_ADDRESS
         {
             return;
         }
-        *from_address += 1;
+        *self.pending_per_address.entry(address.ip()).or_insert(0) += 1;
         let acceptor = self.acceptor.clone();
         let control_port = self.control_port;
         let handle = self.handshakes.spawn(async move {
@@ -9734,7 +9739,7 @@ mod tests {
 
     #[test]
     fn documented_action_json_is_accepted_and_mapped() {
-        // The exact shapes in docs/api-v1.md, which apps/keyferry serializes verbatim.
+        // The action shapes apps/keyferry serializes, verbatim.
         // If either side drifts this fails here instead of at runtime.
         let json = r#"[
             {"type":"text","value":"hi"},

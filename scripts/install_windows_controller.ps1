@@ -234,12 +234,18 @@ function Protect-OwnerOnly {
     }
     Set-AccessRules $Path "D:PAI(A;OICI;FA;;;$sid)"
     Get-ChildItem -LiteralPath $Path -Recurse -Force | ForEach-Object {
-        & icacls.exe $_.FullName /reset /q | Out-Null
+        # /L acts on a link itself, never its target, if one appears during the walk.
+        & icacls.exe $_.FullName /reset /L /q | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw "Could not protect $($_.FullName) for the current user."
         }
     }
+    # Final check, after every entry is owner-only: no other principal can add entries from
+    # here on, so a link or junction inserted while the reset ran is still present and fails.
     foreach ($item in @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to protect ${Path}: $($item.FullName) is a link or junction."
+        }
         $others = (Get-Acl -LiteralPath $item.FullName).Access | Where-Object {
             $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -ne $sid
         }

@@ -176,8 +176,7 @@ else
   fi
 fi
 
-# (Repo-local .venv/cache directories are no longer policed — they're ignored by
-# git, Syncthing, rclone, and remrun, so they never propagate.)
+# Repository-local caches are ignored by Git.
 
 if [[ "$violations" -gt 0 ]]; then
   echo "hygiene_check: FAIL ($violations violation(s), $warnings warning(s))" >&2

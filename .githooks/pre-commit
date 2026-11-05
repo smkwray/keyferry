@@ -22,19 +22,20 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-# --- Rule 0a: publication identity. ---
-# Use the repository publication identity to keep GitHub attribution consistent.
-_ident_bad() {
-  printf 'pre-commit: REFUSED — commit identity is %s <%s>\n' "$1" "$2" >&2
-  printf '  Commits must be smkwray <45633267+smkwray@users.noreply.github.com>.\n' >&2
-  printf '  Fix:  git config user.name smkwray\n' >&2
-  printf '        git config user.email 45633267+smkwray@users.noreply.github.com\n' >&2
-  exit 1
-}
-_AE="$(git config user.email || true)"
-_AN="$(git config user.name  || true)"
-[ "$_AE" = "45633267+smkwray@users.noreply.github.com" ] || _ident_bad "$_AN" "$_AE"
-[ "$_AN" = "smkwray" ] || _ident_bad "$_AN" "$_AE"
+# --- Rule 0a: optional required identity ---
+# A clone that sets keyferry.commitName and keyferry.commitEmail (local git config) refuses
+# commits made under any other identity. Other clones skip this rule.
+_want_name="$(git config --get keyferry.commitName || true)"
+_want_email="$(git config --get keyferry.commitEmail || true)"
+if [ -n "$_want_name$_want_email" ]; then
+  _AN="$(git config user.name || true)"
+  _AE="$(git config user.email || true)"
+  if [ "$_AN" != "$_want_name" ] || [ "$_AE" != "$_want_email" ]; then
+    printf 'pre-commit: REFUSED — commit identity is %s <%s>; this clone requires %s <%s>.\n' \
+      "$_AN" "$_AE" "$_want_name" "$_want_email" >&2
+    exit 1
+  fi
+fi
 
 # --- Rule 0: local control-file integrity, when the checker is installed ---
 # The checked files are gitignored, so a staged-file scan never sees them.

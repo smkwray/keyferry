@@ -4277,6 +4277,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_owner_handshakes_leave_no_address_bookkeeping() {
+        let h = harness(None, FORWARDER_SECRET).await;
+        let store = InstallationTlsSecretSet::load(h.root.join("holder"))
+            .unwrap()
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut owner = crate::OwnerTlsListener::new(
+            listener,
+            store.remote_tls_acceptor().unwrap(),
+            address.port(),
+        );
+        // Eight loopback addresses fill every pending slot; a ninth is refused outright.
+        let mut silent = Vec::new();
+        for host in 1..=9_u8 {
+            for _ in 0..4 {
+                let socket = tokio::net::TcpSocket::new_v4().unwrap();
+                socket
+                    .bind(std::net::SocketAddr::from(([127, 0, 0, host], 0)))
+                    .unwrap();
+                silent.push(socket.connect(address).await.unwrap());
+            }
+        }
+        let _ = time::timeout(
+            Duration::from_millis(500),
+            axum::serve::Listener::accept(&mut owner),
+        )
+        .await;
+        assert_eq!(owner.handshakes.len(), 32);
+        assert_eq!(owner.pending_per_address.len(), 8);
+        assert!(owner.pending_per_address.values().all(|count| *count == 4));
+        drop(silent);
+    }
+
+    #[tokio::test]
     async fn oversized_frame_response_is_refused_by_the_real_owner_mtls_transport() {
         let h = harness(None, FORWARDER_SECRET).await;
         fake_capture(&h.holder);

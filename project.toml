@@ -1,7 +1,6 @@
 working_name = "keyferry"
 display_name = "Keyferry"
 protocol_name = "hidbridge"
-owner = "smkwray"
 status = "preview"
 created = "2026-09-01"
 
