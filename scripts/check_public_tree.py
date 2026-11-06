@@ -185,7 +185,8 @@ def _tree_entries(data: bytes, oid_bytes: int) -> list[tuple[str, bytes, bool]]:
     return entries
 
 
-def _tree_path_failure(trees: dict[bytes, list[tuple[str, bytes, bool]]], roots: set[bytes]) -> bool:
+def _tree_path_failure(trees: dict[bytes, list[tuple[str, bytes, bool]]], roots: set[bytes],
+                       skip_published: bool = False) -> bool:
     # Shared blobs/subtrees have multiple names; rev-list prints only one representative path.
     # Retain root-prefix context only while it can match a private rule. All other directories
     # share one context, so each unique tree is checked a bounded number of times.
@@ -197,6 +198,9 @@ def _tree_path_failure(trees: dict[bytes, list[tuple[str, bytes, bool]]], roots:
             continue
         seen.add((oid, prefix))
         if oid not in trees:
+            if skip_published:
+                # Excluded by a `^ref`: already published, and its names were checked then.
+                continue
             raise RuntimeError("Git history references a missing tree")
         for name, child, directory in trees[oid]:
             relative = (prefix or "") + name
@@ -267,7 +271,8 @@ def history_failures(patterns: list[PrivatePattern], root: Path = ROOT,
         process.stdout.close()
         if process.wait() != 0:
             raise RuntimeError("git cat-file failed")
-    if _tree_path_failure(trees, root_trees):
+    if _tree_path_failure(trees, root_trees,
+                          skip_published=any(ref.startswith("^") for ref in refs)):
         failures.append("Git history contains a prohibited private path or filename")
     return list(dict.fromkeys(failures))
 

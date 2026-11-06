@@ -30,6 +30,10 @@ while true; do
   esac
   git check-ref-format "$remote_ref" >/dev/null 2>&1 || reject 'Malformed destination ref.'
   [[ "$local_oid" =~ ^0+$ ]] && continue
+  # Scan only what this push sends: objects the remote ref already has are excluded.
+  exclude=()
+  [[ "$remote_oid" =~ ^0+$ ]] || exclude=(--history-ref "^$remote_oid")
   "$python_runner" scripts/check_public_tree.py --require-private-registry --history \
-    --history-ref "$local_oid" --publication-name "$remote_ref" || reject 'Privacy check failed.'
+    --history-ref "$local_oid" ${exclude[@]+"${exclude[@]}"} --publication-name "$remote_ref" ||
+    reject 'Privacy check failed.'
 done
