@@ -34,10 +34,10 @@ if [[ "${1:-}" == "--staged" ]]; then
 elif [[ "${1:-}" == "--controls" ]]; then
   # Control-file integrity. These files are gitignored, so the staged scan below
   # can never see them — this is the only path that checks them.
-  if [[ -f scripts/control_check.py ]]; then
-    exec python3 scripts/control_check.py "$ROOT"
+  if [[ -f do/control_check.py ]]; then
+    exec python3 do/control_check.py "$ROOT"
   fi
-  echo "hygiene_check: scripts/control_check.py missing; control gate cannot run." >&2
+  echo "hygiene_check: do/control_check.py missing; control gate cannot run." >&2
   exit 1
 elif [[ -n "${1:-}" ]]; then
   echo "hygiene_check: unknown argument: $1" >&2

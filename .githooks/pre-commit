@@ -39,7 +39,7 @@ fi
 
 # --- Rule 0: local control-file integrity, when the checker is installed ---
 # The checked files are gitignored, so a staged-file scan never sees them.
-if [[ -x scripts/hygiene_check.sh && -f scripts/control_check.py ]]; then
+if [[ -x scripts/hygiene_check.sh && -f do/control_check.py ]]; then
   if ! scripts/hygiene_check.sh --controls; then
     echo "" >&2
     echo "pre-commit: REJECT — control-file integrity check failed." >&2

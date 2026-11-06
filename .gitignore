@@ -1,75 +1,53 @@
-/target/
-/.tools/
-/.pio/
-**/.pio/
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*.tmp
-*.log
-.tmp-*
-/release/
-/cp/
-/dist/
+# Private: everything internal lives in do/ (internal docs in do/docs/, maintainer tools in
+# do/tools/). To keep a document or script out of git, move it into do/; never list it here.
+do/
+AGENTS.md
+CLAUDE.md
+/.claude/
+/.codex/
+/.cursor/
+/.agents/
 /secrets/
+hardware/evidence/private/
+
+# Local configuration the tooling reads in place
+.env
+.env.*
+!*.example
 /.private-denylist
 /project.local.toml
+firmware/**/platformio.local.ini
+
+# Key material
 *.pem
 *.key
 *.p12
 *.pfx
 *.mobileprovision
-.env
-.env.*
-!*.example
-firmware/**/platformio.local.ini
-hardware/evidence/private/
-/hardware/board-manifest.toml
 
-# Kept local: not relevant to the public (if in doubt, a file stays here)
-/SECURITY.md
-/tests/README.md
-/tests/hil/README.md
-/CONTRIBUTING.md
-/config/PAIRING.md
-/config/tailscale/README.md
-/hardware/README.md
-/protocol/ble-gatt-v1.md
-/protocol/input-sequence-v2.md
-/protocol/roaming-v2.md
-/protocol/vectors/README.md
-
-# Local-only maintainer tools
-/scripts/provision_stick.py
-/scripts/provision_stick.ps1
-/scripts/control_check.py
-/scripts/remote_build.ps1
-/tests/test_provision_stick.py
-/tests/provision_fakes.py
-
-# Agent orchestration (private, never tracked)
-/.claude/
-/.codex/
-/.cursor/
-/.agents/
-do/
-CLAUDE.md
-AGENTS.md
-
-# Internal project notes
+# Stray internal folders: their contents belong in do/
 docs/
-
-# Plans and generated project-local state
+plans/
+workorders/
 *.plan.md
 plan.md
-plans/
+
+# Build output, toolchains, caches and worktrees (device-local)
+/target/
+/.tools/
+/.pio/
+**/.pio/
+build/
+/release/
+/cp/
+/dist/
 /data/
 /var/
 /outputs/
 /tmp/
-
-# Python artifacts
+.worktrees/
+firmware/esp32s3/sdkconfig
+firmware/**/managed_components/
 __pycache__/
 *.pyc
 *.pyo
@@ -77,22 +55,18 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 *.egg-info/
-build/
-firmware/esp32s3/sdkconfig
-firmware/**/managed_components/
-
-# Worktrees are device-local and ephemeral
-.worktrees/
-
-# .githooks/ is intentionally tracked
-
-# MSVC C++ build intermediates (compiling firmware/common host tests)
 *.obj
 *.exe
 *.ilk
 *.pdb
 
-# Agent scaffolding kept locally
-START_HERE.md
-SEED_VALIDATION.md
-workorders/
+# OS and editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+.tmp-*
+
+# .githooks/ is intentionally tracked

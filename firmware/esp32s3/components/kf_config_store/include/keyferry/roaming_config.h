@@ -116,7 +116,7 @@ bool AuthorizeRoamingPeer(
     const roaming::P256Spki& peer_spki, RoamingPolicyCrypto& crypto,
     RoamingPeerAuthorization* output,
     RoamingPolicyVerificationWorkspace* workspace);
-// Produces only the fixed device route-proof statement defined by roaming-v2.
+// Produces only the fixed device route-proof statement.
 // The controller installation must still be authorized by the current policy.
 bool BuildAuthenticatedRouteProof(
     const RoamingEndpointConfig& config,

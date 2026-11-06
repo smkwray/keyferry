@@ -112,7 +112,7 @@ class Effects {
   // A successful Disarm() starts the release. The ACK is withheld until this reports that the
   // all-zero USB report completed.
   virtual bool DisarmComplete(std::uint64_t epoch) = 0;
-  // Produces only the fixed roaming-v2 route statement. The session layer
+  // Produces only the fixed device route statement. The session layer
   // owns request validation, sequencing, framing, and the response type.
   virtual bool BuildRouteProof(
       std::uint64_t epoch,
