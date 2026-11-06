@@ -102,6 +102,12 @@ The installed service listens on every active private home or office network
 restrict it. It also picks up nearby boards over Bluetooth; `--bluetooth off` makes a controller
 Wi-Fi/Tailscale-only, and macOS then never asks for Bluetooth permission.
 
+To reach a board held by another of your controllers, each controller accepts Keyferry traffic on
+TCP ports 18043 and 18044 of its own Tailscale address only. No Tailscale configuration is needed
+when your tailnet allows ordinary connections between your computers; a tailnet policy that blocks
+those ports stops forwarding. Give each computer its own credential: never copy one computer's
+Keyferry installation to another.
+
 These are preview builds: Windows executables are unsigned and the macOS app is not notarized, so
 macOS may require [approval on first launch](https://support.apple.com/en-us/102445). The published
 [September 27 preview](https://github.com/smkwray/keyferry/releases/tag/preview-2026-09-27) predates
@@ -149,9 +155,12 @@ the masked dialog and presses Enter (or **Send once**); Esc cancels.
   that the prompt opened, not that typing or an unlock succeeded. Nothing is retried automatically.
 - Never put the secret in chat, arguments or stdin, and never let an agent inspect the dialog.
 
-The protections assume a trusted controller and operating system; temporary RAM copies and OS
-paging or crash files are outside Keyferry's control. [SECURITY.md](SECURITY.md#agent-requested-secure-text)
-details the limits. Software checks do not verify target focus, macOS unlock or preboot/FileVault input.
+Secure text keeps the secret out of agents, logs and files; it does not protect it from the
+controller itself. It assumes a trusted controller and operating system: a program already running
+there can impersonate the local Keyferry service and capture the text. Copies in RAM, OS paging or
+crash files, and anything you copy or select in the dialog are outside Keyferry's control. Keyferry
+cannot see where the target's focus is, and it does not verify a macOS unlock or preboot/FileVault
+input.
 
 ## Command line
 
@@ -295,10 +304,11 @@ Every action submits once with the daemon's normal authentication, arming and re
 and an `UNKNOWN` result is reconciled, never replayed. Secrets stay in the owner-only secure-text
 dialog, never in MCP arguments. Keyferry stores no execution history, screens or OCR, but MCP
 clients and model providers may retain tool arguments, results and images. Capture and OCR can run
-on a different controller from the one holding the board, over the existing owner-mTLS tailnet API.
+on a different controller from the one holding the board; the controllers connect over Tailscale
+with their owner-issued credentials.
 
 [`apps/keyctl/AGENT-CONTROL.md`](apps/keyctl/AGENT-CONTROL.md) is the full reference: selection
-rules, calibration, the HTTP capture API, tool arguments, retention and the one-shot CLI loop.
+rules, calibration, tool arguments, retention and the one-shot CLI loop.
 
 ## Safety and privacy
 
@@ -321,8 +331,6 @@ rules, calibration, the HTTP capture API, tool arguments, retention and the one-
   macOS) until you delete it. Runs and parameter values are never saved.
 - Choosing a file with **Send a file…** may add its name to the operating system's recent files;
   pasting the path avoids that.
-
-[SECURITY.md](SECURITY.md) has the full security contract and threat model.
 
 ## Handheld deployment
 
@@ -355,8 +363,12 @@ and leaving restarts to Home), and none has a path into Keyferry's command execu
 **Settings** holds brightness, the screen-off delay (15 s to 5 min) and the Macros OS, plus a Board
 Check screen. **PWR** blanks or wakes the screen (while the microphone is live it dims instead), and
 the first touch on a dark screen only wakes it. **BOOT** returns to Home; in Keyferry, hold it.
-[SECURITY.md](SECURITY.md#amoled-handheld-deployment) covers how these functions are kept apart
-from Keyferry and what each one can reach.
+
+Only the Keyferry function uses Wi-Fi or Bluetooth or accepts commands from a controller. Keep
+Awake and Macros send input to the USB-connected computer from touches on the board alone, with no
+controller. The microSD card is not encrypted: anyone holding it can read the drive images.
+Messages is unauthenticated, so any program on the USB-connected computer can show text there,
+including misleading prompts.
 
 ## Building from source
 
@@ -366,25 +378,27 @@ strict checks. Firmware builds also need ESP-IDF v6.0.3 and an explicit board pr
 
 ```text
 cargo fetch --locked              # populate dependencies for the offline checks
-python scripts/check.py --strict  # formatting, lints, tests, protocol vectors, repository checks
+python scripts/check.py --strict  # formatting, lints, tests and protocol vectors
+cargo build --release --locked    # keyferry, keyferryd, keyferry-pairing and keyctl in target/release
 ```
 
-Release archives come from the native package checks, which also strip local paths from the
-binaries:
+Install the built programs for the current user. Each installer prints its plan with `Plan`
+(the default) and installs with `Apply`:
 
 ```text
-powershell -File scripts/check_windows_package.ps1    # Windows
-sh scripts/check_macos_package.sh                     # macOS
-python scripts/package_controller_release.py ...      # canonical, scanned release ZIP
+# Windows
+powershell -File scripts/install_windows_controller.ps1 -Mode Apply `
+  -ControllerExecutable target\release\keyferry.exe -DaemonExecutable target\release\keyferryd.exe `
+  -PairingExecutable target\release\keyferry-pairing.exe -CliExecutable target\release\keyctl.exe
+
+# macOS
+sh scripts/package_macos_app.sh target/release/keyferry target/release/keyferryd \
+  target/release/keyferry-pairing target/release/keyctl Keyferry.app
+sh scripts/install_unix_controller.sh --controller Keyferry.app --mode Apply
 ```
 
-Build runners read the CPU budget from `project.toml`. For a machine-specific override, create an
-ignored `project.local.toml`, replacing `example-builder` with the local hostname:
-
-```toml
-[build.hosts.example-builder]
-cpu_percent = 75
-```
+Then open Keyferry and choose **Authorize this computer**. Builds use at most the CPU share set in
+`project.toml`.
 
 `python scripts/preview_handheld.py` renders every handheld screen on a computer from the device
 build's LVGL configuration.

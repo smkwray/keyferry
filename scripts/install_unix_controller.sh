@@ -11,8 +11,7 @@ installation=
 mode=Plan
 lan_interfaces=
 lan_arguments=
-# Bluetooth stays on by default while stick Wi-Fi authentication is unreliable (firmware defect
-# under diagnosis); --bluetooth off makes a controller Wi-Fi/Tailscale-only.
+# Bluetooth is on by default; --bluetooth off makes a controller Wi-Fi/Tailscale-only.
 bluetooth=auto
 bluetooth_explicit=false
 lan_explicit=false

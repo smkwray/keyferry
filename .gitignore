@@ -27,6 +27,19 @@ firmware/**/platformio.local.ini
 hardware/evidence/private/
 /hardware/board-manifest.toml
 
+# Kept local: not relevant to the public (if in doubt, a file stays here)
+/SECURITY.md
+/tests/README.md
+/tests/hil/README.md
+/CONTRIBUTING.md
+/config/PAIRING.md
+/config/tailscale/README.md
+/hardware/README.md
+/protocol/ble-gatt-v1.md
+/protocol/input-sequence-v2.md
+/protocol/roaming-v2.md
+/protocol/vectors/README.md
+
 # Local-only maintainer tools
 /scripts/provision_stick.py
 /scripts/provision_stick.ps1

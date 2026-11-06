@@ -167,8 +167,10 @@ A final screenshot is returned only when requested; capture failure preserves pr
 this on the human's logged-in controller desktop; it cannot route a dialog to an unattended desktop.
 A checkpoint failure never requests the dialog again or replays preceding clicks/input.
 
-Set `KEYFERRY_ROUTINE_DIR` to a directory of shared reusable routines. If it is unset, direct CLI
-calls can discover a `routines` directory in an installed `.codex`/`.agents` Keyferry skill.
+A routine does not reserve the target: another controller can send input between the commands that
+checkpoints separate, so a checkpoint is an observation, not a lock.
+
+Set `KEYFERRY_ROUTINE_DIR` to a directory of shared reusable routines.
 The existing per-user `recipes` library (or `KEYFERRY_RECIPE_DIR`) overrides shared entries by name.
 A malformed local override is reported and never falls back. Missing shared storage and invalid
 entries are explicit statuses/counts. `recipe list/inspect/validate/import/run` handles this same
@@ -189,15 +191,3 @@ Additional stable codes: `recipe.metadata`, `recipe.verification`, `recipe.param
 `recipe.routine_required`, `recipe.shared_library_unavailable`, `recipe.target_os_mismatch`,
 `recipe.checkpoint_failed`, `recipe.text_not_unique`, `recipe.owner_completion_required`,
 `params.pattern`, `params.bounds`. All are payload-free.
-
-## Design notes
-
-Routines add a shared skill layer and an explicit shared writer to the per-user import-only recipe
-library, using the existing validation/publication primitive. Target OS metadata is required because
-shortcut/navigation behavior differs by target. Checkpoints require multiple host submissions; each still uses the
-existing command-scoped daemon writer and release evidence. There is no firmware macro, persisted
-command queue or new authority. Contiguous input is deliberately one command; another controller
-can act between checkpoint-separated commands, so a checkpoint is an observation, not a global
-exclusive routine lease. Rejecting an over-limit stretch avoids changing its admission/expiry
-semantics. Shared definitions and local overrides use the same schema and executable path;
-separate routine engines, automatic input retries and saved secret substitution are rejected.

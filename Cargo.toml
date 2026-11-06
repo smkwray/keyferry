@@ -58,7 +58,7 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
-# Fast controller deploys (scripts/deploy_controller.ps1); published packages keep [profile.release].
+# Faster local controller builds; published packages keep [profile.release].
 [profile.deploy]
 inherits = "dev"
 opt-level = 1

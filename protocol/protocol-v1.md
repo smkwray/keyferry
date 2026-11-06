@@ -5,14 +5,6 @@ endpoint over an authenticated TLS stream. For the controller API and CLI usage,
 [README.md](../README.md).
 The native USB executor is an in-process firmware component, not a second protocol peer.
 
-## Design goals
-
-- bounded parsing and deterministic cross-language encoding;
-- explicit version/capability negotiation and framing-error recovery;
-- no text or keyboard-layout interpretation on the endpoint;
-- no ambiguous retry after native USB emission may have begun;
-- one portable security/execution core independent of board peripherals.
-
 ## Layering and framing
 
 The endpoint initiates an exactly pinned TLS 1.2 connection. A session is not command-capable until
@@ -347,12 +339,6 @@ max pending/offline commands            0
 max paired hosts                       8
 max Wi-Fi profiles                     8
 ```
-
-## Golden vectors
-
-`protocol/vectors/` contains semantic fields, decoded bytes, and COBS wire bytes. Current Rust and C++
-code must agree exactly. Legacy `0x10` vectors test codec continuity only and do not authorize an
-internal UART or current session message. Any semantic vector change requires explicit review.
 
 ## Volatile USB file control
 

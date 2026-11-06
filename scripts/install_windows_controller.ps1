@@ -10,7 +10,7 @@ param(
     # Omit to install the programs only; the app then authorizes this computer.
     [string]$InstallationDirectory,
     [string[]]$LanInterface = @(),
-    # On by default while stick Wi-Fi authentication is unreliable; off makes Wi-Fi/Tailscale-only.
+    # On by default; off makes the controller Wi-Fi/Tailscale-only.
     [ValidateSet('off', 'auto')]
     [string]$Bluetooth = 'auto',
     [ValidateSet('Plan', 'Apply', 'Verify')]

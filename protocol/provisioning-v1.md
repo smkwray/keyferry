@@ -9,7 +9,7 @@ transport loss, timeout, failed authentication, or terminal result consumes the 
 the staged transaction. Only one transaction can exist at a time, and data chunks must arrive at the
 exact next offset. The challenge selects exactly one payload format and reports its fixed size.
 Legacy format 1 uses the `kPayloadBytes` encoding owned by `kf_config_store`. Roaming format 2 uses
-the `kRoamingConfigPayloadBytes` encoding defined by `roaming-v2.md`. A request using any other
+the `kRoamingConfigPayloadBytes` roaming-policy encoding. A request using any other
 format or size fails before authentication or storage. The device owns generation enforcement,
 authentication, slot selection, commit markers, and readback verification.
 
@@ -89,8 +89,8 @@ the outcome.
 
 ## Claim and authority
 
-The private-bootstrap image is already claimed: its distinct recovery secret is generated
-off-device, retained in the ignored private bundle, and compiled into that development image. An
+Each board's image is built already claimed: its own recovery secret is generated off the board,
+kept in the owner's private files and compiled into that image. An
 ordinary target computer cannot establish configuration authority merely by being attached over USB.
 There is no generic first claim for an unprovisioned retail board; any such procedure (physical
 presence or a manufacturing root) must meet the same authenticated-write boundary. There is no

@@ -13,7 +13,6 @@ respective Cargo manifests and resolved in `Cargo.lock`.
 | serde_json | 1.0.151 | JSON wire encoding | MIT OR Apache-2.0 | https://crates.io/crates/serde_json/1.0.151 |
 | tokio | 1.53.1 | Async runtime, networking, channels, lifecycle | MIT | https://crates.io/crates/tokio/1.53.1 |
 | tokio-stream | 0.1.18 | Broadcast-to-SSE stream adapter | MIT | https://crates.io/crates/tokio-stream/0.1.18 |
-| tower-service | 0.3.3 | HTTP router service test driving | MIT | https://crates.io/crates/tower-service/0.3.3 |
 | uuid | 1.26.0 | UUID v7 command IDs and local token entropy | MIT OR Apache-2.0 | https://crates.io/crates/uuid/1.26.0 |
 | keyferry-layouts | workspace | Shared host-side US keyboard text validation for the pre-send preview | MIT OR Apache-2.0 | workspace crate |
 | slint | 1.17.1 | Cross-platform declarative desktop UI, software renderer, winit backend | GPL-3.0-only OR Royalty-free-2.0 OR Software-3.0 | https://crates.io/crates/slint/1.17.1 |
@@ -31,18 +30,13 @@ respective Cargo manifests and resolved in `Cargo.lock`.
 | windows | 0.62.2 | Windows BLE GATT transport for the daemon | MIT OR Apache-2.0 | https://crates.io/crates/windows/0.62.2 |
 | windows-future | 0.3.2 | Cancellation and cleanup of bounded WinRT BLE operations | MIT OR Apache-2.0 | https://crates.io/crates/windows-future/0.3.2 |
 
-The command CLI uses the Rust standard library for its small localhost HTTP/1
-client and does not speak the dongle protocol. The separate pairing tool uses
-HIDAPI only for the authenticated configuration interface.
-
 The firmware pins ESP-IDF v6.0.3 at commit
 `76f5dedd9950a3012fee8fb7d5586df21fc67802`; `firmware/esp32s3/dependencies.lock` records the IDF
 constraint. ESP-IDF is Apache-2.0 licensed; its bundled component licenses remain subject to the
 upstream manifest. Managed components come from the
 [ESP Component Registry](https://components.espressif.com) and are exactly locked, with their
 SHA-256 `component_hash`, in each image's `dependencies.lock`: `hil_endpoint/` for the sticks, and
-`boards/waveshare_amoled_1_8/` and `handheld/check/` for the AMOLED handheld. Licenses below were
-read from each component's own license file.
+`boards/waveshare_amoled_1_8/` and `handheld/check/` for the AMOLED handheld.
 
 | Component | Version | Images | Role | License |
 | --- | --- | --- | --- | --- |
@@ -64,13 +58,4 @@ read from each component's own license file.
 
 The handheld screens use LVGL's built-in Montserrat bitmap fonts (16, 20, 28 and 40 px), which
 embed glyphs from Montserrat and Font Awesome 5 Free; both fonts are under the SIL Open Font License
-1.1. LVGL lists its own bundled third-party code in `COPYRIGHTS.md` inside the component. New
-managed components must be exactly locked and added here with source, license, and integrity
-evidence.
-
-Hardware references:
-
-- Waveshare ESP32-S3-GEEK resources for the SKU and PCB revision in hand.
-- Espressif ESP32-S3 boot-mode, USB, security, partition, and tooling documentation.
-
-Documentation does not replace checking board identity and USB descriptors on the exact device.
+1.1. LVGL lists its own bundled third-party code in `COPYRIGHTS.md` inside the component.

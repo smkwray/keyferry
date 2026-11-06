@@ -844,9 +844,8 @@ fn run_command(client: &Client, args: Vec<String>) -> Result<(), ClientError> {
     }
 }
 
-/// Dictated text and action bodies are listed assets in `SECURITY.md`, which
-/// forbids putting them where the process list can expose them. They therefore
-/// arrive on stdin, never on argv.
+/// Dictated text and action bodies must never appear where the process list
+/// can expose them, so they arrive on stdin, never on argv.
 const ARGV_PAYLOAD_REFUSED: &str = "refusing to read the payload from argv: the process list and shell history expose command-line arguments. Pipe it on stdin instead, e.g. `keyctl type DEVICE < message.txt`.";
 
 fn read_payload_from_stdin() -> Result<String, ClientError> {

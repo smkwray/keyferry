@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED_PATHS = [
     "README.md",
-    "SECURITY.md",
     "protocol/protocol-v1.md",
     "protocol/keyboard-key-registry-v1.csv",
     "protocol/keyboard-sequence-v1.schema.json",

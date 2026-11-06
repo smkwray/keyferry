@@ -5,8 +5,8 @@ it as a serial port named "Keyferry Messages" (USB 303A:4014). Any program that 
 to that port can put a message on the screen; nothing needs installing.
 
 The port is display-only. It cannot type, click, read files or reach Keyferry, and the board keeps
-the last 16 messages in memory until it restarts. Anything on the computer can write to the port,
-so a message is only that computer's claim ([security notes](../../../SECURITY.md#amoled-handheld-deployment)).
+the last 16 messages in memory until it restarts. The port is unauthenticated: any program on the
+computer can write to it, including misleading prompts, so a message is only that computer's claim.
 
 ## Lines
 
