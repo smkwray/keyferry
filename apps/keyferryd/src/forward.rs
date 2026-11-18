@@ -4323,6 +4323,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "needs loopback sources 127.0.0.2-9, which macOS has only after lo0 aliases"
+    )]
     async fn refused_owner_handshakes_leave_no_address_bookkeeping() {
         let h = harness(None, FORWARDER_SECRET).await;
         let store = InstallationTlsSecretSet::load(h.root.join("holder"))
