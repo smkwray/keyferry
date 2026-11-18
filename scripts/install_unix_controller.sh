@@ -169,14 +169,29 @@ tree_hash() {
     ) | shasum -a 256 | awk '{print $1}'
 }
 
+# launchd unloads a booted-out job asynchronously while the daemon closes its stick sessions.
+# Bootstrapping again before the old job is gone fails with "5: Input/output error", so wait
+# (bounded, about 10 s) until neither the job nor the installed daemon remains.
+stop_installed_service() {
+    launchctl bootout "$launch_domain/$launch_label" 2>/dev/null || true
+    pkill -TERM -f "$installed_controller" 2>/dev/null || true
+    pkill -TERM -f "$installed_daemon" 2>/dev/null || true
+    pkill -TERM -f "$installed_ble_bridge" 2>/dev/null || true
+    stop_attempts=0
+    while [ "$stop_attempts" -lt 50 ] && {
+        launchctl print "$launch_domain/$launch_label" >/dev/null 2>&1 ||
+            pgrep -f "$installed_daemon" >/dev/null 2>&1
+    }; do
+        sleep 0.2
+        stop_attempts=$((stop_attempts + 1))
+    done
+}
+
 cleanup() {
     status=$?
     trap - EXIT HUP INT TERM
     if [ "$apply_started" = true ] && [ "$apply_succeeded" != true ]; then
-        launchctl bootout "$launch_domain/$launch_label" 2>/dev/null || true
-        pkill -TERM -f "$installed_controller" 2>/dev/null || true
-        pkill -TERM -f "$installed_daemon" 2>/dev/null || true
-        pkill -TERM -f "$installed_ble_bridge" 2>/dev/null || true
+        stop_installed_service
         [ "$installed_app" = "$HOME/Applications/Keyferry.app" ] || exit 90
         if [ "$new_app_published" = true ]; then
             rm -rf -- "$installed_app"
@@ -339,10 +354,7 @@ if [ "$mode" = Apply ]; then
     }
     apply_started=true
 
-    launchctl bootout "$launch_domain/$launch_label" 2>/dev/null || true
-    pkill -TERM -f "$installed_controller" 2>/dev/null || true
-    pkill -TERM -f "$installed_daemon" 2>/dev/null || true
-    pkill -TERM -f "$installed_ble_bridge" 2>/dev/null || true
+    stop_installed_service
     if [ -d "$installed_app" ]; then
         mv -- "$installed_app" "$transaction_rollback"
         old_app_displaced=true
