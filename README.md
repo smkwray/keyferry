@@ -151,8 +151,12 @@ the masked dialog and presses Enter (or **Send once**); Esc cancels.
 - An optional, unsaved wake step runs first: **Mouse movement** (a tiny move out and back, no click;
   needs relative mouse support) or **Mac login screen (Shift)** (a Shift tap, then a two-second
   wait). A failed or uncertain wake sends no text.
+- The prompt keeps checking the board while it is open. If a Wi-Fi board is briefly reconnecting,
+  **Send once** waits up to 10 seconds for it before sending; a board that is busy, armed or in
+  maintenance is never waited for, and nothing is sent.
 - The prompt expires after two minutes, and results close after 30 seconds. `REQUESTED` means only
   that the prompt opened, not that typing or an unlock succeeded. Nothing is retried automatically.
+  On macOS and Linux the prompt keeps running after `keyctl` exits.
 - Never put the secret in chat, arguments or stdin, and never let an agent inspect the dialog.
 
 Secure text keeps the secret out of agents, logs and files; it does not protect it from the

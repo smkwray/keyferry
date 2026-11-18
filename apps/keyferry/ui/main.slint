@@ -10,9 +10,11 @@ export component SecureTextWindow inherits Window {
     in-out property <bool> append-enter: true;
     in-out property <int> wake-mode: 0;
     in-out property <bool> accepting: true;
+    // ready: the text box has opened (stays open through reconnects); can-send: Send allowed now.
     in-out property <bool> ready: false;
+    in-out property <bool> can-send: false;
     in-out property <bool> sending: false;
-    in-out property <string> status: "Checking the authenticated route…";
+    in-out property <string> status: "Checking the stick…";
     callback send();
     callback dismiss();
     // Escape cancels before sending and closes afterwards; Enter sends once text is entered.
@@ -22,7 +24,7 @@ export component SecureTextWindow inherits Window {
                 root.dismiss();
                 return accept;
             }
-            if (event.text == Key.Return && root.accepting && root.ready && root.secret != "") {
+            if (event.text == Key.Return && root.accepting && root.can-send && root.secret != "") {
                 root.send();
                 return accept;
             }
@@ -49,7 +51,7 @@ export component SecureTextWindow inherits Window {
                     color: Theme.text-primary;
                     // Keyboard-only: the field takes focus once the route is ready; Enter sends.
                     changed enabled => { if (self.enabled) { self.focus(); } }
-                    accepted => { if (root.secret != "") { root.send(); } }
+                    accepted => { if (root.secret != "" && root.can-send) { root.send(); } }
                 }
             }
             if root.accepting: HorizontalLayout {
@@ -70,7 +72,7 @@ export component SecureTextWindow inherits Window {
                 spacing: 12px;
                 if root.accepting: Button {
                     text: "Send once";
-                    enabled: root.ready && root.secret != "";
+                    enabled: root.can-send && root.secret != "";
                     clicked => { root.send(); }
                 }
                 Button { text: root.accepting || root.sending ? "Cancel" : "Close"; clicked => { root.dismiss(); } }

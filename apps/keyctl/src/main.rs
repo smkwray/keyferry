@@ -382,22 +382,38 @@ fn secure_text_request(
         })
         .filter(|p| p.is_file())
         .ok_or("dialog.unavailable")?;
-    let mut command = keyferry_core::process::command(program);
-    command.args(["--secure-text", &device.to_string()]);
-    if let Some(wake) = wake {
-        command.args(["--wake", wake.argument()]);
-    }
-    command
-        .env("KEYFERRY_URL", url)
-        .env("KEYFERRY_TOKEN_FILE", token_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    secure_text_prompt(&program, &device, wake, url, token_file)
         .spawn()
         .map_err(|_| "dialog.unavailable")?;
     Ok(
         serde_json::json!({"device_id":device.to_string(),"outcome":"REQUESTED","input_sent":false,"wake":wake.unwrap_or(SecureTextWake::None).argument()}),
     )
+}
+
+/// The owner's prompt process. It must outlive this short CLI call: agents usually run keyctl in
+/// a shell whose whole process group ends when the call returns, which would close the dialog
+/// before the owner sees it, so on Unix it starts in its own process group.
+fn secure_text_prompt(
+    program: &Path,
+    device: &uuid::Uuid,
+    wake: Option<SecureTextWake>,
+    url: &str,
+    token_file: &Path,
+) -> std::process::Command {
+    let mut command = keyferry_core::process::command(program);
+    command.args(["--secure-text", &device.to_string()]);
+    if let Some(wake) = wake {
+        command.args(["--wake", wake.argument()]);
+    }
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command
+        .env("KEYFERRY_URL", url)
+        .env("KEYFERRY_TOKEN_FILE", token_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 fn loopback_address(endpoint: &Endpoint) -> Option<std::net::SocketAddr> {
@@ -3103,6 +3119,52 @@ fn print_help() {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_text_prompt_survives_the_callers_process_group_ending() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("keyctl-prompt-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&dir).unwrap();
+        // Stands in for the prompt binary: records its process group, then waits.
+        let program = dir.join("prompt");
+        let marker = dir.join("pgid");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nps -o pgid= -p $$ > '{}'\nsleep 5\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let device = uuid::Uuid::now_v7();
+        let mut child =
+            secure_text_prompt(&program, &device, None, DEFAULT_URL, &dir.join("token"))
+                .spawn()
+                .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !marker.exists() || fs::read_to_string(&marker).unwrap().trim().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "prompt never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let prompt_group: u32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let caller_group = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        let caller_group: u32 = String::from_utf8(caller_group.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Its own group, led by itself: ending the caller's group cannot close the prompt.
+        assert_ne!(prompt_group, caller_group);
+        assert_eq!(prompt_group, child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn secure_text_wake_arguments_are_strict_metadata() {

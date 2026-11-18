@@ -20,6 +20,11 @@ use zeroize::{Zeroize, Zeroizing};
 
 const PROMPT_LIFETIME: Duration = Duration::from_secs(120);
 const RESULT_LIFETIME: Duration = Duration::from_secs(30);
+/// Wi-Fi sticks drop and rejoin within seconds. Send waits this long for a stick that is only
+/// reconnecting (never for a busy, armed or paused one); nothing is submitted while it waits.
+const RECONNECT_GRACE: Duration = Duration::from_secs(10);
+/// The open prompt re-reads the stick this often, so one bad moment never ends the request.
+const ROUTE_POLL: Duration = Duration::from_secs(1);
 const MAX_SECRET_BYTES: usize = 256;
 
 fn sequence(text: &str, enter: bool) -> Result<Zeroizing<KeyboardSequenceV1>, &'static str> {
@@ -67,11 +72,77 @@ fn ready(device: &DeviceView, id: &str) -> bool {
         && device.active_command_id.is_none()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Route {
+    Ready,
+    /// Idle and disarmed, but its link is down: it normally rejoins within seconds.
+    Reconnecting,
+    /// Running another command, armed, paused for maintenance or not in keyboard mode.
+    Busy,
+    /// The local controller did not answer or does not list this exact stick.
+    Unavailable,
+}
+
+fn route(device: Option<&DeviceView>, id: &str) -> Route {
+    match device {
+        Some(device) if ready(device, id) => Route::Ready,
+        Some(device)
+            if device.id == id
+                && device.link != "authenticated"
+                && device.mode == "keyboard"
+                && !device.armed
+                && !device.maintenance
+                && device.active_command_id.is_none() =>
+        {
+            Route::Reconnecting
+        }
+        Some(device) if device.id == id => Route::Busy,
+        _ => Route::Unavailable,
+    }
+}
+
+fn route_status(route: Route, input_open: bool) -> &'static str {
+    match (route, input_open) {
+        (Route::Ready, _) => "Ready",
+        (Route::Reconnecting, true) => {
+            "The stick is reconnecting. Send waits up to 10 seconds for it; nothing is sent meanwhile."
+        }
+        (Route::Reconnecting, false) => {
+            "Waiting for the stick to connect. The text box opens when it is ready."
+        }
+        (Route::Busy, _) => {
+            "The stick is busy, armed or paused. Send unlocks when it is idle and disarmed."
+        }
+        (Route::Unavailable, _) => {
+            "The local controller does not list this stick right now. Still checking."
+        }
+    }
+}
+
+/// Re-checks the exact stick right before the single submission. Waits, bounded by
+/// RECONNECT_GRACE, the deadline and cancellation, only while the stick is reconnecting.
+fn await_route(client: &ApiClient, id: &str, deadline: Instant, cancelled: &AtomicBool) -> bool {
+    let grace = Instant::now() + RECONNECT_GRACE;
+    loop {
+        if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        match route(client.device(id).ok().as_ref(), id) {
+            Route::Ready => return true,
+            Route::Reconnecting if Instant::now() < grace => {
+                thread::sleep(Duration::from_millis(250));
+            }
+            _ => return false,
+        }
+    }
+}
+
 fn clear(window: &ui::SecureTextWindow) {
     window.set_secret("".into());
     // Destroy the editor, including its undo history, instead of retaining a hidden field.
     window.set_accepting(false);
     window.set_ready(false);
+    window.set_can_send(false);
 }
 
 fn finish(weak: slint::Weak<ui::SecureTextWindow>, message: String) {
@@ -90,6 +161,8 @@ fn finish(weak: slint::Weak<ui::SecureTextWindow>, message: String) {
     });
 }
 
+const ROUTE_LOST: &str = "The stick became busy or did not reconnect within 10 seconds, or the request was cancelled or expired. Nothing was sent.";
+
 fn submit_once(
     client: &ApiClient,
     id: &str,
@@ -101,10 +174,10 @@ fn submit_once(
         request.zeroize();
         return "Request expired or cancelled. Nothing was sent.".into();
     }
-    let route_ready = client.device(id).is_ok_and(|view| ready(&view, id));
+    let route_ready = await_route(client, id, deadline, cancelled);
     if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) || !route_ready {
         request.zeroize();
-        return "Route changed, cancelled, or request expired. Nothing was sent.".into();
+        return ROUTE_LOST.into();
     }
     let command_id = request.command_id.clone();
     let result = client.submit_sequence(id, request).map(Zeroizing::new);
@@ -223,10 +296,10 @@ fn submit_with_wake(
             request.zeroize();
             return "Request expired or cancelled. Nothing was sent.".into();
         }
-        let route_ready = client.device(id).is_ok_and(|view| ready(&view, id));
+        let route_ready = await_route(client, id, deadline, cancelled);
         if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) || !route_ready {
             request.zeroize();
-            return "Route changed, cancelled, or request expired. Nothing was sent.".into();
+            return ROUTE_LOST.into();
         }
         let (prelude_id, result) = match wake {
             WakeMode::Mouse => {
@@ -292,26 +365,45 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let cancelled = Arc::new(AtomicBool::new(false));
     let deadline = Instant::now() + PROMPT_LIFETIME;
 
+    // Watch the exact stick for the prompt's whole life instead of judging one instant: a Wi-Fi
+    // stick that is briefly reconnecting must not end the request before the owner types.
     let weak = window.as_weak();
     let lookup = client.clone();
     let id = device_id.clone();
+    let watching = Arc::clone(&consumed);
     thread::spawn(move || {
-        let view = lookup.device(&id).ok();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(window) = weak.upgrade() {
-                if !window.get_accepting() {
+        while !watching.load(Ordering::Acquire) && Instant::now() < deadline {
+            let view = lookup.device(&id).ok();
+            let state = route(view.as_ref(), &id);
+            let label = view.map(|device| device.label);
+            let weak = weak.clone();
+            let id = id.clone();
+            let shown = slint::invoke_from_event_loop(move || {
+                let Some(window) = weak.upgrade() else {
+                    return;
+                };
+                if !window.get_accepting() || window.get_sending() {
                     return;
                 }
-                if let Some(device) = view.filter(|device| ready(device, &id)) {
-                    window.set_destination(format!("{} · {id}", device.label).into());
+                if state == Route::Ready && !window.get_ready() {
+                    if let Some(label) = label {
+                        window.set_destination(format!("{label} · {id}").into());
+                    }
+                    // Opens the text box once; it stays open through later reconnects so no
+                    // keystroke is ever dropped mid-entry.
                     window.set_ready(true);
-                    window.set_status("Ready".into());
-                } else {
-                    clear(&window);
-                    finish(window.as_weak(), "The exact stick is unavailable, busy, or not authenticated and disarmed. Nothing was sent.".into());
                 }
+                let input_open = window.get_ready();
+                window.set_can_send(
+                    input_open && matches!(state, Route::Ready | Route::Reconnecting),
+                );
+                window.set_status(route_status(state, input_open).into());
+            });
+            if shown.is_err() {
+                return;
             }
-        });
+            thread::sleep(ROUTE_POLL);
+        }
     });
 
     let weak = window.as_weak();
@@ -321,7 +413,7 @@ pub fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if !window.get_accepting() || !window.get_ready() {
+        if !window.get_accepting() || !window.get_ready() || !window.get_can_send() {
             return;
         }
         if send_consumed.swap(true, Ordering::AcqRel) {
@@ -600,6 +692,141 @@ mod tests {
                 assert!(result.starts_with("ABORTED:"));
             } else {
                 assert!(result.contains("No text was sent"), "{scenario}: {result}");
+            }
+        }
+    }
+
+    #[test]
+    fn route_reading_separates_a_reconnecting_stick_from_a_busy_one() {
+        let view = |link: &str, armed: bool, active: Option<&str>, maintenance: bool| {
+            serde_json::from_value::<DeviceView>(serde_json::json!({
+                "id": DEVICE, "label": "LILYGO", "transport": "tls", "link": link,
+                "mode": "keyboard", "armed": armed, "maintenance": maintenance,
+                "arm_policy": "command-scoped", "active_command_id": active,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            route(Some(&view("authenticated", false, None, false)), DEVICE),
+            Route::Ready
+        );
+        for link in ["connecting", "offline"] {
+            assert_eq!(
+                route(Some(&view(link, false, None, false)), DEVICE),
+                Route::Reconnecting
+            );
+        }
+        // Another command, an armed stick or maintenance is never waited out: focus may move.
+        for busy in [
+            view("authenticated", true, None, false),
+            view("authenticated", false, Some("other-command"), false),
+            view("authenticated", false, None, true),
+            view("offline", false, Some("other-command"), false),
+        ] {
+            assert_eq!(route(Some(&busy), DEVICE), Route::Busy);
+        }
+        let other = view("authenticated", false, None, false);
+        assert_eq!(route(Some(&other), "another-stick"), Route::Unavailable);
+        assert_eq!(route(None, DEVICE), Route::Unavailable);
+    }
+
+    #[test]
+    fn send_waits_out_a_brief_reconnect_but_never_a_busy_or_absent_stick() {
+        // (scenario, GET responses before the stick is ready, deadline, expected text posts)
+        for (scenario, connecting_gets, lifetime, posts) in [
+            ("reconnects", 3, PROMPT_LIFETIME, 1),
+            ("busy", 0, PROMPT_LIFETIME, 0),
+            ("never", usize::MAX, Duration::from_millis(600), 0),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let client = ApiClient::new(
+                keyferry::api::Endpoint::from_url(&format!(
+                    "http://{}",
+                    listener.local_addr().unwrap()
+                ))
+                .unwrap(),
+                "test-token-123456",
+            )
+            .unwrap();
+            let done = Arc::new(AtomicBool::new(false));
+            let stop = Arc::clone(&done);
+            let server = thread::spawn(move || {
+                let (mut gets, mut text_posts) = (0_usize, 0);
+                let limit = Instant::now() + Duration::from_secs(8);
+                loop {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(stream) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            assert!(Instant::now() < limit, "{scenario}: client did not finish");
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut byte = [0];
+                    while !bytes.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        bytes.push(byte[0]);
+                    }
+                    let headers = String::from_utf8(bytes).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let response = if headers.starts_with(&format!("GET /v1/devices/{DEVICE} ")) {
+                        gets += 1;
+                        let link = if gets > connecting_gets { "authenticated" } else { "connecting" };
+                        let active = (scenario == "busy").then_some("other-command");
+                        serde_json::json!({"id":DEVICE,"label":"LILYGO","transport":"tls","link":link,"mode":"keyboard","armed":false,"arm_policy":"command-scoped","active_command_id":active})
+                    } else {
+                        assert!(headers.starts_with(&format!("POST /v1/devices/{DEVICE}/sequences ")), "{scenario}");
+                        assert!(gets > connecting_gets, "{scenario}: sent before the stick was ready");
+                        text_posts += 1;
+                        let request: KeyboardSequenceV1 = serde_json::from_slice(&body).unwrap();
+                        serde_json::json!({"device_id":DEVICE,"command_id":request.command_id,"outcome":"EMITTED"})
+                    }
+                    .to_string();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+                }
+                assert_eq!(text_posts, posts, "{scenario}");
+            });
+            let started = Instant::now();
+            let mut request = sequence("private-fixture", true).unwrap();
+            let result = submit_once(
+                &client,
+                DEVICE,
+                &mut request,
+                Instant::now() + lifetime,
+                &AtomicBool::new(false),
+            );
+            let elapsed = started.elapsed();
+            done.store(true, Ordering::Release);
+            server.join().unwrap();
+            assert!(!result.contains("private-fixture"), "{scenario}");
+            assert!(
+                matches!(&request.actions[0], SequenceAction::Text { value, .. } if value.is_empty())
+            );
+            if posts == 1 {
+                assert!(result.starts_with("EMITTED:"), "{scenario}: {result}");
+            } else {
+                assert!(result.contains("Nothing was sent"), "{scenario}: {result}");
+                assert!(
+                    elapsed < Duration::from_secs(2),
+                    "{scenario}: waited {elapsed:?}"
+                );
             }
         }
     }
