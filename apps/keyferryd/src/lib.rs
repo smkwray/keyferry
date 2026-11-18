@@ -58,6 +58,8 @@ mod ble;
 mod capture;
 mod discovery;
 mod forward;
+mod models;
+pub use models::UNKNOWN_MODEL;
 #[doc(hidden)]
 pub mod logging;
 mod tailnet;
@@ -2013,6 +2015,7 @@ struct DaemonInner {
     owner_control_listener: Mutex<OwnerControlListenerState>,
     forwarder: std::sync::OnceLock<Arc<forward::Forwarder>>,
     capture: Arc<capture::Service>,
+    models: models::ModelMemory,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2391,6 +2394,7 @@ impl Daemon {
             owner_control_listener: Mutex::new(OwnerControlListenerState::default()),
             forwarder: std::sync::OnceLock::new(),
             capture: Arc::new(capture::Service::default()),
+            models: models::ModelMemory::default(),
         }));
         for (runtime, transport, work_rx) in pending {
             let weak_daemon = Arc::downgrade(&daemon.0);
@@ -3422,10 +3426,33 @@ impl Daemon {
 
     fn device_view(&self, id: &str) -> Result<DeviceView, ApiError> {
         let handle = self.lookup(id)?;
-        let device = handle.0.lock().expect("device runtime lock");
-        let mut view = view_from_runtime(id, &device, self.current_link_path(id));
+        let mut view = {
+            let device = handle.0.lock().expect("device runtime lock");
+            view_from_runtime(id, &device, self.current_link_path(id))
+        };
         view.firmware = self.current_firmware(id);
+        self.name_view(&mut view);
         Ok(view)
+    }
+
+    /// Names a stick by its model: the board it reports (locally or through its holder), else
+    /// the board it last reported here; a never-seen stick keeps its configured label.
+    fn name_view(&self, view: &mut DeviceView) {
+        let live = view
+            .firmware
+            .as_ref()
+            .map(|firmware| firmware.board_compatibility_id);
+        if let Some(model) = self.0.models.name(&view.id, live) {
+            model.clone_into(&mut view.label);
+        }
+    }
+
+    /// Remember each stick's last reported board beside the local token, so an offline stick
+    /// keeps its model name after a restart.
+    pub fn remember_device_models(&self) {
+        self.0
+            .models
+            .persist_at(default_token_path().with_file_name(models::FILE_NAME));
     }
 
     fn current_link_path(&self, device_id: &str) -> Option<String> {
@@ -8788,6 +8815,58 @@ mod tests {
             assert_eq!(error["error"], "chord.duplicate_key");
         }
         assert_eq!(transport.control_request_counts(), (1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn sticks_are_named_by_reported_model_and_keep_it_while_offline() {
+        let gateway_transport = TlsTransport::new(TlsCredentials::new(
+            HostIdentity::generate().unwrap(),
+            [0x22; 16],
+            [0x77; 32],
+        ))
+        .unwrap();
+        let daemon = Daemon::with_device_transport_and_gateway(
+            MemoryTokenStore::new("test-token-123456"),
+            SIMULATOR_DEVICE_ID.to_owned(),
+            UNKNOWN_MODEL.to_owned(),
+            Arc::new(SimulatorTransport::default()),
+            Some(GatewayAuthority {
+                transport: gateway_transport.clone(),
+                daemon_boot_id: [0x33; 16],
+            }),
+        )
+        .unwrap();
+        let mut router = daemon.router();
+        let uri = format!("/v1/devices/{SIMULATOR_DEVICE_ID}");
+        // Never seen: an honest "Unknown model", never an id fragment posing as a name.
+        let (_, device) = call_json(&mut router, "GET", uri.clone(), None).await;
+        assert_eq!(device["label"], UNKNOWN_MODEL);
+
+        gateway_transport.set_test_session_snapshot(tls::TlsSessionSnapshot {
+            link_path: tls::TlsLinkPath::Wifi,
+            protocol_session_id: [0x44; 16],
+            firmware_identity: Some(keyferry_protocol::firmware_identity::FirmwareIdentityV1 {
+                device_capability_mask: keyferry_protocol::capability::KEYBOARD
+                    | keyferry_protocol::capability::FIRMWARE_IDENTITY_V1,
+                protocol_min_minor: 0,
+                protocol_max_minor: 0,
+                release: "0.3.0-pointer.10".to_owned(),
+                board_compatibility_id:
+                    keyferry_protocol::firmware_identity::BOARD_LILYGO_T_DONGLE_S3,
+                elf_sha256: [0x5a; 32],
+            }),
+        });
+        // Every picker reads these two endpoints: both name the stick by its model.
+        let (_, devices) = call_json(&mut router, "GET", "/v1/devices".to_owned(), None).await;
+        assert_eq!(devices["devices"][0]["label"], "LILYGO");
+        let (_, device) = call_json(&mut router, "GET", uri.clone(), None).await;
+        assert_eq!(device["label"], "LILYGO");
+
+        // A Wi-Fi drop removes the live report; the stick keeps its model name.
+        gateway_transport.clear_test_session_snapshot();
+        let (_, device) = call_json(&mut router, "GET", uri, None).await;
+        assert!(device.get("firmware").is_none());
+        assert_eq!(device["label"], "LILYGO");
     }
 
     #[tokio::test]

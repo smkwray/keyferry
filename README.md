@@ -119,9 +119,13 @@ starts at login, keeps running when the app closes, and is started by `keyctl` w
 
 - **Send** shows the board's status, a text box and a hotkey field. Send when it shows **Ready**;
   **Stop** or Esc cancels active work. The text box and hotkey field clear after sending.
-- **Devices** lists your boards. Select one to open **Connection / Wi-Fi**, **Keyboard & display**
-  or **USB maintenance**; each page acts only on that board and shows its device ID. USB
-  maintenance needs that board plugged into this computer and the owner-kit password.
+- **Devices** lists your boards by model (**LILYGO**, **Waveshare GEEK**, **AtomS3 Lite**,
+  **Waveshare AMOLED**), as each board reports it, with the start of its device ID beside it. A
+  board keeps its model name while offline; one this computer has never seen online shows
+  **Unknown model**. The same name appears in the secure-text dialog, `keyctl devices` and the
+  agent tools. Select one to open **Connection / Wi-Fi**, **Keyboard & display** or **USB
+  maintenance**; each page acts only on that board and shows its device ID. USB maintenance needs
+  that board plugged into this computer and the owner-kit password.
 - **Bluetooth keyboard.** Under **Keyboard & display**, choose **Bluetooth keyboard**; the board
   restarts and you pair it from the target's Bluetooth settings. **USB keyboard** switches back.
 - **Screen on / Screen off** (on supported firmware) applies without a restart and persists across

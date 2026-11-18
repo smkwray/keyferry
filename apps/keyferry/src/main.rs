@@ -3787,10 +3787,13 @@ fn selected_device_matches(selection: &Arc<Mutex<Option<String>>>, device_id: &s
     selection.lock().expect("selected device lock").as_deref() == Some(device_id)
 }
 
+/// A pinned stick the controller no longer lists has no model report to name it by.
+const UNLISTED_STICK: &str = "Selected stick (not listed)";
+
 fn offline_device_item(device_id: &str) -> ui::DeviceListItem {
     ui::DeviceListItem {
         id: device_id.into(),
-        title: format!("Keyferry {}", short_device_id(device_id)).into(),
+        title: UNLISTED_STICK.into(),
         subtitle: format!(
             "{} · Offline · Pinned selection",
             short_device_id(device_id)
@@ -3802,7 +3805,7 @@ fn offline_device_item(device_id: &str) -> ui::DeviceListItem {
 fn show_selected_device_offline(window: &ui::MainWindow, device_id: &str, details: &str) {
     note_device_connected(false);
     clear_control_state(window);
-    window.set_selected_device(format!("Keyferry {}", short_device_id(device_id)).into());
+    window.set_selected_device(UNLISTED_STICK.into());
     window.set_selected_device_id(device_id.into());
     window.set_device_details(details.into());
     window.set_device_fields(ModelRc::new(VecModel::from(vec![detail_row(

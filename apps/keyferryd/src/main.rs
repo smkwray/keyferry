@@ -178,13 +178,14 @@ async fn run(
                 let device_id = uuid::Uuid::from_bytes(store.device_id());
                 (
                     device_id.to_string(),
-                    format!("Keyferry {}", &device_id.simple().to_string()[..8]),
+                    keyferryd::UNKNOWN_MODEL.to_owned(),
                     transport,
                 )
             })
             .collect();
         let daemon =
             keyferryd::Daemon::with_tls_transports(keyferryd::FileTokenStore::default(), devices)?;
+        daemon.remember_device_models();
         daemon.enable_tailnet_forwarding(&secret_stores)?;
         keyferryd::daemon_log!(
             "keyferryd ready for {} owner-authorized Keyferry device(s)",

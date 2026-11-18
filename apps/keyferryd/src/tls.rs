@@ -854,6 +854,15 @@ impl TlsTransport {
     }
 
     #[cfg(test)]
+    pub(crate) fn clear_test_session_snapshot(&self) {
+        *self
+            .inner
+            .session_snapshot
+            .write()
+            .expect("TLS session snapshot lock") = None;
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_test_session_snapshot(&self, snapshot: TlsSessionSnapshot) {
         *self
             .inner

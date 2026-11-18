@@ -1031,11 +1031,13 @@ impl Forwarder {
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
                 self.overlay(&mut views).await;
+                views.iter_mut().for_each(|view| daemon.name_view(view));
                 Some(Json(DevicesResponse { devices: views }).into_response())
             }
             Op::Get { device } => {
                 let mut view = daemon.device_view(&device).ok()?;
                 self.overlay(std::slice::from_mut(&mut view)).await;
+                daemon.name_view(&mut view);
                 Some(Json(view).into_response())
             }
             Op::File {
@@ -1268,6 +1270,7 @@ impl Forwarder {
                     match (holder, daemon.device_view(device)) {
                         (Some(holder), Ok(mut view)) => {
                             apply_remote(&mut view, &route, &holder);
+                            daemon.name_view(&mut view);
                             if let Some(entry) = self.state().holders.get_mut(device) {
                                 if entry.route == route {
                                     entry.view = holder;
@@ -3138,6 +3141,49 @@ mod tests {
         }
         transport.begin_maintenance().await.unwrap();
         assert_eq!(device.await.unwrap(), 10);
+    }
+
+    #[tokio::test]
+    async fn relayed_stick_is_named_by_the_model_its_holder_reports() {
+        let harness = harness(None, FORWARDER_SECRET).await;
+        let device = device_id();
+        // The owner picks sticks by name under time pressure: a stick reached through another
+        // controller must carry the model its holder reads from the stick, not an id fragment.
+        harness
+            .holder
+            .gateway(&device)
+            .unwrap()
+            .transport
+            .set_test_session_snapshot(TlsSessionSnapshot {
+                link_path: TlsLinkPath::Wifi,
+                protocol_session_id: SESSION,
+                firmware_identity: Some(keyferry_protocol::firmware_identity::FirmwareIdentityV1 {
+                    device_capability_mask: keyferry_protocol::capability::KEYBOARD
+                        | keyferry_protocol::capability::FIRMWARE_IDENTITY_V1,
+                    protocol_min_minor: 0,
+                    protocol_max_minor: 0,
+                    release: "0.3.0-pointer.10".to_owned(),
+                    board_compatibility_id:
+                        keyferry_protocol::firmware_identity::BOARD_LILYGO_T_DONGLE_S3,
+                    elf_sha256: [0x5a; 32],
+                }),
+            });
+
+        let (status, devices) = call(&harness.forwarder, "GET", "/v1/devices", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let view = &devices["devices"][0];
+        assert_eq!(view["link_path"], TAILNET_LINK_PATH);
+        assert_eq!(view["via"], "holder-host");
+        assert_eq!(view["label"], "LILYGO");
+        let (status, view) = call(
+            &harness.forwarder,
+            "GET",
+            &format!("/v1/devices/{device}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["label"], "LILYGO");
     }
 
     #[tokio::test]

@@ -9,6 +9,21 @@ pub const BOARD_M5STACK_ATOMS3_LITE: u32 = 3;
 pub const BOARD_WAVESHARE_AMOLED_1_8: u32 = 4;
 pub const DIGEST_ESP_APP_ELF_SHA256: u8 = 1;
 
+/// The owner-facing model name of each registered board, the only board registry.
+///
+/// Stick names everywhere (app, secure text, `keyctl`, MCP) come from this, so the name says
+/// which physical board it is. An unregistered id has no name and fails identity decoding.
+#[must_use]
+pub const fn board_model_name(board_compatibility_id: u32) -> Option<&'static str> {
+    match board_compatibility_id {
+        BOARD_WAVESHARE_GEEK_V1_1_REFERENCE => Some("Waveshare GEEK"),
+        BOARD_LILYGO_T_DONGLE_S3 => Some("LILYGO"),
+        BOARD_M5STACK_ATOMS3_LITE => Some("AtomS3 Lite"),
+        BOARD_WAVESHARE_AMOLED_1_8 => Some("Waveshare AMOLED"),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FirmwareIdentityV1 {
     pub device_capability_mask: u32,
@@ -93,13 +108,7 @@ pub fn decode_v1(payload: &[u8]) -> Result<FirmwareIdentityV1, FirmwareIdentityE
 
     let board_compatibility_id =
         u32::from_le_bytes(payload[40..44].try_into().expect("exact slice"));
-    if !matches!(
-        board_compatibility_id,
-        BOARD_WAVESHARE_GEEK_V1_1_REFERENCE
-            | BOARD_LILYGO_T_DONGLE_S3
-            | BOARD_M5STACK_ATOMS3_LITE
-            | BOARD_WAVESHARE_AMOLED_1_8
-    ) {
+    if board_model_name(board_compatibility_id).is_none() {
         return Err(FirmwareIdentityError::Board);
     }
     if payload[44] != DIGEST_ESP_APP_ELF_SHA256 {
@@ -158,6 +167,25 @@ mod tests {
         candidate[8..40].fill(0);
         candidate[8..8 + release.len()].copy_from_slice(release);
         assert_eq!(decode_v1(&candidate).unwrap().release, "0.0.0-probe.mem");
+    }
+
+    #[test]
+    fn every_registered_board_has_a_distinct_model_name_the_owner_recognises() {
+        let names = [
+            (BOARD_WAVESHARE_GEEK_V1_1_REFERENCE, "Waveshare GEEK"),
+            (BOARD_LILYGO_T_DONGLE_S3, "LILYGO"),
+            (BOARD_M5STACK_ATOMS3_LITE, "AtomS3 Lite"),
+            (BOARD_WAVESHARE_AMOLED_1_8, "Waveshare AMOLED"),
+        ];
+        for (board, name) in names {
+            assert_eq!(board_model_name(board), Some(name));
+        }
+        let mut unique = names.map(|(_, name)| name).to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len());
+        assert_eq!(board_model_name(0), None);
+        assert_eq!(board_model_name(5), None);
     }
 
     #[test]
