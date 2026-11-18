@@ -59,9 +59,12 @@ const MAX_WIRE_FRAME: usize = MAX_DECODED_FRAME + 4;
 const COMMAND_KIND_EXECUTE: u8 = 0x01;
 const COMMAND_KIND_CANCEL: u8 = 0x02;
 const COMMAND_KIND_RELEASE_ALL: u8 = 0x03;
-const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(3);
-const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
-const TCP_KEEPALIVE_RETRIES: u32 = 3;
+// Dead-stick detection: about 15 s of total silence (5 s idle, then 5 probes 2 s apart). A stick
+// on a weak Wi-Fi link can stall for several seconds; a shorter budget turns each stall into a
+// session drop that refuses input. It stays within half the stick's own HOST_LEASE_MS.
+const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(5);
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2);
+const TCP_KEEPALIVE_RETRIES: u32 = 5;
 const AUTHENTICATION_TIMEOUT: Duration =
     Duration::from_millis(keyferry_protocol::ble_transport::AUTHENTICATION_TIMEOUT_MS as u64);
 const MAX_AUTHENTICATION_CANDIDATES: usize = 2;
@@ -6850,8 +6853,34 @@ pub(crate) mod tests {
             .await
             .expect("accept with keepalive");
 
-        assert!(SockRef::from(&server).keepalive().expect("read keepalive"));
+        let socket = SockRef::from(&server);
+        assert!(socket.keepalive().expect("read keepalive"));
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert_eq!(socket.tcp_keepalive_time().unwrap(), TCP_KEEPALIVE_IDLE);
+            assert_eq!(
+                socket.tcp_keepalive_interval().unwrap(),
+                TCP_KEEPALIVE_INTERVAL
+            );
+            assert_eq!(
+                socket.tcp_keepalive_retries().unwrap(),
+                TCP_KEEPALIVE_RETRIES
+            );
+        }
         drop(client);
+    }
+
+    #[test]
+    fn dead_stick_detection_rides_out_wifi_stalls_but_beats_the_device_lease() {
+        let silence = TCP_KEEPALIVE_IDLE + TCP_KEEPALIVE_INTERVAL * TCP_KEEPALIVE_RETRIES;
+        // Shorter than ~12 s and multi-second Wi-Fi stalls on a weak link drop live sessions.
+        assert!(silence >= Duration::from_secs(12), "{silence:?}");
+        // Longer than half the lease and the host would keep a dead session the stick has
+        // already given up on.
+        assert!(
+            silence <= Duration::from_millis(u64::from(HOST_LEASE_MS) / 2),
+            "{silence:?}"
+        );
     }
 
     #[tokio::test]
