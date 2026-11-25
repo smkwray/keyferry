@@ -1,8 +1,8 @@
 # HID Bridge Protocol v1
 
 This document is normative for application frames carried between `keyferryd` and one ESP32-S3
-endpoint over an authenticated TLS stream. For the controller API and CLI usage, see
-[README.md](../README.md).
+endpoint over an authenticated TLS stream. For command-line usage, see the
+[command-line reference](../apps/keyctl/README.md).
 The native USB executor is an in-process firmware component, not a second protocol peer.
 
 ## Layering and framing

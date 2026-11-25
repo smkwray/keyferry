@@ -125,8 +125,8 @@ MCP clients and model providers can retain tool arguments (including typed text 
 results and images in their own conversations. Keyferry cannot erase or prevent that.
 
 OCR runs on the capture controller with its local Windows.Media.Ocr language packs, with no cloud
-service or downloaded model. An agent on macOS or Linux can use OCR from a Windows capture
-controller; capture controllers on macOS or Linux report `ocr.unsupported_platform`. A black or
+service or downloaded model. An agent on a macOS controller can use OCR from a Windows capture
+controller; a macOS capture controller reports `ocr.unsupported_platform`. A black or
 blue no-signal frame is a valid screenshot and may count as stable, but it does not show the
 target. Agent control is not yet tested on every firmware and target operating system combination.
 
